@@ -13,6 +13,7 @@ public class BrowserSession {
     private BrowserMode mode = BrowserMode.ISOLATED;
     private String browserUrl;
     private String lastNavigatedUrl;
+    private String currentPageId;
     private final Set<String> agentOpenedTabs = new LinkedHashSet<>();
 
     public synchronized BrowserMode mode() {
@@ -27,10 +28,15 @@ public class BrowserSession {
         return lastNavigatedUrl;
     }
 
+    public synchronized String currentPageId() {
+        return currentPageId;
+    }
+
     public synchronized void switchToIsolated() {
         mode = BrowserMode.ISOLATED;
         browserUrl = null;
         lastNavigatedUrl = null;
+        currentPageId = null;
         agentOpenedTabs.clear();
     }
 
@@ -38,6 +44,7 @@ public class BrowserSession {
         mode = BrowserMode.SHARED;
         this.browserUrl = browserUrl;
         lastNavigatedUrl = null;
+        currentPageId = null;
         agentOpenedTabs.clear();
     }
 
@@ -50,11 +57,37 @@ public class BrowserSession {
     public synchronized void recordOpenedTab(String pageId) {
         if (pageId != null && !pageId.isBlank()) {
             agentOpenedTabs.add(pageId);
+            currentPageId = pageId;
+        }
+    }
+
+    public synchronized void selectTab(String pageId) {
+        if (pageId != null && agentOpenedTabs.contains(pageId)) {
+            currentPageId = pageId;
+        }
+    }
+
+    public synchronized void clearCurrentPage() {
+        currentPageId = null;
+        lastNavigatedUrl = null;
+    }
+
+    public synchronized void forgetTab(String pageId) {
+        if (pageId == null || pageId.isBlank()) {
+            return;
+        }
+        agentOpenedTabs.remove(pageId);
+        if (pageId.equals(currentPageId)) {
+            clearCurrentPage();
         }
     }
 
     public synchronized boolean isAgentOpenedTab(String pageId) {
         return pageId != null && agentOpenedTabs.contains(pageId);
+    }
+
+    public synchronized boolean hasAgentOwnedCurrentPage() {
+        return currentPageId != null && agentOpenedTabs.contains(currentPageId);
     }
 
     public synchronized Set<String> agentOpenedTabs() {
@@ -63,5 +96,6 @@ public class BrowserSession {
 
     public synchronized void clearAgentOpenedTabs() {
         agentOpenedTabs.clear();
+        currentPageId = null;
     }
 }

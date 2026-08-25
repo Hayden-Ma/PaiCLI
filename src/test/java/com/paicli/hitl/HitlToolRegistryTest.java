@@ -171,6 +171,7 @@ class HitlToolRegistryTest {
         Files.writeString(rules, "*://example.com/admin/*\n");
         BrowserSession session = new BrowserSession();
         session.switchToShared("http://127.0.0.1:9222");
+        session.recordOpenedTab("page-1");
         session.rememberNavigation("https://example.com/admin/users");
         StubHandler stub = new StubHandler(req -> ApprovalResult.approve());
         stub.approveServer("chrome-devtools");

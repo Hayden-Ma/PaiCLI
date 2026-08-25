@@ -489,7 +489,7 @@ public class McpServerManager implements AutoCloseable {
         try {
             return client.callToolOutput(descriptor.name(), argumentsJson);
         } catch (Exception e) {
-            return ToolOutput.text("MCP 工具调用失败 (" + descriptor.serverName() + "/" + descriptor.name() + "): "
+            return ToolOutput.failure("MCP 工具调用失败 (" + descriptor.serverName() + "/" + descriptor.name() + "): "
                     + e.getMessage());
         }
     }

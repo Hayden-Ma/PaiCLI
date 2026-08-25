@@ -2,10 +2,12 @@ package com.paicli.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.history.ConversationLedger;
 import com.paicli.llm.LlmClient;
 import com.paicli.memory.MemoryManager;
 import com.paicli.runtime.CancellationContext;
 import com.paicli.tool.ToolRegistry;
+import com.paicli.tool.TurnToolPolicy;
 import com.paicli.util.AnsiStyle;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 /**
  * Agent 编排器 - Multi-Agent 系统的"主"
@@ -51,6 +54,7 @@ public class AgentOrchestrator {
     private final MemoryManager memoryManager;
     private final ToolRegistry toolRegistry;
     private final PrintStream out;
+    private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private Supplier<String> externalContextSupplier = () -> "";
 
     // 执行步骤的数据结构（package-private 供测试访问）
@@ -132,13 +136,41 @@ public class AgentOrchestrator {
         reviewer.setSkillContextBuffer(skillContextBuffer);
     }
 
+    public void setConversationLedger(ConversationLedger conversationLedger) {
+        this.conversationLedger = conversationLedger == null
+                ? ConversationLedger.disabled()
+                : conversationLedger;
+        planner.setConversationLedger(this.conversationLedger);
+        workers.forEach(worker -> worker.setConversationLedger(this.conversationLedger));
+        reviewer.setConversationLedger(this.conversationLedger);
+    }
+
     /**
      * 运行多 Agent 协作任务
      */
     public String run(String userInput) {
+        return run(userInput, userInput);
+    }
+
+    /** Use submittedUserInput for policy decisions and userInput for expanded task context. */
+    public String run(String userInput, String submittedUserInput) {
         log.info("Multi-Agent run started: inputLength={}", userInput == null ? 0 : userInput.length());
+        TurnToolPolicy turnToolPolicy = TurnToolPolicy.fromUserInput(
+                submittedUserInput,
+                toolRegistry.isSharedBrowserSession(),
+                toolRegistry.hasAgentOwnedCurrentBrowserPage());
+        planner.setTurnToolPolicy(turnToolPolicy);
+        workers.forEach(worker -> worker.setTurnToolPolicy(turnToolPolicy));
+        reviewer.setTurnToolPolicy(turnToolPolicy);
         memoryManager.addUserMessage(userInput);
+        conversationLedger.appendMessage(
+                "team",
+                "orchestrator",
+                "user_input",
+                LlmClient.Message.user(userInput));
         if (CancellationContext.isCancelled()) {
+            conversationLedger.appendEvent(
+                    "run_cancelled", "team", "orchestrator", "before_planning", Map.of());
             return "⏹️ 已取消当前多 Agent 任务。";
         }
 
@@ -173,6 +205,7 @@ public class AgentOrchestrator {
         // 3. 执行阶段：按依赖顺序分配给执行者
         out.println(AnsiStyle.heading("⚡ 第二阶段：执行"));
         Map<String, Integer> retryCount = new ConcurrentHashMap<>();
+        Map<String, TurnToolPolicy.TrustedUrlContext> stepTrustedUrls = new ConcurrentHashMap<>();
         int singleStepCursor = 0;
         int batchIndex = 0;
 
@@ -191,14 +224,18 @@ public class AgentOrchestrator {
                 ExecutionStep step = executable.get(0);
                 SubAgent worker = workers.get(singleStepCursor % workers.size());
                 singleStepCursor++;
-                String context = buildStepContext(steps, step);
-                runStep(step, steps, retryCount, worker, reviewer, context, out);
+                List<TurnToolPolicy.TrustedUrlContext> dependencyUrls = dependencyTrustedUrls(
+                        step, stepTrustedUrls);
+                TurnToolPolicy stepPolicy = turnToolPolicy.forkWithTrustedUrls(dependencyUrls);
+                String context = buildStepContext(steps, step, dependencyUrls);
+                runStep(step, steps, retryCount, worker, reviewer, context, out,
+                        stepPolicy, stepTrustedUrls);
                 worker.clearHistory();
             } else {
                 // 多步批次：真正并行执行，每步用独立的 PrintStream 缓冲，完成后按 step_id 顺序 flush
                 out.println("⚡ 批次 #" + batchIndex + "：" + executable.size()
                         + " 个独立步骤并行执行（最多 " + workers.size() + " 个并发 Worker）\n");
-                runBatchParallel(executable, steps, retryCount);
+                runBatchParallel(executable, steps, retryCount, turnToolPolicy, stepTrustedUrls);
             }
         }
 
@@ -212,6 +249,11 @@ public class AgentOrchestrator {
         // 6. 汇总结果
         String finalResult = buildFinalResult(steps);
         memoryManager.addAssistantMessage("[多Agent结果] " + finalResult);
+        conversationLedger.appendMessage(
+                "team",
+                "orchestrator",
+                "run_result",
+                LlmClient.Message.assistant(finalResult));
 
         return finalResult;
     }
@@ -408,7 +450,9 @@ public class AgentOrchestrator {
      * 流式输出写入步骤本地的 ByteArrayOutputStream；所有任务完成后按 step_id 顺序将缓冲区 flush 到 stdout。
      */
     private void runBatchParallel(List<ExecutionStep> batch, List<ExecutionStep> steps,
-                                  Map<String, Integer> retryCount) {
+                                  Map<String, Integer> retryCount,
+                                  TurnToolPolicy turnToolPolicy,
+                                  Map<String, TurnToolPolicy.TrustedUrlContext> stepTrustedUrls) {
         int parallelism = Math.min(batch.size(), workers.size());
         ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
             Thread t = new Thread(r, "paicli-multi-agent");
@@ -423,15 +467,20 @@ public class AgentOrchestrator {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             buffers.put(step.id(), baos);
             PrintStream stepOut = new PrintStream(baos, true, StandardCharsets.UTF_8);
-            String context = buildStepContext(steps, step);
+            List<TurnToolPolicy.TrustedUrlContext> dependencyUrls = dependencyTrustedUrls(
+                    step, stepTrustedUrls);
+            TurnToolPolicy stepPolicy = turnToolPolicy.forkWithTrustedUrls(dependencyUrls);
+            String context = buildStepContext(steps, step, dependencyUrls);
 
             futures.add(executor.submit(() -> {
                 SubAgent worker = null;
                 SubAgent localReviewer = new SubAgent(
                         "reviewer-" + step.id(), AgentRole.REVIEWER, llmClient, toolRegistry);
+                localReviewer.setConversationLedger(conversationLedger);
                 try {
                     worker = workerPool.take();
-                    runStep(step, steps, retryCount, worker, localReviewer, context, stepOut);
+                    runStep(step, steps, retryCount, worker, localReviewer, context, stepOut,
+                            stepPolicy, stepTrustedUrls);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     updateStep(steps, step.id(), step.withFailed("并行执行被中断"));
@@ -481,7 +530,21 @@ public class AgentOrchestrator {
     private void runStep(ExecutionStep step, List<ExecutionStep> steps,
                          Map<String, Integer> retryCount,
                          SubAgent worker, SubAgent reviewer, String context,
-                         PrintStream out) {
+                         PrintStream out, TurnToolPolicy stepPolicy,
+                         Map<String, TurnToolPolicy.TrustedUrlContext> stepTrustedUrls) {
+        try {
+            runStepWithPolicy(step, steps, retryCount, worker, reviewer, context, out,
+                    stepPolicy, stepTrustedUrls);
+        } finally {
+            stepPolicy.releaseBrowserLease();
+        }
+    }
+
+    private void runStepWithPolicy(ExecutionStep step, List<ExecutionStep> steps,
+                                   Map<String, Integer> retryCount,
+                                   SubAgent worker, SubAgent reviewer, String context,
+                                   PrintStream out, TurnToolPolicy stepPolicy,
+                                   Map<String, TurnToolPolicy.TrustedUrlContext> stepTrustedUrls) {
         out.println("🛠️ " + worker.getName() + " 执行步骤 [" + step.id() + "]: " + step.description());
         if (CancellationContext.isCancelled()) {
             updateStep(steps, step.id(), step.withFailed("用户取消"));
@@ -490,7 +553,7 @@ public class AgentOrchestrator {
         }
 
         AgentMessage taskMsg = AgentMessage.task("orchestrator", step.description());
-        AgentMessage result = worker.executeWithContext(taskMsg, context, out);
+        AgentMessage result = worker.executeWithContext(taskMsg, context, out, stepPolicy);
         if (CancellationContext.isCancelled()) {
             updateStep(steps, step.id(), step.withFailed("用户取消"));
             out.println("⏹️ 步骤 [" + step.id() + "] 已取消\n");
@@ -515,7 +578,7 @@ public class AgentOrchestrator {
         if (reviewResult.type() == AgentMessage.Type.ERROR) {
             log.warn("Reviewer failed for step {}: {}", step.id(), reviewResult.content());
             out.println("⚠️ 步骤 [" + step.id() + "] 审查阶段 LLM 调用失败，保留当前执行结果\n");
-            updateStep(steps, step.id(), step.withResult(result.content()));
+            markStepCompleted(steps, step, result.content(), stepPolicy, stepTrustedUrls);
             return;
         }
 
@@ -523,7 +586,7 @@ public class AgentOrchestrator {
         String acceptedResult = result.content();
 
         if (approved) {
-            updateStep(steps, step.id(), step.withResult(acceptedResult));
+            markStepCompleted(steps, step, acceptedResult, stepPolicy, stepTrustedUrls);
             out.println("✅ 步骤 [" + step.id() + "] 审查通过\n");
             return;
         }
@@ -539,7 +602,8 @@ public class AgentOrchestrator {
             out.println("   反馈: " + issues + "\n");
 
             String feedbackContext = context + "\n\n之前的执行结果被审查拒绝，原因：\n" + issues;
-            AgentMessage retryResult = worker.executeWithContext(taskMsg, feedbackContext, out);
+            AgentMessage retryResult = worker.executeWithContext(
+                    taskMsg, feedbackContext, out, stepPolicy);
             if (retryResult.type() == AgentMessage.Type.ERROR) {
                 log.warn("Step {} retry {} failed at LLM layer: {}", step.id(), retries, retryResult.content());
                 issues = "重试时 LLM 调用失败：" + retryResult.content();
@@ -569,7 +633,7 @@ public class AgentOrchestrator {
             issues = parseReviewIssues(retryReview.content());
         }
 
-        updateStep(steps, step.id(), step.withResult(acceptedResult));
+        markStepCompleted(steps, step, acceptedResult, stepPolicy, stepTrustedUrls);
         if (approved) {
             out.println("✅ 步骤 [" + step.id() + "] 重试后审查通过\n");
         } else {
@@ -577,7 +641,8 @@ public class AgentOrchestrator {
         }
     }
 
-    private String buildStepContext(List<ExecutionStep> steps, ExecutionStep currentStep) {
+    private String buildStepContext(List<ExecutionStep> steps, ExecutionStep currentStep,
+                                    List<TurnToolPolicy.TrustedUrlContext> dependencyUrls) {
         StringBuilder context = new StringBuilder();
         context.append("总任务上下文：\n");
 
@@ -595,7 +660,34 @@ public class AgentOrchestrator {
             }
         }
 
+        Set<String> trustedDependencyUrls = dependencyUrls.stream()
+                .flatMap(contextItem -> contextItem.urls().stream())
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        if (!trustedDependencyUrls.isEmpty()) {
+            context.append("依赖分支经 web_search 验证的 URL（可供当前步骤抓取/导航）：\n");
+            trustedDependencyUrls.forEach(url -> context.append("- ").append(url).append("\n"));
+            context.append("\n");
+        }
+
         return context.toString();
+    }
+
+    private static List<TurnToolPolicy.TrustedUrlContext> dependencyTrustedUrls(
+            ExecutionStep step,
+            Map<String, TurnToolPolicy.TrustedUrlContext> stepTrustedUrls) {
+        return step.dependencies().stream()
+                .map(stepTrustedUrls::get)
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    private void markStepCompleted(List<ExecutionStep> steps,
+                                   ExecutionStep step,
+                                   String result,
+                                   TurnToolPolicy stepPolicy,
+                                   Map<String, TurnToolPolicy.TrustedUrlContext> stepTrustedUrls) {
+        updateStep(steps, step.id(), step.withResult(result));
+        stepTrustedUrls.put(step.id(), stepPolicy.trustedUrlContext());
     }
 
     private String summarizeSteps(List<ExecutionStep> steps) {

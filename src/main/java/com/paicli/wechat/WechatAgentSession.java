@@ -2,12 +2,14 @@ package com.paicli.wechat;
 
 import com.paicli.agent.Agent;
 import com.paicli.config.PaiCliConfig;
+import com.paicli.history.ConversationLedger;
 import com.paicli.llm.LlmClient;
 import com.paicli.llm.LlmClientFactory;
 import com.paicli.render.Renderer;
 import com.paicli.runtime.CancellationContext;
 import com.paicli.runtime.CancellationToken;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.concurrent.Callable;
@@ -46,6 +48,12 @@ public class WechatAgentSession implements AutoCloseable {
         registry.setProjectPath(workspace.toString());
         this.renderer = new WechatTerminalRenderer(localRenderer, sender);
         this.agent = new Agent(client, registry);
+        try {
+            this.agent.setConversationLedger(ConversationLedger.openDefault(
+                    Path.of(System.getProperty("user.home"))));
+        } catch (IOException ignored) {
+            // Keep the remote channel available if local audit storage is temporarily unavailable.
+        }
         this.agent.setRenderer(renderer);
         this.agent.setReturnFinalResponseWhenStreamed(true);
     }

@@ -8,6 +8,8 @@ import com.paicli.plan.ExecutionPlan;
 import com.paicli.plan.Planner;
 import com.paicli.plan.Task;
 import com.paicli.tool.ToolRegistry;
+import com.paicli.tool.ToolRegistry.ToolExecutionResult;
+import com.paicli.tool.ToolRegistry.ToolInvocation;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -18,8 +20,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -79,6 +83,52 @@ class PlanExecuteAgentTest {
         assertTrue(shortTermContents.stream().anyMatch(content -> content.contains("plan-memory-content")));
         assertTrue(shortTermContents.stream().anyMatch(content -> content.contains("已读取并确认文件内容")));
         assertEquals(0, memoryManager.getLongTermMemory().size());
+    }
+
+    @Test
+    void shouldContinuePlanTaskBeyondLegacyFiveIterationLimit() throws Exception {
+        String old = System.getProperty("paicli.react.hard.max.iterations");
+        try {
+            System.clearProperty("paicli.react.hard.max.iterations");
+            List<LlmClient.ChatResponse> responses = new ArrayList<>();
+            for (int i = 0; i < 6; i++) {
+                Path file = tempDir.resolve("sample-" + i + ".txt");
+                Files.writeString(file, "content-" + i);
+                responses.add(new LlmClient.ChatResponse(
+                        "assistant",
+                        "",
+                        List.of(new LlmClient.ToolCall(
+                                "call_" + i,
+                                new LlmClient.ToolCall.Function(
+                                        "read_file",
+                                        "{\"path\":\"" + file.toString().replace("\\", "\\\\") + "\"}"))),
+                        10,
+                        2));
+            }
+            responses.add(new LlmClient.ChatResponse(
+                    "assistant", "六个文件均已读取完成", null, 10, 2));
+
+            StubGLMClient llmClient = new StubGLMClient(responses);
+            ToolRegistry toolRegistry = new ToolRegistry();
+            toolRegistry.setProjectPath(tempDir.toString());
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    llmClient,
+                    toolRegistry,
+                    new StubPlanner(llmClient),
+                    null,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute());
+
+            String result = agent.run("依次读取六个测试文件并汇总");
+
+            assertTrue(result.contains("计划执行完成"));
+            assertEquals(7, llmClient.toolSnapshots.size(), "计划任务不应再在第 5 轮提前退出");
+        } finally {
+            if (old == null) {
+                System.clearProperty("paicli.react.hard.max.iterations");
+            } else {
+                System.setProperty("paicli.react.hard.max.iterations", old);
+            }
+        }
     }
 
     @Test
@@ -174,6 +224,100 @@ class PlanExecuteAgentTest {
                 "tool-call 前后的流式 content 不应被误标成任务结果: " + rendered);
     }
 
+    @Test
+    void supplementRebuildsToolPolicyBeforeReplanning() throws Exception {
+        LlmClient.ToolCall search = new LlmClient.ToolCall(
+                "call_search",
+                new LlmClient.ToolCall.Function(
+                        "web_search",
+                        "{\"query\":\"最新 Agent 资料\"}"
+                )
+        );
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "", List.of(search), 10, 2),
+                new LlmClient.ChatResponse("assistant", "已按搜索结果改写", null, 20, 5)
+        ));
+        RecordingToolRegistry registry = new RecordingToolRegistry();
+        AtomicInteger reviews = new AtomicInteger();
+        PlanExecuteAgent agent = new PlanExecuteAgent(
+                llmClient,
+                registry,
+                new StubPlanner(llmClient),
+                null,
+                (goal, plan) -> reviews.getAndIncrement() == 0
+                        ? PlanExecuteAgent.PlanReviewDecision.supplement("请联网搜索最新资料")
+                        : PlanExecuteAgent.PlanReviewDecision.execute()
+        );
+
+        agent.run("改写这个标题");
+
+        assertEquals(1, registry.invocations.size(),
+                "首轮 tools=" + llmClient.toolSnapshots.get(0).stream().map(tool -> tool.name()).toList());
+        assertEquals("web_search", registry.invocations.get(0).name());
+        assertTrue(llmClient.toolSnapshots.get(0).stream()
+                .anyMatch(tool -> "web_search".equals(tool.name())));
+    }
+
+    @Test
+    void noWebSupplementTightensToolPolicyBeforeReplanning() throws Exception {
+        LlmClient.ToolCall search = new LlmClient.ToolCall(
+                "call_search",
+                new LlmClient.ToolCall.Function("web_search", "{\"query\":\"最新资料\"}"));
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "", List.of(search), 10, 2),
+                new LlmClient.ChatResponse("assistant", "已仅按已有文本改写", null, 20, 5)
+        ));
+        RecordingToolRegistry registry = new RecordingToolRegistry();
+        AtomicInteger reviews = new AtomicInteger();
+        PlanExecuteAgent agent = new PlanExecuteAgent(
+                llmClient,
+                registry,
+                new StubPlanner(llmClient),
+                null,
+                (goal, plan) -> reviews.getAndIncrement() == 0
+                        ? PlanExecuteAgent.PlanReviewDecision.supplement("不需要联网，只改写已有标题")
+                        : PlanExecuteAgent.PlanReviewDecision.execute()
+        );
+
+        agent.run("请联网搜索资料后改写这个标题");
+
+        assertTrue(registry.invocations.isEmpty());
+        assertTrue(llmClient.toolSnapshots.get(0).stream()
+                .noneMatch(tool -> "web_search".equals(tool.name())));
+    }
+
+    @Test
+    void dependentTaskInheritsOnlyTypedSearchUrlProvenance() throws Exception {
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "", List.of(new LlmClient.ToolCall(
+                        "search",
+                        new LlmClient.ToolCall.Function("web_search", "{\"query\":\"目标文章\"}"))), 10, 2),
+                new LlmClient.ChatResponse("assistant", "已定位目标文章", null, 10, 2),
+                new LlmClient.ChatResponse("assistant", "", List.of(new LlmClient.ToolCall(
+                        "fetch",
+                        new LlmClient.ToolCall.Function(
+                                "web_fetch", "{\"url\":\"https://example.com/article\"}"))), 10, 2),
+                new LlmClient.ChatResponse("assistant", "已抓取正文", null, 10, 2)
+        ));
+        RecordingToolRegistry registry = new RecordingToolRegistry();
+        PlanExecuteAgent agent = new PlanExecuteAgent(
+                llmClient,
+                registry,
+                new TwoTaskWebPlanner(llmClient),
+                null,
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute()
+        );
+
+        String result = agent.run("帮我搜索目标文章并抓取正文");
+
+        assertTrue(result.contains("计划执行完成"));
+        assertEquals(List.of("web_search", "web_fetch"),
+                registry.invocations.stream().map(ToolInvocation::name).toList());
+        assertTrue(llmClient.toolSnapshots.get(2).stream()
+                .anyMatch(tool -> "web_fetch".equals(tool.name())),
+                "依赖任务首轮应继承前置 web_search 的类型化 URL 授权");
+    }
+
     private record StubResponse(LlmClient.ChatResponse response, boolean streamContent,
                                 java.util.function.Consumer<LlmClient.StreamListener> streamScript) {
         private static StubResponse plain(LlmClient.ChatResponse response) {
@@ -204,8 +348,24 @@ class PlanExecuteAgentTest {
         }
     }
 
+    private static final class TwoTaskWebPlanner extends Planner {
+        private TwoTaskWebPlanner(LlmClient llmClient) {
+            super(llmClient);
+        }
+
+        @Override
+        public ExecutionPlan createPlan(String goal) {
+            ExecutionPlan plan = new ExecutionPlan("plan-web", goal);
+            plan.addTask(new Task("search", "搜索目标文章", Task.TaskType.ANALYSIS));
+            plan.addTask(new Task("fetch", "抓取目标文章正文", Task.TaskType.FILE_READ, List.of("search")));
+            plan.computeExecutionOrder();
+            return plan;
+        }
+    }
+
     private static final class StubGLMClient extends GLMClient {
         private final Queue<StubResponse> responses;
+        private final List<List<Tool>> toolSnapshots = new ArrayList<>();
 
         private StubGLMClient(List<ChatResponse> responses) {
             super("test-key");
@@ -228,6 +388,7 @@ class PlanExecuteAgentTest {
 
         @Override
         public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
+            toolSnapshots.add(tools == null ? List.of() : List.copyOf(tools));
             StubResponse stubResponse = responses.poll();
             if (stubResponse == null) {
                 throw new IOException("缺少预设响应");
@@ -238,6 +399,28 @@ class PlanExecuteAgentTest {
                 listener.onContentDelta(stubResponse.response().content());
             }
             return stubResponse.response();
+        }
+    }
+
+    private static final class RecordingToolRegistry extends ToolRegistry {
+        private final List<ToolInvocation> invocations = new ArrayList<>();
+
+        @Override
+        public List<ToolExecutionResult> executeTools(List<ToolInvocation> calls) {
+            invocations.addAll(calls);
+            return calls.stream()
+                    .map(call -> new ToolExecutionResult(
+                            call.id(),
+                            call.name(),
+                            call.argumentsJson(),
+                            "1. 搜索结果 https://example.com/article",
+                            0,
+                            false,
+                            List.of(),
+                            true,
+                            "web_search".equals(call.name())
+                                    ? List.of("https://example.com/article") : List.of()))
+                    .toList();
         }
     }
 }

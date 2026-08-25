@@ -2,6 +2,7 @@ package com.paicli.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.history.ConversationLedger;
 import com.paicli.llm.LlmClient;
 import com.paicli.llm.LlmTraceLogger;
 import com.paicli.lsp.LspDiagnosticReport;
@@ -17,6 +18,7 @@ import com.paicli.skill.SkillRegistry;
 import com.paicli.tool.ToolRegistry;
 import com.paicli.tool.ToolRegistry.ToolExecutionResult;
 import com.paicli.tool.ToolRegistry.ToolInvocation;
+import com.paicli.tool.TurnToolPolicy;
 import com.paicli.util.AnsiStyle;
 import com.paicli.util.TerminalMarkdownRenderer;
 import com.paicli.image.ImageReferenceParser;
@@ -30,6 +32,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Supplier;
 
 /**
@@ -51,6 +54,8 @@ public class SubAgent {
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final ConversationHistoryCompactor historyCompactor;
+    private ConversationLedger conversationLedger = ConversationLedger.disabled();
+    private TurnToolPolicy turnToolPolicy;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
 
     public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry) {
@@ -78,6 +83,24 @@ public class SubAgent {
         this.skillContextBuffer = skillContextBuffer;
     }
 
+    public void setConversationLedger(ConversationLedger conversationLedger) {
+        ConversationLedger next = conversationLedger == null
+                ? ConversationLedger.disabled()
+                : conversationLedger;
+        if (this.conversationLedger == next) {
+            return;
+        }
+        this.conversationLedger = next;
+        if (!conversationHistory.isEmpty()) {
+            this.conversationLedger.appendMessage(
+                    "team", name, "session_attach", conversationHistory.get(0));
+        }
+    }
+
+    public void setTurnToolPolicy(TurnToolPolicy turnToolPolicy) {
+        this.turnToolPolicy = turnToolPolicy;
+    }
+
     /**
      * 根据角色获取系统提示词
      */
@@ -102,10 +125,21 @@ public class SubAgent {
         if (historyCompactor == null) return;
         ContextProfile profile = toolRegistry == null ? null : toolRegistry.getContextProfile();
         if (profile == null) return;
+        int beforeMessages = conversationHistory.size();
         try {
             boolean compacted = historyCompactor.compactIfNeeded(conversationHistory, profile.compressionTriggerTokens());
-            if (compacted && out != null) {
-                out.println("📦 [" + name + "] 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
+            if (compacted) {
+                conversationLedger.appendEvent(
+                        "compaction",
+                        "team",
+                        name,
+                        "automatic",
+                        Map.of(
+                                "beforeMessages", beforeMessages,
+                                "afterMessages", conversationHistory.size()));
+                if (out != null) {
+                    out.println("📦 [" + name + "] 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
+                }
             }
         } catch (Exception e) {
             log.warn("[{}] conversationHistory compaction failed", name, e);
@@ -133,7 +167,10 @@ public class SubAgent {
 
     private void refreshSystemPrompt() {
         if (!conversationHistory.isEmpty()) {
-            conversationHistory.set(0, LlmClient.Message.system(getSystemPrompt()));
+            LlmClient.Message systemMessage = LlmClient.Message.system(getSystemPrompt());
+            conversationHistory.set(0, systemMessage);
+            conversationLedger.appendMessage(
+                    "team", name, "system_prompt_refresh", systemMessage);
         }
     }
 
@@ -171,30 +208,42 @@ public class SubAgent {
      * 避免多个 Agent 同时写入 System.out 造成输出交错。
      */
     public AgentMessage execute(AgentMessage task, PrintStream out) {
+        TurnToolPolicy activeToolPolicy = turnToolPolicy == null
+                ? TurnToolPolicy.forExplicitTask(
+                        task.content(),
+                        toolRegistry.isSharedBrowserSession(),
+                        toolRegistry.hasAgentOwnedCurrentBrowserPage())
+                : turnToolPolicy.fork();
+        try {
+            return executeWithPolicy(task, out, activeToolPolicy);
+        } finally {
+            activeToolPolicy.releaseBrowserLease();
+        }
+    }
+
+    /** Caller-owned branch policy; the same instance may span reviewer retries. */
+    AgentMessage executeWithPolicy(AgentMessage task, PrintStream out,
+                                   TurnToolPolicy activeToolPolicy) {
         log.info("[{}] executing task from {}: type={}", name, task.fromAgent(), task.type());
+        Objects.requireNonNull(activeToolPolicy, "activeToolPolicy");
         pruneHistoricalImagePayloads();
         refreshSystemPrompt();
         String taskContent = prependSkillBodies(task.content());
 
         // 将任务注入对话
-        conversationHistory.add(ImageReferenceParser.userMessage(
+        appendConversationMessage(ImageReferenceParser.userMessage(
                 taskContent,
-                Path.of(toolRegistry.getProjectPath())));
+                Path.of(toolRegistry.getProjectPath())), "task_input");
 
         SubAgentStreamRenderer streamRenderer = new SubAgentStreamRenderer(name, role, out);
 
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
 
-        // 与 Agent.java 对称：主退出条件 = LLM 自决，budget 仅在 token / 停滞 / 硬轮数兜底。
+        // 与 Agent.java 对称：主退出条件 = LLM 自决，默认不限制轮数；budget 只承担安全阀职责。
         while (true) {
             AgentBudget.ExitReason exitReason = budget.check();
             if (exitReason != AgentBudget.ExitReason.WITHIN_BUDGET) {
-                streamRenderer.finish();
-                String description = budget.describeExit(exitReason);
-                log.warn("[{}] run exhausted budget: reason={}, iteration={}, tokens={}/{}",
-                        name, exitReason, budget.iteration(),
-                        budget.totalInputTokens() + budget.totalOutputTokens(), budget.tokenBudget());
-                return AgentMessage.error(name, role, description);
+                return finalizePartialResult(exitReason, budget, streamRenderer, out);
             }
 
             budget.beginIteration();
@@ -204,9 +253,13 @@ public class SubAgent {
             maybeCompactHistory(out);
 
             try {
+                List<LlmClient.Tool> toolDefinitions = shouldUseTools() && llmClient.supportsTools()
+                        ? toolRegistry.getToolDefinitions()
+                        : null;
+                TurnToolPolicy.ToolExposure toolExposure = activeToolPolicy.expose(toolDefinitions);
                 LlmClient.ChatResponse response = llmClient.chat(
                         conversationHistory,
-                        shouldUseTools() && llmClient.supportsTools() ? toolRegistry.getToolDefinitions() : null,
+                        toolExposure.definitions(),
                         streamRenderer
                 );
                 LlmTraceLogger.logReasoning(log,
@@ -218,20 +271,24 @@ public class SubAgent {
 
                 if (response.hasToolCalls()) {
                     budget.recordToolCalls(response.toolCalls());
-                    printToolCalls(out, response.toolCalls());
-                    conversationHistory.add(LlmClient.Message.assistant(
+                    printToolCalls(out,
+                            activeToolPolicy.visibleToolCalls(response.toolCalls(), toolExposure));
+                    appendConversationMessage(LlmClient.Message.assistant(
                             response.reasoningContent(),
                             response.content(),
                             response.toolCalls()
-                    ));
+                    ), "llm_response");
 
                     // 在工具执行前 flush 并重置流式渲染器：TerminalMarkdownRenderer 按换行 flush，
                     // 没有换行的 pending 内容会被 HITL 提示"跨过"导致标题错位。
                     streamRenderer.resetBetweenIterations();
 
-                    List<ToolExecutionResult> toolResults = executeToolCalls(response.toolCalls());
+                    List<ToolExecutionResult> toolResults = executeToolCalls(
+                            response.toolCalls(), activeToolPolicy, toolExposure);
                     for (ToolExecutionResult toolResult : toolResults) {
-                        conversationHistory.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
+                        appendConversationMessage(
+                                LlmClient.Message.tool(toolResult.id(), toolResult.result()),
+                                "tool_execution");
                     }
                     appendImageToolMessages(toolResults);
                     continue;
@@ -239,6 +296,13 @@ public class SubAgent {
 
                 // 没有工具调用，返回最终结果
                 conversationHistory.add(LlmClient.Message.assistant(response.content()));
+                conversationLedger.appendMessage(
+                        "team",
+                        name,
+                        "llm_response",
+                        LlmClient.Message.assistant(
+                                response.reasoningContent(),
+                                response.content()));
 
                 streamRenderer.finish();
 
@@ -252,6 +316,53 @@ public class SubAgent {
         }
     }
 
+    /** 命中显式预算后禁用工具并执行一次最佳努力收尾，保留已经完成的工作。 */
+    private AgentMessage finalizePartialResult(
+            AgentBudget.ExitReason exitReason,
+            AgentBudget budget,
+            SubAgentStreamRenderer streamRenderer,
+            PrintStream out) {
+        String description = budget.describeExit(exitReason);
+        log.warn("[{}] run exhausted budget: reason={}, iteration={}, tokens={}/{}",
+                name, exitReason, budget.iteration(),
+                budget.totalInputTokens() + budget.totalOutputTokens(), budget.tokenBudget());
+
+        appendConversationMessage(
+                LlmClient.Message.user(budget.finalizationInstruction(exitReason)),
+                "budget_finalization");
+        out.println(AnsiStyle.section("⚠️ [" + name + "] 执行预算已触发，正在整理部分结果"));
+
+        try {
+            LlmClient.ChatResponse response = llmClient.chat(
+                    conversationHistory,
+                    List.of(),
+                    streamRenderer);
+            budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+            String content = response.content() == null ? "" : response.content().trim();
+            String partialResult = formatPartialResult(description, content);
+            conversationHistory.add(LlmClient.Message.assistant(partialResult));
+            conversationLedger.appendMessage(
+                    "team",
+                    name,
+                    "budget_finalization_response",
+                    LlmClient.Message.assistant(response.reasoningContent(), partialResult));
+            streamRenderer.finish();
+            return AgentMessage.result(name, role, partialResult);
+        } catch (IOException e) {
+            log.error("[{}] LLM finalization call failed after budget exhaustion", name, e);
+            streamRenderer.finish();
+            return AgentMessage.result(
+                    name,
+                    role,
+                    formatPartialResult(description, "收尾调用失败：" + e.getMessage()));
+        }
+    }
+
+    private String formatPartialResult(String description, String content) {
+        String heading = "⚠️ 部分完成（" + description + "）";
+        return content == null || content.isBlank() ? heading : heading + "\n\n" + content;
+    }
+
     /**
      * 执行任务（带上下文注入），用于 Worker 接收额外上下文
      */
@@ -260,13 +371,28 @@ public class SubAgent {
     }
 
     public AgentMessage executeWithContext(AgentMessage task, String context, PrintStream out) {
+        TurnToolPolicy activeToolPolicy = turnToolPolicy == null
+                ? TurnToolPolicy.forExplicitTask(
+                        task.content(),
+                        toolRegistry.isSharedBrowserSession(),
+                        toolRegistry.hasAgentOwnedCurrentBrowserPage())
+                : turnToolPolicy.fork();
+        try {
+            return executeWithContext(task, context, out, activeToolPolicy);
+        } finally {
+            activeToolPolicy.releaseBrowserLease();
+        }
+    }
+
+    AgentMessage executeWithContext(AgentMessage task, String context, PrintStream out,
+                                    TurnToolPolicy activeToolPolicy) {
         String enrichedContent = task.content();
         if (context != null && !context.isEmpty()) {
             enrichedContent = context + "\n\n当前任务：" + task.content();
         }
         AgentMessage enrichedTask = new AgentMessage(task.fromAgent(), task.fromRole(),
                 enrichedContent, task.type());
-        return execute(enrichedTask, out);
+        return executeWithPolicy(enrichedTask, out, activeToolPolicy);
     }
 
     /**
@@ -287,6 +413,12 @@ public class SubAgent {
      */
     public void clearHistory() {
         LlmClient.Message systemMsg = conversationHistory.get(0);
+        conversationLedger.appendEvent(
+                "history_clear",
+                "team",
+                name,
+                "task_boundary",
+                Map.of("discardedViewMessages", Math.max(0, conversationHistory.size() - 1)));
         conversationHistory.clear();
         conversationHistory.add(systemMsg);
     }
@@ -305,6 +437,12 @@ public class SubAgent {
             imageCount += images;
         }
         if (imageCount > 0) {
+            conversationLedger.appendEvent(
+                    "view_image_prune",
+                    "team",
+                    name,
+                    "before_next_task",
+                    Map.of("messages", messageCount, "images", imageCount));
             log.info("[{}] pruned historical image payloads before sub-agent turn: messages={}, images={}",
                     name, messageCount, imageCount);
         }
@@ -322,12 +460,16 @@ public class SubAgent {
         if (report == null || report.isEmpty()) {
             return;
         }
-        conversationHistory.add(LlmClient.Message.user(report.promptText()));
+        appendConversationMessage(
+                LlmClient.Message.user(report.promptText()),
+                "lsp_diagnostics");
         out.println(report.displayText());
         log.info("[{}] injected LSP diagnostics into sub-agent conversation", name);
     }
 
-    private List<ToolExecutionResult> executeToolCalls(List<LlmClient.ToolCall> toolCalls) {
+    private List<ToolExecutionResult> executeToolCalls(List<LlmClient.ToolCall> toolCalls,
+                                                       TurnToolPolicy activeToolPolicy,
+                                                       TurnToolPolicy.ToolExposure toolExposure) {
         List<ToolInvocation> invocations = new ArrayList<>();
         for (LlmClient.ToolCall toolCall : toolCalls) {
             String toolName = toolCall.function().name();
@@ -340,7 +482,7 @@ public class SubAgent {
         if (invocations.size() > 1) {
             log.info("[{}] executing {} tool calls in parallel", name, invocations.size());
         }
-        return toolRegistry.executeTools(invocations);
+        return activeToolPolicy.execute(toolRegistry, invocations, toolExposure);
     }
 
     private void appendImageToolMessages(List<ToolExecutionResult> toolResults) {
@@ -354,8 +496,15 @@ public class SubAgent {
             List<LlmClient.ContentPart> parts = new ArrayList<>();
             parts.add(LlmClient.ContentPart.text("工具 " + result.name() + " 返回了图片内容，请结合上面的工具文本结果分析。"));
             parts.addAll(result.imageParts());
-            conversationHistory.add(LlmClient.Message.user(parts));
+            appendConversationMessage(
+                    LlmClient.Message.user(parts),
+                    "image_tool_result");
         }
+    }
+
+    private void appendConversationMessage(LlmClient.Message message, String source) {
+        conversationHistory.add(message);
+        conversationLedger.appendMessage("team", name, source, message);
     }
 
     private static void printToolCalls(PrintStream out, List<LlmClient.ToolCall> toolCalls) {

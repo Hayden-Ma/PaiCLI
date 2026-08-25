@@ -21,10 +21,12 @@ For the primary entry point, see `/AGENTS.md`.
 |------|----------|----------|
 | 长期记忆 | `~/.paicli/memory/long_term_memory.json` | `-Dpaicli.memory.dir` |
 | 项目级记忆 | `PAI.md` / `.paicli/PAI.md` / `PAI.local.md` | 用户级稳定偏好：`~/.paicli/PAI.md` |
+| 原始会话账本 | `~/.paicli/history/raw/session-*.jsonl` | 每个进程会话自动生成 |
 | RAG 索引 | `~/.paicli/rag/codebase.db` | `-Dpaicli.rag.dir` |
 | 审计日志 | `~/.paicli/audit/audit-YYYY-MM-DD.jsonl` | `PAICLI_AUDIT_DIR` / `-Dpaicli.audit.dir` |
 | Side-Git 快照 | `~/.paicli/snapshots/<project_hash>/<worktree_hash>/.git` | `PAICLI_SNAPSHOT_DIR` / `-Dpaicli.snapshot.dir` |
 | 后台任务 | `~/.paicli/tasks/tasks.db` | — |
+| Better Harness 报告 | `<project>/.paicli/better-harness/<run-id>/` | `/better-harness --inline` 禁止写文件 |
 
 ### Snapshot Config
 
@@ -38,17 +40,18 @@ For the primary entry point, see `/AGENTS.md`.
 
 系统属性 > 环境变量/.env > 默认值：`PAICLI_LOG_DIR`(~/.paicli/logs) / `PAICLI_LOG_LEVEL`(INFO) / `PAICLI_LOG_MAX_HISTORY`(7) / `PAICLI_LOG_MAX_FILE_SIZE`(10MB) / `PAICLI_LOG_TOTAL_SIZE_CAP`(100MB)
 
-### ReAct/SubAgent Budget Config
+### Agent Loop Budget Config
 
-系统属性 > 默认值：`paicli.react.token.budget`(Integer.MAX_VALUE) / `paicli.react.stagnation.window`(3) / `paicli.react.hard.max.iterations`(50)
+ReAct、Plan 单任务与 SubAgent 共用 `AgentBudget`。系统属性 > 默认值：`paicli.react.token.budget`(Integer.MAX_VALUE) / `paicli.react.stagnation.window`(3) / `paicli.react.hard.max.iterations`(不限制)。
 
-设计取舍：长上下文模型默认不再以 80% x window 为硬限。死循环防护由 stagnation 检测（连续 3 轮相同工具调用）和 hardMaxIterations（50 轮）兜底。Token 显示行 `📊 Token: 已用 X / Y` 的 Y 是软提示，不代表强制限制。
+设计取舍：交互式 Agent 默认由模型在不再调用工具时自然结束，不设置固定 50 轮天花板；长上下文模型也不再以 80% x window 作为执行硬限。默认安全阀是 stagnation 检测（连续 3 轮相同工具调用）、上下文压缩、取消和 LLM 超时。CI、Runtime API、微信无人值守或严格成本控制场景可用 `-Dpaicli.react.hard.max.iterations=N` 显式设置正整数上限，也可用 `-Dpaicli.react.token.budget=N` 设置 Token 上限。任一预算命中后，执行路径都会关闭工具并额外进行一次最佳努力收尾，以“部分完成”交付已有结果；收尾调用不会重新进入 Agent 循环。Token 显示行 `📊 Token: 已用 X / Y` 的 Y 是软提示，不代表强制限制。
 
-### LLM HTTP Timeout Config
+### LLM HTTP Timeout / Retry Config
 
 系统属性 > 默认值：`paicli.llm.connect.timeout.seconds`(60) / `paicli.llm.read.timeout.seconds`(300) / `paicli.llm.write.timeout.seconds`(60) / `paicli.llm.call.timeout.seconds`(600)
 
 SSE 流式下 readTimeout 是两次 read 间最大间隔，GLM-5.1 生成大段 reasoning 时可能长时间静默，所以放宽到 300 秒。
+统一重试默认值：`paicli.llm.retry.max-attempts`(3，含首次请求) / `paicli.llm.retry.base-delay.millis`(500) / `paicli.llm.retry.max-delay.millis`(30000)。仅重试 `408`、`429`、`500`、`502`、`503`、`504` 和瞬时连接 / 读取故障，使用指数退避 + jitter，并在上限内尊重 `Retry-After`；`400`、`401` 等确定性错误不重试。SSE 必须看到 `[DONE]` 或非空 `finish_reason` 才视为完整；没有流式消费者时可丢弃半截结果重发，真实消费者已收到 reasoning/content 后禁止自动重放，避免终端出现重复内容。
 DeepSeek 流式调用默认使用 HTTP/1.1，避免部分 HTTP/2 网关在长 SSE 响应中重置 stream，表现为 `stream was reset: INTERNAL_ERROR`。
 DeepSeek 当前不发送图片输入：`supportsImageInput()` 返回 false，含图片的 `ContentPart` 会在 OpenAI-compatible 请求序列化时替换成文本提示，避免不支持多模态的 DeepSeek API 收到 `image_url` block。
 
@@ -81,7 +84,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - 主入口：`Agent.java`
 - 退出条件由 LLM 自决（不返回 tool_calls 即结束）
-- `AgentBudget` 三种兜底：token 超预算 / 连续 3 轮相同调用 / 50 轮硬上限
+- `AgentBudget` 默认不限制 ReAct、Plan 单任务和 SubAgent 的迭代轮数；显式 token / 轮数预算或连续 3 轮相同调用命中后，禁用工具并做一次部分结果收尾
 - 流式输出 reasoning_content + content；inline ReAct 用固定高度 live thinking 区动态预览 reasoning，同一次输入只把完整 reasoning 引用块落到 transcript 一次；live 区只允许清理自己占用的行，避免覆盖旧输出
 - inline 流式回答用低调 `▪` 标记起始，不再输出强标题；plain / 非流式兜底仍可使用传统 reasoning + answer 文本
 - `TerminalMarkdownRenderer` 渲染 Markdown 表格时按终端列宽分配列宽，长内容在单元格内部换行；CJK 字符按显示宽度计算，避免表格行被终端自动折断后错位
@@ -102,8 +105,11 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 第二道压缩切割在 user message 边界，保留最近 3 个 user 起算的尾部
 - 三条路径(ReAct/Plan/SubAgent)都接入第二道压缩
 - `/compact` 可手动压缩当前 ReAct conversationHistory，不等待 token 阈值触发，保留最近 1 个 user 轮次；Plan/SubAgent 仍只走调 LLM 前的自动压缩
+- `ConversationLedger` 与可变 conversationHistory 解耦：默认 CLI 的 ReAct、Plan、Team（含 planner / worker / reviewer）共享一个 append-only JSONL。每行带 schemaVersion / sessionId / sequence / timestamp / event / mode / actor / source，并保留完整 `LlmClient.Message`；最终响应的 reasoning 也只在账本中完整保留，不改变 provider 的发送视图语义
+- `/clear`、历史图片 payload 裁剪和 conversationHistory 压缩只能追加 boundary event，不能覆盖或删除账本旧行。原始工具参数、工具结果和图片 payload 可能敏感；POSIX 下 `history/raw` 为 0700、账本文件为 0600
 - 长期记忆只通过 `/save` 或用户明确要求保存
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
+- 长期记忆去重以 `type + scope + project` 为边界，内容使用确定性的 Unicode/格式规范化和保守语法助词近似匹配；不同数字、代码符号或实质内容不会自动覆盖，当前不做事实冲突消解
 - 长期记忆管理命令：`/memory list`、`/memory search <关键词>`、`/memory delete <id>`、`/memory clear`
 - `PAI.md` 不是 `/save` 长期记忆：它是启动时注入 system prompt 的项目指令文件，适合团队共享、长期稳定、可进 git 的规则
 - 加载顺序：`~/.paicli/PAI.md` → `PAI.md` → `.paicli/PAI.md` → `PAI.local.md` → `.paicli/PAI.local.md`
@@ -142,8 +148,12 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - `web_search`：SearchProvider 接口，返回 SearchResult 列表
 - `web_fetch`：NetworkPolicy → WebFetcher → HtmlExtractor，SPA/防爬墙返回空正文 + 边界提示
-- 联网决策由模型通过原生 tool call 自主发起；Prompt 不包含 Freshness Policy，不强制 `web_search`。本地“当前项目/当前 README/当前文件/当前代码”仍作为代码库任务交给模型在工具 schema 中选择本地工具。
-- StepSearch 优先级：当前模型 provider=`step` 且 model 以 `step-3.7-flash` 开头，并且自动/显式 `mcp__step_search__web_search` / `mcp__step_search__web_fetch` 已注册时，内置 `web_search` / `web_fetch` 会先代理到 StepSearch MCP；MCP 未就绪或返回不可用结果时回退原实现。
+- Prompt 不包含 Freshness Policy，也不对“最新/当前/今天”等关键词做自动 `web_search` 预检。模型只能在顶层用户目标明确时主动选择联网工具；明确“不要联网”始终优先。
+- 顶层输入只是裸标题、主题或摘录，且无动作、问题或目标时，当前轮只做澄清，不调用任何工具。模型不得根据标题、记忆或自己的 reasoning 猜测 URL。
+- 用户明确要求查找但没有 URL 时，先 `web_search`；`web_fetch` 或 Chrome / MCP 导航 URL 只能来自用户实际提交的顶层原文（不能是 `@path` / MCP resource 展开正文），或同一执行分支由搜索 provider 返回的结构化 `discoveredUrls`。搜索正文、snippet、query 回显、错误提示、`web_fetch` 正文、浏览器导航/快照/网络列表、普通本地工具结果、assistant reasoning、回复文本和 tool arguments 都不能建立 URL provenance；当前 StepSearch MCP 的非结构化文本不会生成凭据。
+- `TurnToolPolicy` 是运行时确定性边界：ReAct / Plan / Team 都必须单独传入用户提交原文与展开后的执行内容，不能让 planner / worker 派生的“搜索”子任务自行获得联网授权。Plan 审阅补充会重建策略；Plan 并行任务和 Team worker 使用 fork 后的独立 URL 集合，避免跨分支扩权。只有 DAG 中声明的后继依赖会继承前置分支不可伪造的 `TrustedUrlContext`；任务结果文本不作为授权来源。grounded URL 先只曝光导航，成功导航只建立当前页读取上下文，读取结果不产生新 URL 授权；交互工具必须有顶层原文明确授权。shared Chrome 的真实模式与 PaiCLI-owned 当前页从 `BrowserSession` 跨轮注入策略；非 owned 标签页只在用户明确要求时开放只读，导航/写入/关闭会硬拒绝，导航结果的全量 `# Pages` 会在回灌模型前裁成单页回执。策略在 StepSearch、内置 SearchProvider / WebFetcher 和 Chrome / MCP 路由之前执行，拒绝结果不得用 fallback 绕过。
+- StepSearch 优先级：通过 `TurnToolPolicy` 后，当前模型 provider=`step` 且 model 以 `step-3.7-flash` 开头，并且自动/显式 `mcp__step_search__web_search` / `mcp__step_search__web_fetch` 已注册时，内置 `web_search` / `web_fetch` 会先代理到 StepSearch MCP；MCP 未就绪或返回不可用结果时回退原实现。
+- 本地“当前项目/当前 README/当前文件/当前代码”属于代码库任务，应选择 `glob_files` / `grep_code` / `read_file`，而不是联网工具。
 - JS 渲染 fallback 到 Chrome DevTools MCP
 
 ### MCP Protocol
@@ -172,6 +182,18 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - system prompt 索引段注入到三处提示词末尾，上限 20 个 / 4KB
 - load_skill 工具把 SKILL.md 正文(5KB 截断)写入 SkillContextBuffer
 - buffer 一次性消费，最多 3 个 skill body
+
+### Better Harness
+
+- `/better-harness [quick|normal] [--inline]` 是 PaiCLI 原生命令，不调用 Node sidecar
+- `BetterHarnessEvidenceCollector` 先冻结三路证据：当前 ConversationLedger 脱敏元数据、Project Harness、Agent Customize
+- 三个 specialist 使用同一 LLM 并行调用，但不暴露任何工具；它们只能分析各自证据 lane
+- 进度以 5 个确定性工作单元展示：证据冻结 1 个、三个 specialist 各 1 个、Lead 汇总 1 个；并行结果按完成顺序收集，谁先完成谁先刷新活动面板
+- 活动面板展示真实完成数、当前阶段、累计耗时和 ESC 取消提示；plain renderer 降级为逐行进度文本，不得用仅按时间增长的百分比冒充完成度
+- 最终报告通过 `TerminalMarkdownRenderer` 按 `Renderer.terminalColumns()` 渲染，标题、强调、列表、表格和代码块不得以 Markdown 源码形式直接刷到终端
+- lead 只接收三个 specialist 结果，输出结构化 report + findings；Java 负责写 `report.md`、自包含 `report.html` 和 `findings.json`
+- 默认不序列化 user/assistant 正文、reasoning、tool 参数/结果、图片、Memory 正文、用户目录配置或 MCP secret
+- 当前 session evidence 只覆盖活动 ledger；旧 ledger 尚未具备稳定 workspace identity 时不得混入
 
 ### TUI (v16.1 Renderer Architecture)
 
@@ -235,6 +257,9 @@ CLI 入口 / Banner / .env 读取 / 日志初始化 / 模式切换 / JLine raw m
 
 ### Agent.java
 ReAct 主循环 / 对话历史 / 工具调用与结果回灌
+
+### ConversationLedger.java
+system / user / assistant / tool_call / tool_result 原始消息的 append-only JSONL 账本 / mode-actor-source 归因 / POSIX 权限收紧
 
 ### PlanExecuteAgent.java
 规划后执行 / 计划审阅 / DAG 任务执行 / 并行批次 / 失败重规划
@@ -321,4 +346,4 @@ EMBEDDING_BASE_URL=http://localhost:11434
 
 不覆盖：真实 LLM 联调、真实 Embedding API、真实 MCP server 联调、终端完整手工体验。
 
-完整测试类列表：CliCommandParserTest / MainBrowserCommandTest / PlanReviewInputParserTest / MainInputNormalizationTest / ExecutionPlanTest / MemoryEntryTest / ConversationMemoryTest / LongTermMemoryTest / MemoryRetrieverTest / MemoryManagerTest / ExplicitMemoryHintsTest / ContextProfileTest / PlanExecuteAgentTest / AgentMemoryHintTest / AgentRoleTest / AgentMessageTest / AgentOrchestratorTest / EmbeddingClientTest / SearchResultTest / NetworkPolicyTest / HtmlExtractorTest / WebFetcherTest / SearchProviderFactoryTest / ZhipuSearchProviderTest / VectorStoreTest / CodeChunkerTest / CodeAnalyzerTest / CodeIndexTest / ApprovalPolicyTest / ApprovalResultTest / HitlToolRegistryTest / TerminalHitlHandlerTest / ToolRegistryTest / BrowserSessionTest / BrowserConnectivityCheckTest / SensitivePagePolicyTest / BrowserGuardTest / McpSchemaSanitizerTest / McpConfigLoaderTest / JsonRpcClientTest / McpToolBridgeTest / McpResourceCacheTest / AtMentionParserTest / AtMentionExpanderTest / AtMentionCompleterTest / NotificationRouterTest / PathGuardTest / CommandGuardTest / AuditLogTest / SkillFrontmatterParserTest / SkillRegistryTest / SkillStateStoreTest / SkillBuiltinExtractorTest / SkillContextBufferTest / SkillIndexFormatterTest / LoadSkillToolTest / SkillCommandHandlerTest
+完整测试类列表：CliCommandParserTest / MainBrowserCommandTest / PlanReviewInputParserTest / MainInputNormalizationTest / ExecutionPlanTest / MemoryEntryTest / ConversationMemoryTest / LongTermMemoryTest / MemoryRetrieverTest / MemoryManagerTest / ExplicitMemoryHintsTest / ContextProfileTest / PlanExecuteAgentTest / AgentMemoryHintTest / AgentWebSearchDecisionTest / AgentRoleTest / AgentMessageTest / AgentOrchestratorTest / EmbeddingClientTest / SearchResultTest / NetworkPolicyTest / HtmlExtractorTest / WebFetcherTest / SearchProviderFactoryTest / ZhipuSearchProviderTest / VectorStoreTest / CodeChunkerTest / CodeAnalyzerTest / CodeIndexTest / ApprovalPolicyTest / ApprovalResultTest / HitlToolRegistryTest / TerminalHitlHandlerTest / ToolRegistryTest / TurnToolPolicyTest / BrowserSessionTest / BrowserConnectivityCheckTest / SensitivePagePolicyTest / BrowserGuardTest / McpSchemaSanitizerTest / McpConfigLoaderTest / JsonRpcClientTest / McpToolBridgeTest / McpResourceCacheTest / AtMentionParserTest / AtMentionExpanderTest / AtMentionCompleterTest / NotificationRouterTest / PathGuardTest / CommandGuardTest / AuditLogTest / SkillFrontmatterParserTest / SkillRegistryTest / SkillStateStoreTest / SkillBuiltinExtractorTest / SkillContextBufferTest / SkillIndexFormatterTest / LoadSkillToolTest / SkillCommandHandlerTest / BetterHarnessOptionsTest / BetterHarnessEvidenceCollectorTest / BetterHarnessRunnerTest

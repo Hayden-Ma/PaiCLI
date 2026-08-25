@@ -59,4 +59,14 @@ class McpCallToolResultTest {
         assertFalse(output.hasImageParts());
         assertTrue(output.text().contains("base64Length=0"));
     }
+
+    @Test
+    void errorResultIsTypedAsUnsuccessful() {
+        ToolOutput output = new McpCallToolResult(
+                List.of(new McpContent("text", "failure", null, null)),
+                true).toToolOutput();
+
+        assertFalse(output.successful());
+        assertTrue(output.discoveredUrls().isEmpty());
+    }
 }

@@ -94,6 +94,16 @@ public class WechatTerminalRenderer implements Renderer {
     }
 
     @Override
+    public void beginActivity(String label, String detail, boolean cancelable) {
+        delegate.beginActivity(label, detail, cancelable);
+    }
+
+    @Override
+    public void updateActivity(String detail, int completed, int total) {
+        delegate.updateActivity(detail, completed, total);
+    }
+
+    @Override
     public void endActivity() {
         delegate.endActivity();
     }

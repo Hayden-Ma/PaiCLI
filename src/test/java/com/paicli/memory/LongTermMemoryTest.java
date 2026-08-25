@@ -7,6 +7,10 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -39,6 +43,282 @@ class LongTermMemoryTest {
         memory.store(entry2);
 
         assertEquals(1, memory.size());
+    }
+
+    @Test
+    void shouldDeduplicateNormalizedFormattingVariantsInSameDomain() {
+        Map<String, String> domain = Map.of(
+                "scope", "project",
+                "project", "/repo/current"
+        );
+        memory.store(new MemoryEntry(
+                "fact-1",
+                "  当前项目使用 Ｊａｖａ １７。\n",
+                MemoryEntry.MemoryType.FACT,
+                domain,
+                10
+        ));
+        memory.store(new MemoryEntry(
+                "fact-2",
+                "当前项目使用java17.",
+                MemoryEntry.MemoryType.FACT,
+                domain,
+                10
+        ));
+
+        assertEquals(1, memory.size());
+        assertTrue(memory.retrieve("fact-1").isPresent());
+    }
+
+    @Test
+    void shouldDeduplicateConservativeGrammaticalVariantInSameDomain() {
+        Map<String, String> domain = Map.of(
+                "scope", "project",
+                "project", "/repo/current"
+        );
+        memory.store(new MemoryEntry(
+                "fact-1",
+                "当前项目使用Java17开发",
+                MemoryEntry.MemoryType.FACT,
+                domain,
+                10
+        ));
+        memory.store(new MemoryEntry(
+                "fact-2",
+                "当前项目使用的是Java17开发",
+                MemoryEntry.MemoryType.FACT,
+                domain,
+                10
+        ));
+
+        assertEquals(1, memory.size());
+    }
+
+    @Test
+    void shouldNotDeduplicateAcrossMemoryTypes() {
+        memory.store(new MemoryEntry(
+                "fact-1",
+                "默认用中文回答",
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "global"),
+                5
+        ));
+        memory.store(new MemoryEntry(
+                "summary-1",
+                "默认用中文回答",
+                MemoryEntry.MemoryType.SUMMARY,
+                Map.of("scope", "global"),
+                5
+        ));
+
+        assertEquals(2, memory.size());
+    }
+
+    @Test
+    void shouldNotDeduplicateAcrossGlobalAndProjectScopes() {
+        memory.store(new MemoryEntry(
+                "global",
+                "默认用中文回答",
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "global"),
+                5
+        ));
+        memory.store(new MemoryEntry(
+                "project",
+                "默认用中文回答",
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "project", "project", "/repo/current"),
+                5
+        ));
+
+        assertEquals(2, memory.size());
+    }
+
+    @Test
+    void shouldNotDeduplicateAcrossProjects() {
+        memory.store(new MemoryEntry(
+                "project-a",
+                "项目使用Java17",
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "project", "project", "/repo/a"),
+                5
+        ));
+        memory.store(new MemoryEntry(
+                "project-b",
+                "项目使用Java17",
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "project", "project", "/repo/b"),
+                5
+        ));
+
+        assertEquals(2, memory.size());
+    }
+
+    @Test
+    void projectScopeWithoutProjectKeyShouldNotBeDeduplicated() {
+        Map<String, String> incompleteDomain = Map.of("scope", "project");
+        memory.store(new MemoryEntry(
+                "fact-1",
+                "项目使用Java17",
+                MemoryEntry.MemoryType.FACT,
+                incompleteDomain,
+                5
+        ));
+        memory.store(new MemoryEntry(
+                "fact-2",
+                "项目使用Java17",
+                MemoryEntry.MemoryType.FACT,
+                incompleteDomain,
+                5
+        ));
+
+        assertEquals(2, memory.size());
+    }
+
+    @Test
+    void shouldKeepConflictingNumbersCodeMarkersAndMeaningfulWords() {
+        Map<String, String> domain = Map.of(
+                "scope", "project",
+                "project", "/repo/current"
+        );
+        memory.store(new MemoryEntry(
+                "java-17",
+                "当前项目必须使用Java17构建",
+                MemoryEntry.MemoryType.FACT,
+                domain,
+                8
+        ));
+        memory.store(new MemoryEntry(
+                "java-21",
+                "当前项目必须使用Java21构建",
+                MemoryEntry.MemoryType.FACT,
+                domain,
+                8
+        ));
+        memory.store(new MemoryEntry(
+                "c",
+                "代码示例使用C",
+                MemoryEntry.MemoryType.FACT,
+                domain,
+                5
+        ));
+        memory.store(new MemoryEntry(
+                "cpp",
+                "代码示例使用C++",
+                MemoryEntry.MemoryType.FACT,
+                domain,
+                5
+        ));
+        memory.store(new MemoryEntry(
+                "simple",
+                "默认使用中文回答所有技术问题",
+                MemoryEntry.MemoryType.FACT,
+                domain,
+                8
+        ));
+        memory.store(new MemoryEntry(
+                "traditional",
+                "默认使用繁体中文回答所有技术问题",
+                MemoryEntry.MemoryType.FACT,
+                domain,
+                8
+        ));
+        memory.store(new MemoryEntry(
+                "allow-auto-commit",
+                "当前项目允许自动提交代码",
+                MemoryEntry.MemoryType.FACT,
+                domain,
+                8
+        ));
+        memory.store(new MemoryEntry(
+                "deny-auto-commit",
+                "当前项目不允许自动提交代码",
+                MemoryEntry.MemoryType.FACT,
+                domain,
+                8
+        ));
+        memory.store(new MemoryEntry(
+                "thumbs-up",
+                "默认用👍表示同意",
+                MemoryEntry.MemoryType.FACT,
+                domain,
+                5
+        ));
+        memory.store(new MemoryEntry(
+                "thumbs-down",
+                "默认用👎表示同意",
+                MemoryEntry.MemoryType.FACT,
+                domain,
+                5
+        ));
+
+        assertEquals(10, memory.size());
+    }
+
+    @Test
+    void concurrentDuplicateStoresShouldBeAtomic() throws Exception {
+        int workers = 12;
+        ExecutorService executor = Executors.newFixedThreadPool(workers);
+        CountDownLatch ready = new CountDownLatch(workers);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(workers);
+        Map<String, String> domain = Map.of(
+                "scope", "project",
+                "project", "/repo/current"
+        );
+        try {
+            for (int i = 0; i < workers; i++) {
+                int index = i;
+                executor.submit(() -> {
+                    ready.countDown();
+                    try {
+                        start.await();
+                        memory.store(new MemoryEntry(
+                                "fact-" + index,
+                                "并发保存时也只能留下同一条事实",
+                                MemoryEntry.MemoryType.FACT,
+                                domain,
+                                7
+                        ));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        done.countDown();
+                    }
+                });
+            }
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            start.countDown();
+            assertTrue(done.await(10, TimeUnit.SECONDS));
+        } finally {
+            executor.shutdownNow();
+        }
+
+        assertEquals(1, memory.size());
+        assertEquals(7, memory.getTokenCount());
+        assertEquals(1, new LongTermMemory(tempDir.toFile()).size());
+    }
+
+    @Test
+    void replacingSameIdShouldKeepTokenCountAccurate() {
+        memory.store(new MemoryEntry(
+                "fact-1",
+                "项目使用Java17",
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "project", "project", "/repo/current"),
+                5
+        ));
+        memory.store(new MemoryEntry(
+                "fact-1",
+                "项目使用Python开发",
+                MemoryEntry.MemoryType.FACT,
+                Map.of("scope", "project", "project", "/repo/current"),
+                9
+        ));
+
+        assertEquals(1, memory.size());
+        assertEquals(9, memory.getTokenCount());
+        assertEquals("项目使用Python开发", memory.retrieve("fact-1").orElseThrow().getContent());
     }
 
     @Test

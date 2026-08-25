@@ -25,7 +25,7 @@ public class WechatToolRegistry extends ToolRegistry {
                     argumentsJson,
                     decision.reason(),
                     TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)));
-            return ToolOutput.text("微信通道策略拒绝: " + decision.reason());
+            return ToolOutput.failure("微信通道策略拒绝: " + decision.reason());
         }
         return super.doExecuteTool(name, argumentsJson);
     }

@@ -19,7 +19,7 @@ import java.util.stream.Collectors;
  * 职责：
  * 1. 持久化用户偏好、项目事实、关键决策等
  * 2. 支持关键词检索
- * 3. 自动去重（基于内容相似度）
+ * 3. 在相同类型和作用域内，基于规范化内容近似匹配自动去重
  * 4. 定期持久化到磁盘
  */
 public class LongTermMemory implements Memory {
@@ -54,15 +54,18 @@ public class LongTermMemory implements Memory {
     }
 
     @Override
-    public void store(MemoryEntry entry) {
-        // 去重检查：如果已存在内容完全相同的条目，跳过
+    public synchronized void store(MemoryEntry entry) {
+        // type + scope + project 共同限定去重域，避免不同项目或不同可见性的记忆互相误杀。
         boolean duplicate = entries.values().stream()
-                .anyMatch(e -> e.getContent().equals(entry.getContent()));
+                .anyMatch(existing -> MemoryDeduplicator.isDuplicate(existing, entry));
         if (duplicate) {
             return;
         }
 
-        entries.put(entry.getId(), entry);
+        MemoryEntry previous = entries.put(entry.getId(), entry);
+        if (previous != null) {
+            tokenCounter.addAndGet(-previous.getTokenCount());
+        }
         tokenCounter.addAndGet(entry.getTokenCount());
         saveToDisk();
     }
@@ -105,7 +108,7 @@ public class LongTermMemory implements Memory {
     }
 
     @Override
-    public boolean delete(String id) {
+    public synchronized boolean delete(String id) {
         MemoryEntry removed = entries.remove(id);
         if (removed != null) {
             tokenCounter.addAndGet(-removed.getTokenCount());
@@ -116,7 +119,7 @@ public class LongTermMemory implements Memory {
     }
 
     @Override
-    public void clear() {
+    public synchronized void clear() {
         entries.clear();
         tokenCounter.set(0);
         saveToDisk();

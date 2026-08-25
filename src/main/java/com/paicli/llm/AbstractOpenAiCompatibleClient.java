@@ -6,14 +6,18 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import okhttp3.*;
 import okio.BufferedSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
 public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
 
+    private static final Logger log = LoggerFactory.getLogger(AbstractOpenAiCompatibleClient.class);
     protected static final ObjectMapper mapper = new ObjectMapper();
 
     // SSE 流式接口下，OkHttp 的 readTimeout 是"两次 read 之间的最大间隔"，不是请求总时长。
@@ -25,6 +29,8 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
             .readTimeout(readTimeoutSeconds("paicli.llm.read.timeout.seconds", 300), TimeUnit.SECONDS)
             .writeTimeout(readTimeoutSeconds("paicli.llm.write.timeout.seconds", 60), TimeUnit.SECONDS)
             .callTimeout(readTimeoutSeconds("paicli.llm.call.timeout.seconds", 600), TimeUnit.SECONDS)
+            // 重试由 LlmRetryPolicy 统一分类和限次，避免 OkHttp 隐式重放突破次数上限。
+            .retryOnConnectionFailure(false)
             .build();
 
     private static long readTimeoutSeconds(String key, long defaultValue) {
@@ -71,11 +77,50 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
         customizeRequest(request);
         Request builtRequest = request.build();
 
+        LlmRetryPolicy retryPolicy = retryPolicy();
+        IOException lastFailure = null;
+        for (int attempt = 1; attempt <= retryPolicy.maxAttempts(); attempt++) {
+            AttemptProgress progress = new AttemptProgress(streamListener != StreamListener.NO_OP);
+            try {
+                return executeAttempt(builtRequest, streamListener, progress, retryPolicy);
+            } catch (IOException failure) {
+                if (lastFailure != null && lastFailure != failure) {
+                    failure.addSuppressed(lastFailure);
+                }
+                lastFailure = failure;
+
+                boolean canRetry = attempt < retryPolicy.maxAttempts()
+                        && !progress.hasConsumableOutput()
+                        && retryPolicy.isRetryableFailure(failure);
+                if (!canRetry) {
+                    throw failure;
+                }
+
+                int retryNumber = attempt;
+                long delayMillis = retryPolicy.delayMillis(retryNumber, retryAfterHeader(failure));
+                log.warn("LLM request failed before streaming output; retrying provider={} model={} "
+                                + "attempt={}/{} delayMs={} cause={}",
+                        getProviderName(), getModelName(), attempt + 1, retryPolicy.maxAttempts(),
+                        delayMillis, failure.getMessage());
+                retryPolicy.sleep(delayMillis);
+            }
+        }
+        throw lastFailure != null ? lastFailure : new IOException("LLM 请求失败");
+    }
+
+    private ChatResponse executeAttempt(Request builtRequest,
+                                        StreamListener streamListener,
+                                        AttemptProgress progress,
+                                        LlmRetryPolicy retryPolicy) throws IOException {
         try (Response response = httpClient().newCall(builtRequest).execute()) {
             ResponseBody responseBodyObj = response.body();
             if (!response.isSuccessful()) {
                 String errorBody = responseBodyObj != null ? responseBodyObj.string() : "无响应体";
-                throw new IOException("API请求失败: " + response.code() + " - " + errorBody);
+                throw new LlmHttpException(
+                        response.code(),
+                        response.header("Retry-After"),
+                        "API请求失败: " + response.code() + " - " + errorBody
+                );
             }
             if (responseBodyObj == null) {
                 throw new IOException("API返回空响应体");
@@ -89,6 +134,7 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
             int inputTokens = 0;
             int outputTokens = 0;
             int cachedInputTokens = 0;
+            boolean streamCompleted = false;
 
             while (!source.exhausted()) {
                 String line = source.readUtf8Line();
@@ -106,13 +152,17 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                     continue;
                 }
                 if ("[DONE]".equals(payload)) {
+                    streamCompleted = true;
                     break;
                 }
 
                 JsonNode root = mapper.readTree(payload);
                 JsonNode error = root.path("error");
                 if (!error.isMissingNode() && !error.isNull()) {
-                    throw new IOException("API请求失败: " + formatStreamingError(error));
+                    throw new LlmStreamingApiException(
+                            "API请求失败: " + formatStreamingError(error),
+                            isRetryableStreamingError(error, retryPolicy)
+                    );
                 }
                 JsonNode usage = root.path("usage");
                 if (!usage.isMissingNode()) {
@@ -127,6 +177,10 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                 }
 
                 JsonNode choice = choices.get(0);
+                JsonNode finishReason = choice.get("finish_reason");
+                if (finishReason != null && !finishReason.isNull() && !finishReason.asText("").isBlank()) {
+                    streamCompleted = true;
+                }
                 JsonNode delta = choice.path("delta");
                 if (delta.isMissingNode() || delta.isNull()) {
                     delta = choice.path("message");
@@ -143,16 +197,22 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                 String reasoningDelta = extractReasoningDelta(delta);
                 if (!reasoningDelta.isEmpty()) {
                     reasoning.append(reasoningDelta);
+                    progress.markConsumableOutput();
                     streamListener.onReasoningDelta(reasoningDelta);
                 }
 
                 String contentDelta = delta.path("content").asText("");
                 if (!contentDelta.isEmpty()) {
                     content.append(contentDelta);
+                    progress.markConsumableOutput();
                     streamListener.onContentDelta(contentDelta);
                 }
 
                 mergeToolCallDeltas(toolAccumulators, delta.path("tool_calls"));
+            }
+
+            if (!streamCompleted) {
+                throw new LlmStreamInterruptedException("LLM 流式响应在完成标记前中断");
             }
 
             List<ToolCall> toolCalls = buildToolCalls(toolAccumulators);
@@ -170,6 +230,35 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                     cachedInputTokens
             );
         }
+    }
+
+    LlmRetryPolicy retryPolicy() {
+        return LlmRetryPolicy.fromSystemProperties();
+    }
+
+    private String retryAfterHeader(IOException failure) {
+        return failure instanceof LlmHttpException httpFailure ? httpFailure.retryAfter() : null;
+    }
+
+    private boolean isRetryableStreamingError(JsonNode error, LlmRetryPolicy retryPolicy) {
+        int status = error.path("status").asInt(0);
+        if (status == 0 && error.path("code").canConvertToInt()) {
+            status = error.path("code").asInt(0);
+        }
+        if (status != 0) {
+            return retryPolicy.isRetryableStatus(status);
+        }
+
+        String code = error.path("code").asText("").toLowerCase(Locale.ROOT);
+        String type = error.path("type").asText("").toLowerCase(Locale.ROOT);
+        String message = error.path("message").asText("").toLowerCase(Locale.ROOT);
+        String combined = code + " " + type + " " + message;
+        return combined.contains("rate_limit")
+                || combined.contains("too many requests")
+                || combined.contains("overloaded")
+                || combined.contains("server_error")
+                || combined.contains("temporarily unavailable")
+                || combined.contains("timeout");
     }
 
     private String formatStreamingError(JsonNode error) {
@@ -282,6 +371,25 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
 
     protected OkHttpClient httpClient() {
         return SHARED_HTTP_CLIENT;
+    }
+
+    private static final class AttemptProgress {
+        private final boolean hasStreamingConsumer;
+        private boolean consumableOutput;
+
+        private AttemptProgress(boolean hasStreamingConsumer) {
+            this.hasStreamingConsumer = hasStreamingConsumer;
+        }
+
+        void markConsumableOutput() {
+            if (hasStreamingConsumer) {
+                consumableOutput = true;
+            }
+        }
+
+        boolean hasConsumableOutput() {
+            return consumableOutput;
+        }
     }
 
     private void appendMessageContent(ObjectNode msgNode, Message msg) {

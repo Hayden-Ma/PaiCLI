@@ -92,10 +92,52 @@ class AgentBudgetTest {
     @Test
     void defaultTokenBudgetIsUnlimited() {
         // 默认不再用 80% × window 当硬限——长上下文 + 套餐用户场景下太容易撞墙。
-        // 死循环防护交给 stagnation + hardMaxIterations 两道兜底。
+        // 默认死循环防护交给 stagnation；硬轮数只在用户显式配置时启用。
         AgentBudget budget = AgentBudget.fromLlmClient(new GLMClient("test-key"));
 
         assertEquals(Integer.MAX_VALUE, budget.tokenBudget());
+    }
+
+    @Test
+    void defaultIterationLimitIsUnlimited() {
+        String old = System.getProperty("paicli.react.hard.max.iterations");
+        try {
+            System.clearProperty("paicli.react.hard.max.iterations");
+            AgentBudget budget = AgentBudget.fromLlmClient(new GLMClient("test-key"));
+
+            assertEquals(AgentBudget.UNLIMITED_ITERATIONS, budget.hardMaxIterations());
+            assertTrue(!budget.hasHardIterationLimit());
+            for (int i = 0; i < 100; i++) {
+                budget.beginIteration();
+            }
+            assertEquals(AgentBudget.ExitReason.WITHIN_BUDGET, budget.check());
+        } finally {
+            if (old == null) {
+                System.clearProperty("paicli.react.hard.max.iterations");
+            } else {
+                System.setProperty("paicli.react.hard.max.iterations", old);
+            }
+        }
+    }
+
+    @Test
+    void systemPropertyCanEnableHardIterationLimit() {
+        String old = System.getProperty("paicli.react.hard.max.iterations");
+        try {
+            System.setProperty("paicli.react.hard.max.iterations", "2");
+            AgentBudget budget = AgentBudget.fromLlmClient(new GLMClient("test-key"));
+
+            assertTrue(budget.hasHardIterationLimit());
+            budget.beginIteration();
+            budget.beginIteration();
+            assertEquals(AgentBudget.ExitReason.HARD_ITERATION_LIMIT, budget.check());
+        } finally {
+            if (old == null) {
+                System.clearProperty("paicli.react.hard.max.iterations");
+            } else {
+                System.setProperty("paicli.react.hard.max.iterations", old);
+            }
+        }
     }
 
     @Test

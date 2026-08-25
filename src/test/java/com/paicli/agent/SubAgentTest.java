@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.function.Consumer;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -138,6 +139,41 @@ class SubAgentTest {
         assertTrue(output.contains("答案"), "content should still appear");
     }
 
+    @Test
+    void explicitIterationLimitReturnsPartialResultWithToolsDisabled() {
+        String old = System.getProperty("paicli.react.hard.max.iterations");
+        try {
+            System.setProperty("paicli.react.hard.max.iterations", "1");
+            BudgetFinalizationClient llm = new BudgetFinalizationClient(List.of(
+                    new LlmClient.ChatResponse(
+                            "assistant",
+                            "",
+                            List.of(new LlmClient.ToolCall(
+                                    "call_1",
+                                    new LlmClient.ToolCall.Function("list_dir", "{\"path\":\".\"}"))),
+                            10,
+                            2),
+                    new LlmClient.ChatResponse(
+                            "assistant", "目录已读取，但尚未完成进一步分析。", null, 10, 2)));
+            SubAgent worker = new SubAgent("worker", AgentRole.WORKER, llm, new ToolRegistry());
+
+            AgentMessage result = worker.execute(
+                    AgentMessage.task("orchestrator", "列出当前目录并分析"),
+                    new PrintStream(new ByteArrayOutputStream()));
+
+            assertEquals(AgentMessage.Type.RESULT, result.type());
+            assertTrue(result.content().contains("部分完成"));
+            assertEquals(2, llm.toolSnapshots.size());
+            assertTrue(llm.toolSnapshots.get(1).isEmpty(), "SubAgent 收尾调用不得暴露工具");
+        } finally {
+            if (old == null) {
+                System.clearProperty("paicli.react.hard.max.iterations");
+            } else {
+                System.setProperty("paicli.react.hard.max.iterations", old);
+            }
+        }
+    }
+
     private boolean invokeShouldUseTools(SubAgent agent) throws Exception {
         Method method = SubAgent.class.getDeclaredMethod("shouldUseTools");
         method.setAccessible(true);
@@ -194,6 +230,32 @@ class SubAgentTest {
             CallScript next = iter.next();
             next.streamScript().accept(listener);
             return next.response();
+        }
+    }
+
+    private static final class BudgetFinalizationClient extends GLMClient {
+        private final java.util.Queue<ChatResponse> responses;
+        private final java.util.List<java.util.List<Tool>> toolSnapshots = new java.util.ArrayList<>();
+
+        private BudgetFinalizationClient(List<ChatResponse> responses) {
+            super("test-key");
+            this.responses = new java.util.ArrayDeque<>(responses);
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools) throws IOException {
+            return chat(messages, tools, StreamListener.NO_OP);
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener)
+                throws IOException {
+            toolSnapshots.add(tools == null ? List.of() : List.copyOf(tools));
+            ChatResponse response = responses.poll();
+            if (response == null) {
+                throw new IOException("缺少预设响应");
+            }
+            return response;
         }
     }
 }

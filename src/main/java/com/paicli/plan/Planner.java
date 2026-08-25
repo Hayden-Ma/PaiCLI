@@ -2,6 +2,7 @@ package com.paicli.plan;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.history.ConversationLedger;
 import com.paicli.llm.LlmClient;
 import com.paicli.llm.LlmTraceLogger;
 import com.paicli.prompt.PromptAssembler;
@@ -29,6 +30,7 @@ public class Planner {
     private final PrintStream out;
     private final ObjectMapper mapper = new ObjectMapper();
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
+    private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private Supplier<String> projectMemorySupplier = () ->
             ProjectMemoryLoader.createDefault(Path.of(".").toAbsolutePath().normalize()).loadForPrompt();
 
@@ -43,6 +45,12 @@ public class Planner {
 
     public void setProjectMemorySupplier(Supplier<String> projectMemorySupplier) {
         this.projectMemorySupplier = projectMemorySupplier == null ? () -> "" : projectMemorySupplier;
+    }
+
+    public void setConversationLedger(ConversationLedger conversationLedger) {
+        this.conversationLedger = conversationLedger == null
+                ? ConversationLedger.disabled()
+                : conversationLedger;
     }
 
     /**
@@ -62,10 +70,17 @@ public class Planner {
                         .build())),
                 LlmClient.Message.user("请为以下任务制定执行计划：\n" + goal)
         );
+        conversationLedger.appendMessage("plan", "planner", "system_prompt", messages.get(0));
+        conversationLedger.appendMessage("plan", "planner", "planning_request", messages.get(1));
 
         // 调用LLM生成计划
         PlanningStreamRenderer streamRenderer = new PlanningStreamRenderer(out);
         LlmClient.ChatResponse response = llmClient.chat(messages, null, streamRenderer);
+        conversationLedger.appendMessage(
+                "plan",
+                "planner",
+                "llm_response",
+                LlmClient.Message.assistant(response.reasoningContent(), response.content()));
         LlmTraceLogger.logReasoning(log, "planner", llmClient, response.reasoningContent());
         streamRenderer.finish();
         String planJson = response.content();

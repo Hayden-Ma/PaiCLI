@@ -189,6 +189,20 @@ public final class InlineRenderer implements Renderer {
     }
 
     @Override
+    public void beginActivity(String label, String detail, boolean cancelable) {
+        if (activityDisplay != null && !closed) {
+            activityDisplay.beginActivity(label, detail, cancelable);
+        }
+    }
+
+    @Override
+    public void updateActivity(String detail, int completed, int total) {
+        if (activityDisplay != null && !closed) {
+            activityDisplay.updateActivity(detail, completed, total);
+        }
+    }
+
+    @Override
     public void endActivity() {
         if (activityDisplay != null) {
             activityDisplay.end();

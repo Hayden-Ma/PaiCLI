@@ -16,19 +16,21 @@ import java.util.Locale;
  *
  * 1. Token 预算：累计 input + output token 超过阈值后强制收尾（**默认无限**，仅显式配置时生效）
  * 2. 停滞检测：连续 N 次工具调用使用完全相同的工具名 + 参数，判定为死循环
- * 3. 硬轮数兜底：累计迭代轮数超过 hardMaxIterations，作为兜底防御
+ * 3. 可选硬轮数兜底：只有显式配置 hardMaxIterations 时才限制迭代轮数
  *
  * 这三个条件按"先到先触发"判定，任何一个命中都会让循环结束。
  *
  * 配置读取顺序（以 {@link #fromSystemProperties()} 为准）：
  * 1. 系统属性：{@code paicli.react.token.budget} / {@code paicli.react.stagnation.window} /
  *    {@code paicli.react.hard.max.iterations}
- * 2. 默认值：token 预算 = Integer.MAX_VALUE（实质不限）/ 连续 3 次相同工具调用 / 50 轮
+ * 2. 默认值：token 预算 = Integer.MAX_VALUE（实质不限）/ 连续 3 次相同工具调用 / 不限制轮数
  *
  * 设计取舍：长上下文模型（GLM-5.1 200k / DeepSeek V4 1M）配合套餐用户的"无限 token"诉求，
  * 默认不再以 80% × window 为硬限——让 LLM 自然停在它该停的地方。需要严格成本控制的
  * 场景（CI / 自动化批跑）通过 {@code -Dpaicli.react.token.budget=N} 显式启用。
- * 死循环防护交给 stagnation 检测和 hardMaxIterations 两道兜底。
+ * 默认死循环防护交给 stagnation 检测；无人值守、CI 或严格成本控制场景可显式配置
+ * hardMaxIterations。显式预算命中后，调用方应禁用工具并执行一次最佳努力收尾，
+ * 而不是丢弃已经完成的工作。
  */
 public class AgentBudget {
 
@@ -40,7 +42,8 @@ public class AgentBudget {
     }
 
     private static final int DEFAULT_STAGNATION_WINDOW = 3;
-    private static final int DEFAULT_HARD_MAX_ITERATIONS = 50;
+    public static final int UNLIMITED_ITERATIONS = Integer.MAX_VALUE;
+    private static final int DEFAULT_HARD_MAX_ITERATIONS = UNLIMITED_ITERATIONS;
 
     private final int tokenBudget;
     private final int stagnationWindow;
@@ -74,8 +77,9 @@ public class AgentBudget {
 
     public static AgentBudget fromLlmClient(LlmClient llmClient) {
         // ContextProfile 仍按 80% × window 计算 agentTokenBudget，用于 /context 与 token stats 的"软提示"显示；
-        // 但 AgentBudget 的硬限默认走 Integer.MAX_VALUE，避免长上下文 + 套餐用户被预算墙卡住。
-        // 显式 -Dpaicli.react.token.budget=N 仍可启用硬预算，覆盖默认。
+        // AgentBudget 默认不限制轮数，避免长上下文 + 套餐用户被固定轮数墙卡住。
+        // 显式 -Dpaicli.react.token.budget=N / -Dpaicli.react.hard.max.iterations=N
+        // 仍可为无人值守或成本敏感场景启用硬预算。
         return new AgentBudget(
                 readIntProperty("paicli.react.token.budget", Integer.MAX_VALUE),
                 readIntProperty("paicli.react.stagnation.window", DEFAULT_STAGNATION_WINDOW),
@@ -127,7 +131,7 @@ public class AgentBudget {
         if (totalInputTokens + totalOutputTokens >= tokenBudget) {
             return ExitReason.TOKEN_BUDGET_EXCEEDED;
         }
-        if (iteration >= hardMaxIterations) {
+        if (hasHardIterationLimit() && iteration >= hardMaxIterations) {
             return ExitReason.HARD_ITERATION_LIMIT;
         }
         return ExitReason.WITHIN_BUDGET;
@@ -157,6 +161,10 @@ public class AgentBudget {
         return hardMaxIterations;
     }
 
+    public boolean hasHardIterationLimit() {
+        return hardMaxIterations != UNLIMITED_ITERATIONS;
+    }
+
     public int stagnationWindow() {
         return stagnationWindow;
     }
@@ -165,14 +173,25 @@ public class AgentBudget {
         return switch (reason) {
             case WITHIN_BUDGET -> "未触发兜底条件";
             case TOKEN_BUDGET_EXCEEDED -> String.format(Locale.ROOT,
-                    "Token 预算已用尽（%d / %d），任务被强制收尾",
+                    "Token 预算已用尽（%d / %d），将停止工具执行并收尾",
                     totalInputTokens + totalOutputTokens, tokenBudget);
             case STAGNATION_DETECTED -> String.format(Locale.ROOT,
-                    "检测到连续 %d 轮重复的工具调用，疑似死循环，已强制收尾",
+                    "检测到连续 %d 轮重复的工具调用，疑似死循环，将停止工具执行并收尾",
                     stagnationWindow);
             case HARD_ITERATION_LIMIT -> String.format(Locale.ROOT,
-                    "达到硬轮数上限（%d），已强制收尾", hardMaxIterations);
+                    "达到显式硬轮数上限（%d），将停止工具执行并收尾", hardMaxIterations);
         };
+    }
+
+    /**
+     * 构造预算命中后的单次无工具收尾指令。调用方必须在这次请求中传入空工具列表，
+     * 防止模型再次进入工具循环。
+     */
+    public String finalizationInstruction(ExitReason reason) {
+        return "执行预算安全阀已触发：" + describeExit(reason) + "。\n"
+                + "不要再调用任何工具。请只基于当前会话和已有工具结果，给出最佳努力的部分完成结果。\n"
+                + "必须明确说明：1. 已完成；2. 已验证；3. 未完成或阻塞；4. 建议下一步。\n"
+                + "不得声称任务已经全部完成。";
     }
 
     private static String signatureOf(List<LlmClient.ToolCall> toolCalls) {

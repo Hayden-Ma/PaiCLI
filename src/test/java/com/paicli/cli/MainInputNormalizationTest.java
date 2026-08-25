@@ -1,5 +1,6 @@
 package com.paicli.cli;
 
+import com.paicli.harness.BetterHarnessRunner;
 import com.paicli.llm.LlmClient;
 import org.jline.reader.History;
 import org.jline.reader.LineReader;
@@ -77,6 +78,37 @@ class MainInputNormalizationTest {
         assertTrue(tips.containsKey("/model"));
         assertTrue(tips.get("/model").getMainDesc().get(0).toString().contains("查看当前模型"));
         assertTrue(tips.containsKey("/plan <任务内容>"));
+    }
+
+    @Test
+    void formatsBetterHarnessProgressForTerminalFeedback() {
+        String progress = Main.formatBetterHarnessProgress(
+                new BetterHarnessRunner.ProgressEvent(
+                        BetterHarnessRunner.ProgressStage.ANALYZING,
+                        "Session Evidence 审查完成",
+                        2,
+                        5));
+
+        assertEquals("2/5 · Session Evidence 审查完成", progress);
+    }
+
+    @Test
+    void rendersBetterHarnessMarkdownInsteadOfPrintingSourceMarkers() {
+        String rendered = Main.renderBetterHarnessMarkdown("""
+                # PaiCLI Better Harness 报告
+
+                ## 范围与限制
+                - **会话证据**：仅包含脱敏元数据
+                1. **BH-001**：补充验证记录
+                """, 100);
+
+        assertTrue(rendered.contains("PaiCLI Better Harness 报告"), rendered);
+        assertTrue(rendered.contains("范围与限制"), rendered);
+        assertTrue(rendered.contains("- 会话证据：仅包含脱敏元数据"), rendered);
+        assertTrue(rendered.contains("1. BH-001：补充验证记录"), rendered);
+        assertFalse(rendered.contains("# PaiCLI"), rendered);
+        assertFalse(rendered.contains("## 范围"), rendered);
+        assertFalse(rendered.contains("**"), rendered);
     }
 
     @Test
@@ -188,6 +220,7 @@ class MainInputNormalizationTest {
         assertTrue(commands.contains("/search <查询>"));
         assertTrue(commands.contains("/graph <类名>"));
         assertTrue(commands.contains("/compact"));
+        assertTrue(commands.contains("/better-harness"));
     }
 
     @Test

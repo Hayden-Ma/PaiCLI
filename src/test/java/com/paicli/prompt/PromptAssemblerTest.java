@@ -40,6 +40,24 @@ class PromptAssemblerTest {
     }
 
     @Test
+    void builtinPromptRequiresClarificationAndGroundedWebUrls() {
+        PromptAssembler assembler = PromptAssembler.createDefault();
+
+        String prompt = assembler.assemble(PromptMode.AGENT, PromptContext.empty());
+
+        assertTrue(prompt.contains("只是一个标题、主题或摘录"));
+        assertTrue(prompt.contains("本轮不调用任何工具"));
+        assertTrue(prompt.contains("明确要求不要联网"));
+        assertTrue(prompt.contains("猜测、补全或编造 URL"));
+        assertTrue(prompt.contains("先使用 `web_search` 找入口"));
+        assertTrue(prompt.contains("用户实际提交的当前顶层原文中"));
+        assertTrue(prompt.contains("本执行分支 `web_search` 通过结构化结果授信的 URL"));
+        assertTrue(prompt.contains("搜索正文/snippet/query 回显/错误提示"));
+        assertTrue(prompt.contains("`web_fetch` 正文、浏览器导航/快照/网络列表"));
+        assertTrue(prompt.contains("TurnToolPolicy"));
+    }
+
+    @Test
     void projectOverrideReplacesBuiltinModePrompt() throws Exception {
         Path projectPrompts = tempDir.resolve("project");
         Files.createDirectories(projectPrompts.resolve("modes"));

@@ -21,6 +21,7 @@ class SkillBuiltinExtractorTest {
         assertTrue(Files.isRegularFile(skillDir.resolve("SKILL.md")));
         assertTrue(Files.isRegularFile(skillDir.resolve("references/cdp-cheatsheet.md")));
         assertTrue(Files.isRegularFile(skillDir.resolve("references/site-patterns/github.com.md")));
+        assertTrue(Files.isRegularFile(tempDir.resolve("better-harness/SKILL.md")));
         assertTrue(Files.isRegularFile(skillDir.resolve(".version")));
         assertEquals(SkillBuiltinExtractor.CURRENT_VERSION,
                 Files.readString(skillDir.resolve(".version")).trim());

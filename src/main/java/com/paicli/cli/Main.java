@@ -15,6 +15,9 @@ import com.paicli.hitl.HitlToolRegistry;
 import com.paicli.hitl.SwitchableHitlHandler;
 import com.paicli.hitl.RendererHitlHandler;
 import com.paicli.hitl.TerminalHitlHandler;
+import com.paicli.history.ConversationLedger;
+import com.paicli.harness.BetterHarnessOptions;
+import com.paicli.harness.BetterHarnessRunner;
 import com.paicli.llm.LlmClient;
 import com.paicli.llm.LlmClientFactory;
 import com.paicli.memory.LongTermMemory;
@@ -47,6 +50,7 @@ import com.paicli.snapshot.TurnSnapshot;
 import com.paicli.skill.SkillRegistry;
 import com.paicli.tool.ToolRegistry;
 import com.paicli.util.AnsiStyle;
+import com.paicli.util.TerminalMarkdownRenderer;
 import com.paicli.wechat.IlinkClient;
 import com.paicli.wechat.WechatAccount;
 import com.paicli.wechat.WechatAccountStore;
@@ -315,7 +319,18 @@ public class Main {
             hitlToolRegistry.setSkillRegistry(skillRegistry);
             hitlToolRegistry.setSkillContextBuffer(skillContextBuffer);
 
+            ConversationLedger conversationLedger;
+            try {
+                conversationLedger = ConversationLedger.openDefault(home);
+            } catch (IOException e) {
+                conversationLedger = ConversationLedger.disabled();
+                startupNote = appendStartupNote(
+                        startupNote,
+                        "原始会话账本初始化失败: " + e.getMessage());
+            }
+
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
+            reactAgent.setConversationLedger(conversationLedger);
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
             reactAgent.setSkillRegistry(skillRegistry);
             reactAgent.setSkillContextBuffer(skillContextBuffer);
@@ -714,6 +729,81 @@ public class Main {
                         renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
+                    case BETTER_HARNESS -> {
+                        BetterHarnessOptions.ParseResult parsed =
+                                BetterHarnessOptions.parse(command.payload());
+                        if (!parsed.valid()) {
+                            ui.println("❌ " + parsed.error() + "\n");
+                            continue;
+                        }
+                        ui.println("🔎 Better Harness 开始审查当前项目\n");
+                        renderer.updateStatus(
+                                statusInfo(reactAgent, mcpServerManager, skillRegistry, "harness"));
+                        boolean activityPanel = renderer.supportsActivityPanel();
+                        if (activityPanel) {
+                            renderer.beginActivity(
+                                    "Better Harness",
+                                    "正在准备审计 · 按 ESC 可取消",
+                                    true);
+                        } else {
+                            ui.println("⏳ 0/5 · 正在准备审计 · 按 ESC 可取消");
+                        }
+                        AtomicReference<BetterHarnessRunner.RunResult> resultRef =
+                                new AtomicReference<>();
+                        String runStatus;
+                        try {
+                            BetterHarnessRunner runner = new BetterHarnessRunner(
+                                    llmClient,
+                                    Path.of(reactAgent.getToolRegistry().getProjectPath()),
+                                    reactAgent.getConversationLedger(),
+                                    skillRegistry);
+                            runStatus = runWithCancelSupport(
+                                    terminal,
+                                    ui,
+                                    () -> {
+                                        resultRef.set(runner.run(
+                                                parsed.options(),
+                                                event -> {
+                                                    String progress =
+                                                            formatBetterHarnessProgress(event);
+                                                    if (activityPanel) {
+                                                        renderer.updateActivity(
+                                                                event.message(),
+                                                                event.completed(),
+                                                                event.total());
+                                                    } else {
+                                                        ui.println("⏳ " + progress);
+                                                    }
+                                                }));
+                                        return "";
+                                    });
+                        } finally {
+                            if (activityPanel) {
+                                renderer.endActivity();
+                            }
+                            renderer.updateStatus(
+                                    statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        }
+                        BetterHarnessRunner.RunResult result = resultRef.get();
+                        if (result == null) {
+                            ui.println(runStatus == null || runStatus.isBlank()
+                                    ? "❌ Better Harness 未生成报告\n"
+                                    : runStatus + "\n");
+                            continue;
+                        }
+                        ui.print(renderBetterHarnessMarkdown(
+                                result.reportMarkdown(),
+                                renderer.terminalColumns()));
+                        ui.println();
+                        if (result.durable()) {
+                            ui.println("✅ " + result.findingCount() + " 个 findings");
+                            ui.println("   Markdown: " + result.reportMarkdownPath());
+                            ui.println("   HTML: " + result.reportHtmlPath());
+                            ui.println("   JSON: " + result.findingsJsonPath());
+                            ui.println();
+                        }
+                        continue;
+                    }
                     case EXPORT -> {
                         handleExportCommand(ui, reactAgent);
                         continue;
@@ -814,7 +904,7 @@ public class Main {
                         planAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
                         planAgent.setSkillRegistry(skillRegistry);
                         planAgent.setSkillContextBuffer(skillContextBuffer);
-                        return planAgent.run(taskInput);
+                        return planAgent.run(taskInput, submittedInput);
                     };
                 } else if (nextTaskUseTeamMode || command.type() == CliCommandParser.CommandType.SWITCH_TEAM) {
                     snapshotMode = "team";
@@ -823,11 +913,11 @@ public class Main {
                         AgentOrchestrator orchestrator = createTeamAgent(activeClient, reactAgent, ui);
                         orchestrator.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
                         orchestrator.setSkillSystem(skillRegistry, skillContextBuffer);
-                        return orchestrator.run(taskInput);
+                        return orchestrator.run(taskInput, submittedInput);
                     };
                 } else {
                     snapshotMode = "react";
-                    runTask = () -> reactAgent.run(taskInput);
+                    runTask = () -> reactAgent.run(taskInput, submittedInput);
                 }
                 SnapshotService snapshotService = reactAgent.getToolRegistry().getSnapshotService();
                 renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, snapshotMode));
@@ -912,6 +1002,12 @@ public class Main {
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(Path.of(".").toAbsolutePath().normalize().toString());
         Agent agent = new Agent(llmClient, registry);
+        try {
+            agent.setConversationLedger(ConversationLedger.openDefault(
+                    Path.of(System.getProperty("user.home"))));
+        } catch (IOException ignored) {
+            // A background task should still run if its audit directory is temporarily unavailable.
+        }
         return agent.run(prompt);
     }
 
@@ -1079,30 +1175,51 @@ public class Main {
 
     static PlanExecuteAgent createPlanAgent(LlmClient llmClient, Agent reactAgent,
                                             PlanExecuteAgent.PlanReviewHandler reviewHandler) {
-        return new PlanExecuteAgent(
+        PlanExecuteAgent planAgent = new PlanExecuteAgent(
                 llmClient,
                 reactAgent.getToolRegistry(),
                 reactAgent.getMemoryManager(),
                 reviewHandler,
                 System.out
         );
+        planAgent.setConversationLedger(reactAgent.getConversationLedger());
+        return planAgent;
     }
 
     private static PlanExecuteAgent createPlanAgent(LlmClient llmClient, Agent reactAgent,
                                                     Terminal terminal, LineReader lineReader, PrintStream out) {
         out.println("📋 使用 Plan-and-Execute 模式\n");
-        return new PlanExecuteAgent(
+        PlanExecuteAgent planAgent = new PlanExecuteAgent(
                 llmClient,
                 reactAgent.getToolRegistry(),
                 reactAgent.getMemoryManager(),
                 createPlanReviewHandler(terminal, lineReader, out),
                 out
         );
+        planAgent.setConversationLedger(reactAgent.getConversationLedger());
+        return planAgent;
     }
 
     private static AgentOrchestrator createTeamAgent(LlmClient llmClient, Agent reactAgent, PrintStream out) {
         out.println("👥 使用 Multi-Agent 协作模式\n");
-        return new AgentOrchestrator(llmClient, reactAgent.getToolRegistry(), reactAgent.getMemoryManager(), out);
+        AgentOrchestrator orchestrator =
+                new AgentOrchestrator(llmClient, reactAgent.getToolRegistry(), reactAgent.getMemoryManager(), out);
+        orchestrator.setConversationLedger(reactAgent.getConversationLedger());
+        return orchestrator;
+    }
+
+    static String formatBetterHarnessProgress(BetterHarnessRunner.ProgressEvent event) {
+        if (event == null) {
+            return "0/0 · 等待进度";
+        }
+        return event.completed() + "/" + event.total() + " · " + event.message();
+    }
+
+    static String renderBetterHarnessMarkdown(String markdown, int terminalColumns) {
+        if (markdown == null || markdown.isBlank()) {
+            return "";
+        }
+        return TerminalMarkdownRenderer.render(markdown, terminalColumns);
     }
 
     private static String runWithCancelSupport(Terminal terminal, PrintStream out, Callable<String> task) {
@@ -1596,6 +1713,10 @@ public class Main {
                 new SlashCommandHint("/skill on ", "/skill on <name>", "启用 skill"),
                 new SlashCommandHint("/skill off ", "/skill off <name>", "禁用 skill"),
                 new SlashCommandHint("/skill reload", "/skill reload", "重新扫描 skill 目录"),
+                new SlashCommandHint("/better-harness", "/better-harness", "审查当前项目的 AI 编码工作流"),
+                new SlashCommandHint("/better-harness quick", "/better-harness quick", "快速生成 Better Harness 报告"),
+                new SlashCommandHint("/better-harness normal", "/better-harness normal", "完整生成 Better Harness 报告"),
+                new SlashCommandHint("/better-harness --inline", "/better-harness --inline", "只在终端输出，不写报告文件"),
                 new SlashCommandHint("/export", "/export", "导出当前会话对话记录为 Markdown"),
                 new SlashCommandHint("/exit", "/exit", "退出 PaiCLI"),
                 new SlashCommandHint("/quit", "/quit", "退出 PaiCLI")

@@ -45,6 +45,7 @@ class BrowserGuardTest {
         Path rules = tempDir.resolve("sensitive_patterns.txt");
         Files.writeString(rules, "*://example.com/admin/*\n");
         BrowserSession session = sharedSession();
+        session.recordOpenedTab("page-1");
         session.rememberNavigation("https://example.com/admin/users");
         BrowserGuard guard = new BrowserGuard(session, new SensitivePagePolicy(rules));
 
@@ -59,6 +60,7 @@ class BrowserGuardTest {
         Path rules = tempDir.resolve("sensitive_patterns.txt");
         Files.writeString(rules, "*://example.com/admin/*\n");
         BrowserSession session = sharedSession();
+        session.recordOpenedTab("page-1");
         session.rememberNavigation("https://example.com/admin/users");
         BrowserGuard guard = new BrowserGuard(session, new SensitivePagePolicy(rules));
 
@@ -72,7 +74,9 @@ class BrowserGuardTest {
     void navigateSensitiveUrlRequiresApprovalOnlyForWriteToolLater(@TempDir Path tempDir) throws Exception {
         Path rules = tempDir.resolve("sensitive_patterns.txt");
         Files.writeString(rules, "*://example.com/admin/*\n");
-        BrowserGuard guard = new BrowserGuard(sharedSession(), new SensitivePagePolicy(rules));
+        BrowserSession session = sharedSession();
+        session.recordOpenedTab("page-1");
+        BrowserGuard guard = new BrowserGuard(session, new SensitivePagePolicy(rules));
 
         BrowserCheckResult result = guard.check("mcp__chrome-devtools__navigate_page",
                 "{\"url\":\"https://example.com/admin/users\"}", true);
@@ -104,6 +108,43 @@ class BrowserGuardTest {
     }
 
     @Test
+    void failedNavigationDoesNotEstablishSessionState(@TempDir Path tempDir) {
+        BrowserSession session = sharedSession();
+        BrowserGuard guard = guard(session, tempDir);
+
+        guard.applyAfterExecution("mcp__chrome-devtools__new_page",
+                "{\"url\":\"https://example.com\"}",
+                "# Pages\n7: https://private.example [selected]", false);
+
+        assertNull(session.lastNavigatedUrl());
+        assertFalse(session.hasAgentOwnedCurrentPage());
+    }
+
+    @Test
+    void navigationReceiptDoesNotLeakOtherSharedTabs(@TempDir Path tempDir) {
+        BrowserGuard guard = guard(sharedSession(), tempDir);
+
+        String safe = guard.sanitizeResult("mcp__chrome-devtools__new_page",
+                "{\"url\":\"https://example.com\"}",
+                "# Pages\n1: https://mail.example/private\n2: https://example.com [selected]", true);
+
+        assertTrue(safe.contains("https://example.com"));
+        assertTrue(safe.contains("page 2"));
+        assertFalse(safe.contains("mail.example"));
+        assertFalse(safe.contains("# Pages"));
+    }
+
+    @Test
+    void sharedNonOwnedPageBlocksNavigationAndWritesButAllowsExplicitReadPath(@TempDir Path tempDir) {
+        BrowserGuard guard = guard(sharedSession(), tempDir);
+
+        assertTrue(guard.check("mcp__chrome-devtools__navigate_page",
+                "{\"url\":\"https://example.com\"}", false).blocked());
+        assertTrue(guard.check("mcp__chrome-devtools__click", "{\"uid\":\"1\"}", false).blocked());
+        assertFalse(guard.check("mcp__chrome-devtools__take_snapshot", "{}", false).blocked());
+    }
+
+    @Test
     void nonChromeToolIsIgnored(@TempDir Path tempDir) {
         BrowserGuard guard = guard(sharedSession(), tempDir);
 
@@ -115,7 +156,9 @@ class BrowserGuardTest {
 
     @Test
     void malformedJsonDoesNotThrow(@TempDir Path tempDir) {
-        BrowserGuard guard = guard(sharedSession(), tempDir);
+        BrowserSession session = sharedSession();
+        session.recordOpenedTab("page-1");
+        BrowserGuard guard = guard(session, tempDir);
 
         BrowserCheckResult result = guard.check("mcp__chrome-devtools__click", "not-json", true);
 

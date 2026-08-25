@@ -181,6 +181,23 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesBetterHarnessSlashCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/better-harness");
+
+        assertEquals(CliCommandParser.CommandType.BETTER_HARNESS, command.type());
+        assertNull(command.payload());
+    }
+
+    @Test
+    void parsesBetterHarnessOptions() {
+        CliCommandParser.ParsedCommand command =
+                CliCommandParser.parse("/better-harness quick --inline");
+
+        assertEquals(CliCommandParser.CommandType.BETTER_HARNESS, command.type());
+        assertEquals("quick --inline", command.payload());
+    }
+
+    @Test
     void parsesWechatSlashCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/wechat");
 

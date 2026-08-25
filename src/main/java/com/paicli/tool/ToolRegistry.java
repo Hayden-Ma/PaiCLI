@@ -170,6 +170,14 @@ public class ToolRegistry {
         return browserGuard;
     }
 
+    public boolean isSharedBrowserSession() {
+        return browserGuard != null && browserGuard.isSharedMode();
+    }
+
+    public boolean hasAgentOwnedCurrentBrowserPage() {
+        return browserGuard != null && browserGuard.hasAgentOwnedCurrentPage();
+    }
+
     public void setBrowserConnector(BrowserConnector browserConnector) {
         this.browserConnector = browserConnector;
     }
@@ -629,10 +637,10 @@ public class ToolRegistry {
 
         tools.put("web_fetch", new Tool(
                 "web_fetch",
-                "抓取指定 URL，提取正文转 Markdown。" +
+                "抓取当前顶层用户原文提供或本执行分支成功 web_search 结果发现的 URL，提取正文转 Markdown；不得使用模型猜测的 URL。" +
                         "适用静态 / SSR 页面（博客、文档、官网）；JS 渲染或防爬站会返回空正文，本期不重试。",
                 createParameters(
-                        new Param("url", "string", "完整 URL，需 http 或 https 协议", true),
+                        new Param("url", "string", "有可信来源的完整 URL，需 http 或 https 协议", true),
                         new Param("max_chars", "integer", "返回 Markdown 最大字符数（默认 8000，超出截断）", false)
                 ),
                 args -> webFetch(args.get("url"), parseInt(args.get("max_chars"), DEFAULT_FETCH_MAX_CHARS))
@@ -823,6 +831,10 @@ public class ToolRegistry {
         return searchProvider;
     }
 
+    void setSearchProvider(SearchProvider searchProvider) {
+        this.searchProvider = Objects.requireNonNull(searchProvider, "searchProvider");
+    }
+
     private synchronized WebFetcher webFetcher() {
         if (webFetcher == null) {
             webFetcher = new WebFetcher();
@@ -845,8 +857,12 @@ public class ToolRegistry {
     }
 
     String webSearch(String query, int topK) {
+        return webSearchOutput(query, topK).text();
+    }
+
+    private ToolOutput webSearchOutput(String query, int topK) {
         if (query == null || query.isBlank()) {
-            return "搜索关键词不能为空";
+            return ToolOutput.failure("搜索关键词不能为空");
         }
         if (shouldPreferStepSearch() && tools.containsKey(STEP_SEARCH_TOOL)) {
             ObjectNode args = mapper.createObjectNode();
@@ -855,18 +871,43 @@ public class ToolRegistry {
                     "top_k", "topK", "max_results", "num_results", "limit", "count");
             ToolOutput output = executeToolOutput(STEP_SEARCH_TOOL, args.toString());
             if (isUsableMcpOutput(output)) {
-                return "🔍 [StepSearch] " + query.trim() + "\n\n" + output.text().trim();
+                // StepSearch currently returns unstructured MCP prose. Keep it
+                // useful as search text, but do not mint URL authority from it.
+                return ToolOutput.text(
+                        "🔍 [StepSearch] " + query.trim() + "\n\n" + output.text().trim());
             }
         }
         SearchProvider provider = searchProvider();
         if (!provider.isReady()) {
-            return "⚠️ " + provider.unavailableHint();
+            return ToolOutput.failure("⚠️ " + provider.unavailableHint());
         }
         try {
             List<SearchResult> results = provider.search(query.trim(), topK);
-            return formatSearchResults(provider.name(), query, results);
+            List<String> discoveredUrls = results == null
+                    ? List.of()
+                    : results.stream()
+                    .map(SearchResult::url)
+                    .filter(ToolRegistry::isHttpUrl)
+                    .distinct()
+                    .toList();
+            return ToolOutput.discovered(
+                    formatSearchResults(provider.name(), query, results), discoveredUrls);
         } catch (Exception e) {
-            return "搜索失败 (" + provider.name() + "): " + e.getMessage();
+            return ToolOutput.failure("搜索失败 (" + provider.name() + "): " + e.getMessage());
+        }
+    }
+
+    private static boolean isHttpUrl(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        try {
+            java.net.URI uri = java.net.URI.create(value.trim());
+            return ("http".equalsIgnoreCase(uri.getScheme())
+                    || "https".equalsIgnoreCase(uri.getScheme()))
+                    && uri.getHost() != null;
+        } catch (IllegalArgumentException e) {
+            return false;
         }
     }
 
@@ -970,7 +1011,8 @@ public class ToolRegistry {
     }
 
     private boolean isUsableMcpOutput(ToolOutput output) {
-        if (output == null || output.text() == null || output.text().isBlank()) {
+        if (output == null || !output.successful()
+                || output.text() == null || output.text().isBlank()) {
             return false;
         }
         String text = output.text().trim();
@@ -1103,18 +1145,18 @@ public class ToolRegistry {
 
     public ToolOutput executeToolOutput(String name, String argumentsJson) {
         if (isLegacyExecuteToolOverride()) {
-            return ToolOutput.text(executeTool(name, argumentsJson));
+            return classifyTextOutput(executeTool(name, argumentsJson));
         }
         return doExecuteTool(name, argumentsJson);
     }
 
     protected ToolOutput doExecuteTool(String name, String argumentsJson) {
         if (CancellationContext.isCancelled()) {
-            return ToolOutput.text("用户取消了此次工具调用");
+            return ToolOutput.failure("用户取消了此次工具调用");
         }
         Tool tool = tools.get(name);
         if (tool == null) {
-            return ToolOutput.text("未知工具: " + name);
+            return ToolOutput.failure("未知工具: " + name);
         }
 
         boolean shouldAudit = shouldAudit(name);
@@ -1133,8 +1175,20 @@ public class ToolRegistry {
                 if (output == null) {
                     output = ToolOutput.text("");
                 }
+                output = classifyOutput(output);
                 if (browserGuard != null) {
-                    browserGuard.applyAfterExecution(name, argumentsJson, output.text());
+                    String rawText = output.text();
+                    browserGuard.applyAfterExecution(
+                            name, argumentsJson, rawText, output.successful());
+                    String safeText = browserGuard.sanitizeResult(
+                            name, argumentsJson, rawText, output.successful());
+                    if (!safeText.equals(rawText)) {
+                        output = new ToolOutput(
+                                safeText,
+                                output.imageParts(),
+                                output.successful(),
+                                output.discoveredUrls());
+                    }
                 }
                 if (shouldAudit) {
                     auditLog.record(AuditLog.AuditEntry.allow(name, argumentsJson, elapsedMillis(start), auditMetadata));
@@ -1146,24 +1200,62 @@ public class ToolRegistry {
             Map<String, String> argMap = new HashMap<>();
             args.fields().forEachRemaining(entry ->
                     argMap.put(entry.getKey(), entry.getValue().asText()));
-            String result = tool.executor().execute(argMap);
+            ToolOutput output = "web_search".equals(name)
+                    ? webSearchOutput(argMap.get("query"), parseInt(argMap.get("top_k"), 5))
+                    : classifyTextOutput(tool.executor().execute(argMap));
             if (shouldAudit) {
                 auditLog.record(AuditLog.AuditEntry.allow(name, argumentsJson, elapsedMillis(start), auditMetadata));
             }
-            return ToolOutput.text(result);
+            return output;
         } catch (PolicyException e) {
             if (shouldAudit) {
                 auditLog.record(AuditLog.AuditEntry.denyByPolicy(
                         name, argumentsJson, e.getMessage(), elapsedMillis(start), auditMetadata));
             }
-            return ToolOutput.text("🛡️ 策略拒绝: " + e.getMessage());
+            return ToolOutput.failure("🛡️ 策略拒绝: " + e.getMessage());
         } catch (Exception e) {
             if (shouldAudit) {
                 auditLog.record(AuditLog.AuditEntry.error(
                         name, argumentsJson, e.getMessage(), elapsedMillis(start), auditMetadata));
             }
-            return ToolOutput.text("工具执行失败: " + e.getMessage());
+            return ToolOutput.failure("工具执行失败: " + e.getMessage());
         }
+    }
+
+    private static ToolOutput classifyTextOutput(String text) {
+        return looksLikeFailureText(text) ? ToolOutput.failure(text) : ToolOutput.text(text);
+    }
+
+    private static ToolOutput classifyOutput(ToolOutput output) {
+        if (output == null) {
+            return ToolOutput.text("");
+        }
+        if (!output.successful() || !looksLikeFailureText(output.text())) {
+            return output;
+        }
+        return ToolOutput.failure(output.text(), output.imageParts());
+    }
+
+    private static boolean looksLikeFailureText(String text) {
+        if (text == null) {
+            return false;
+        }
+        String value = text.stripLeading();
+        return value.startsWith("🛡️")
+                || value.startsWith("❌")
+                || value.startsWith("[HITL]")
+                || value.startsWith("用户取消了")
+                || value.startsWith("工具执行失败")
+                || value.startsWith("工具执行超时")
+                || value.startsWith("未知工具")
+                || value.startsWith("MCP 工具返回错误")
+                || value.startsWith("MCP 工具调用失败")
+                || value.startsWith("搜索关键词不能为空")
+                || value.startsWith("搜索失败")
+                || value.startsWith("抓取失败")
+                || value.startsWith("URL 不能为空")
+                || value.startsWith("⚠️ 搜索")
+                || value.startsWith("浏览器连接器未初始化");
     }
 
     private boolean isLegacyExecuteToolOverride() {
@@ -1188,10 +1280,11 @@ public class ToolRegistry {
     }
 
     /**
-     * 并行执行同一轮 LLM 返回的多个工具调用。
+     * 执行同一轮 LLM 返回的多个工具调用。
      *
      * 结果按传入顺序返回，调用方可以安全地按原 tool_call 顺序回灌消息历史。
-     * 如果某个工具超过批次超时仍未返回，会取消任务并返回超时结果；已完成工具不受影响。
+     * 含浏览器工具的批次按原顺序串行，避免同一浏览器会话内的页面状态互相覆盖；
+     * 其余批次并行执行，超时后取消未完成任务，已完成工具不受影响。
      */
     public List<ToolExecutionResult> executeTools(List<ToolInvocation> invocations) {
         if (invocations == null || invocations.isEmpty()) {
@@ -1207,6 +1300,20 @@ public class ToolRegistry {
             long startedAt = System.nanoTime();
             ToolOutput output = executeToolOutput(invocation.name(), invocation.argumentsJson());
             return List.of(ToolExecutionResult.completed(invocation, output, elapsedMillis(startedAt)));
+        }
+        if (invocations.stream().anyMatch(invocation ->
+                TurnToolPolicy.isBrowserToolName(invocation.name()))) {
+            List<ToolExecutionResult> results = new ArrayList<>(invocations.size());
+            for (ToolInvocation invocation : invocations) {
+                if (CancellationContext.isCancelled()) {
+                    results.add(ToolExecutionResult.failed(invocation, "用户取消了此次工具调用"));
+                    continue;
+                }
+                long startedAt = System.nanoTime();
+                ToolOutput output = executeToolOutput(invocation.name(), invocation.argumentsJson());
+                results.add(ToolExecutionResult.completed(invocation, output, elapsedMillis(startedAt)));
+            }
+            return results;
         }
 
         int parallelism = Math.min(invocations.size(), MAX_PARALLEL_TOOLS);
@@ -1380,7 +1487,23 @@ public class ToolRegistry {
 
     public record ToolExecutionResult(String id, String name, String argumentsJson,
                                       String result, long elapsedMillis, boolean timedOut,
-                                      List<com.paicli.llm.LlmClient.ContentPart> imageParts) {
+                                      List<com.paicli.llm.LlmClient.ContentPart> imageParts,
+                                      boolean successful,
+                                      List<String> discoveredUrls) {
+        public ToolExecutionResult {
+            imageParts = imageParts == null ? List.of() : List.copyOf(imageParts);
+            discoveredUrls = discoveredUrls == null ? List.of() : List.copyOf(discoveredUrls);
+            successful = successful && !timedOut;
+        }
+
+        /** Backward-compatible constructor for existing registries and tests. */
+        public ToolExecutionResult(String id, String name, String argumentsJson,
+                                   String result, long elapsedMillis, boolean timedOut,
+                                   List<com.paicli.llm.LlmClient.ContentPart> imageParts) {
+            this(id, name, argumentsJson, result, elapsedMillis, timedOut, imageParts,
+                    !timedOut && !looksLikeFailureText(result), List.of());
+        }
+
         private static ToolExecutionResult completed(ToolInvocation invocation, ToolOutput output, long elapsedMillis) {
             return new ToolExecutionResult(
                     invocation.id(),
@@ -1389,11 +1512,13 @@ public class ToolRegistry {
                     output == null ? "" : output.text(),
                     elapsedMillis,
                     false,
-                    output == null ? List.of() : output.imageParts());
+                    output == null ? List.of() : output.imageParts(),
+                    output != null && output.successful(),
+                    output == null ? List.of() : output.discoveredUrls());
         }
 
         private static ToolExecutionResult completed(ToolInvocation invocation, String result, long elapsedMillis) {
-            return completed(invocation, ToolOutput.text(result), elapsedMillis);
+            return completed(invocation, classifyTextOutput(result), elapsedMillis);
         }
 
         private static ToolExecutionResult failed(ToolInvocation invocation, String message) {
@@ -1408,6 +1533,8 @@ public class ToolRegistry {
                     "工具执行超时（" + timeoutSeconds + "秒），已取消",
                     timeoutSeconds * 1000,
                     true,
+                    List.of(),
+                    false,
                     List.of()
             );
         }

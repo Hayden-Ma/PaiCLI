@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.browser.BrowserConnector;
 import com.paicli.mcp.protocol.McpToolDescriptor;
+import com.paicli.web.SearchProvider;
+import com.paicli.web.SearchResult;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -21,6 +23,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ToolRegistryTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Test
+    void executionResultCarriesTypedFailureStatus() {
+        ToolRegistry registry = new ToolRegistry();
+
+        ToolOutput output = registry.executeToolOutput("missing_tool", "{}");
+        ToolRegistry.ToolExecutionResult result = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("missing", "missing_tool", "{}"))).get(0);
+
+        assertFalse(output.successful());
+        assertFalse(result.successful());
+        assertTrue(result.discoveredUrls().isEmpty());
+    }
 
     @Test
     void shouldRunCommandInProjectDirectory(@TempDir Path tempDir) {
@@ -196,12 +211,53 @@ class ToolRegistryTest {
                 }
                 """), args -> "step-result:" + args);
 
-        String result = registry.executeTool("web_search", "{\"query\":\"Step 3.7 Flash\",\"top_k\":3}");
+        ToolOutput output = registry.executeToolOutput(
+                "web_search", "{\"query\":\"Step 3.7 Flash\",\"top_k\":3}");
+        String result = output.text();
 
         assertTrue(result.contains("[StepSearch]"));
         assertTrue(result.contains("step-result"));
         assertTrue(result.contains("\"query\":\"Step 3.7 Flash\""));
         assertTrue(result.contains("\"top_k\":3"));
+        assertTrue(output.successful());
+        assertTrue(output.discoveredUrls().isEmpty(),
+                "unstructured MCP prose must not grant URL provenance");
+    }
+
+    @Test
+    void builtInWebSearchPublishesOnlyStructuredHttpResultUrls() {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setSearchProvider(new SearchProvider() {
+            @Override
+            public String name() {
+                return "stub";
+            }
+
+            @Override
+            public boolean isReady() {
+                return true;
+            }
+
+            @Override
+            public String unavailableHint() {
+                return "";
+            }
+
+            @Override
+            public List<SearchResult> search(String query, int topK) {
+                return List.of(
+                        SearchResult.of(1, "valid", "https://example.com/article", "snippet mentions https://evil.example"),
+                        SearchResult.of(2, "invalid", "not-a-url", "ignored"));
+            }
+        });
+
+        ToolOutput output = registry.executeToolOutput(
+                "web_search", "{\"query\":\"target\",\"top_k\":5}");
+
+        assertTrue(output.successful());
+        assertEquals(List.of("https://example.com/article"), output.discoveredUrls());
+        assertTrue(output.text().contains("https://evil.example"),
+                "snippet remains readable but is not promoted to URL metadata");
     }
 
     @Test
@@ -219,11 +275,11 @@ class ToolRegistryTest {
                 """), args -> "step-fetch:" + args);
 
         String result = registry.executeTool("web_fetch",
-                "{\"url\":\"https://platform.stepfun.com/docs/zh/step-plan/integrations/search-mcp\",\"max_chars\":1200}");
+                "{\"url\":\"https://203.0.113.10/docs/step-search\",\"max_chars\":1200}");
 
         assertTrue(result.contains("[StepSearch]"));
         assertTrue(result.contains("step-fetch"));
-        assertTrue(result.contains("\"url\":\"https://platform.stepfun.com/docs/zh/step-plan/integrations/search-mcp\""));
+        assertTrue(result.contains("\"url\":\"https://203.0.113.10/docs/step-search\""));
         assertTrue(result.contains("\"max_chars\":1200"));
     }
 
@@ -272,6 +328,46 @@ class ToolRegistryTest {
         assertEquals("result-first", results.get(0).result());
         assertEquals("call_2", results.get(1).id());
         assertEquals("result-second", results.get(1).result());
+    }
+
+    @Test
+    void shouldExecuteBrowserContainingBatchSequentiallyInDeclaredOrder() {
+        CountDownLatch laterCallEntered = new CountDownLatch(1);
+        AtomicInteger current = new AtomicInteger();
+        AtomicInteger peak = new AtomicInteger();
+        List<String> executionOrder = java.util.Collections.synchronizedList(new ArrayList<>());
+        ToolRegistry registry = new ToolRegistry() {
+            @Override
+            public String executeTool(String name, String argumentsJson) {
+                int now = current.incrementAndGet();
+                peak.updateAndGet(previous -> Math.max(previous, now));
+                executionOrder.add(name);
+                try {
+                    if ("mcp__chrome-devtools__new_page".equals(name)) {
+                        laterCallEntered.await(300, TimeUnit.MILLISECONDS);
+                    } else {
+                        laterCallEntered.countDown();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    current.decrementAndGet();
+                }
+                return "result-" + name;
+            }
+        };
+
+        List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation(
+                        "browser", "mcp__chrome-devtools__new_page", "{}"),
+                new ToolRegistry.ToolInvocation("local", "read_file", "{}")
+        ));
+
+        assertEquals(1, peak.get(), "含浏览器工具的整个批次应串行执行");
+        assertEquals(List.of("mcp__chrome-devtools__new_page", "read_file"), executionOrder);
+        assertEquals(List.of("browser", "local"), results.stream()
+                .map(ToolRegistry.ToolExecutionResult::id)
+                .toList());
     }
 
     private static McpToolDescriptor stepSearchDescriptor(String name, String schema) throws Exception {

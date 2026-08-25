@@ -218,8 +218,41 @@ class InlineRendererTest {
             assertTrue(rendered.contains("▰"), rendered);
             assertTrue(rendered.contains("▱"), rendered);
             assertTrue(rendered.contains("%"), rendered);
-            assertFalse(rendered.contains("正在整理早期对话"), rendered);
+            assertTrue(rendered.contains("正在整理早期对话"), rendered);
             assertFalse(rendered.contains("esc to cancel"), rendered);
+        } finally {
+            renderer.endActivity();
+            renderer.close();
+        }
+    }
+
+    @Test
+    void activityPanelShowsDeterminateProgressAndCancelHint() {
+        Terminal terminal = Mockito.mock(Terminal.class);
+        Mockito.when(terminal.getType()).thenReturn("xterm-256color");
+        Mockito.when(terminal.getSize()).thenReturn(new Size(120, 40));
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        PrintWriter writer = new PrintWriter(new OutputStreamWriter(sink, StandardCharsets.UTF_8), true);
+        Mockito.when(terminal.writer()).thenReturn(writer);
+        Mockito.doAnswer(invocation -> {
+            writer.flush();
+            return null;
+        }).when(terminal).flush();
+
+        InlineRenderer renderer = new InlineRenderer(terminal,
+                new PrintStream(sink, true, StandardCharsets.UTF_8));
+        try {
+            renderer.beginActivity("Better Harness", "正在准备审计", true);
+            sink.reset();
+
+            renderer.updateActivity("Session Evidence 审查完成", 2, 5);
+
+            String rendered = sink.toString(StandardCharsets.UTF_8);
+            assertTrue(rendered.contains("Better Harness"), rendered);
+            assertTrue(rendered.contains("2/5"), rendered);
+            assertTrue(rendered.contains("40%"), rendered);
+            assertTrue(rendered.contains("Session Evidence"), rendered);
+            assertTrue(rendered.contains("esc to cancel"), rendered);
         } finally {
             renderer.endActivity();
             renderer.close();

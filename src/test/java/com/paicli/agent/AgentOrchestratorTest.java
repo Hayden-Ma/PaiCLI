@@ -3,14 +3,18 @@ package com.paicli.agent;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import com.paicli.history.ConversationLedger;
 import com.paicli.llm.GLMClient;
 import com.paicli.llm.LlmClient;
 import com.paicli.memory.LongTermMemory;
 import com.paicli.memory.MemoryManager;
 import com.paicli.tool.ToolRegistry;
+import com.paicli.tool.ToolRegistry.ToolExecutionResult;
+import com.paicli.tool.ToolRegistry.ToolInvocation;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -24,6 +28,25 @@ import java.util.function.Function;
 import static org.junit.jupiter.api.Assertions.*;
 
 class AgentOrchestratorTest {
+
+    @Test
+    void shouldShareOneLedgerAcrossPlannerWorkersAndReviewer(@TempDir Path tempDir)
+            throws Exception {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        ConversationLedger ledger =
+                ConversationLedger.open(tempDir.resolve("history"), "team-session");
+
+        orchestrator.setConversationLedger(ledger);
+
+        assertSame(ledger, readField(orchestrator, "conversationLedger"));
+        assertSame(ledger, readField(readField(orchestrator, "planner"), "conversationLedger"));
+        @SuppressWarnings("unchecked")
+        List<SubAgent> workers = (List<SubAgent>) readField(orchestrator, "workers");
+        for (SubAgent worker : workers) {
+            assertSame(ledger, readField(worker, "conversationLedger"));
+        }
+        assertSame(ledger, readField(readField(orchestrator, "reviewer"), "conversationLedger"));
+    }
 
     @Test
     void shouldParseSimplePlan() {
@@ -394,8 +417,61 @@ class AgentOrchestratorTest {
         assertTrue(finalResult.contains("[step_2] ⏳ 第二步"));
     }
 
+    @Test
+    void dependentTeamStepInheritsTypedSearchUrlProvenance(@TempDir Path tempDir) {
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                response("""
+                        {
+                          "summary": "搜索后抓取",
+                          "steps": [
+                            {"id": "search", "description": "搜索目标文章", "type": "ANALYSIS", "dependencies": []},
+                            {"id": "fetch", "description": "抓取目标文章", "type": "ANALYSIS", "dependencies": ["search"]}
+                          ]
+                        }
+                        """),
+                toolResponse("search", "web_search", "{\"query\":\"目标文章\"}"),
+                response("已定位目标文章"),
+                response("{\"approved\":true,\"summary\":\"通过\",\"issues\":[]}"),
+                toolResponse("fetch", "web_fetch", "{\"url\":\"https://example.com/article\"}"),
+                response("已抓取正文"),
+                response("{\"approved\":true,\"summary\":\"通过\",\"issues\":[]}")
+        ));
+        RecordingWebRegistry registry = new RecordingWebRegistry();
+        AgentOrchestrator orchestrator = new AgentOrchestrator(
+                llmClient,
+                registry,
+                new NoOpMemoryManager(tempDir.toFile())
+        );
+
+        String finalResult = orchestrator.run("帮我搜索目标文章并抓取正文");
+
+        assertTrue(finalResult.contains("已抓取正文"));
+        assertEquals(List.of("web_search", "web_fetch"),
+                registry.invocations.stream().map(ToolInvocation::name).toList());
+        assertTrue(llmClient.toolSnapshots.get(4).stream()
+                .anyMatch(tool -> "web_fetch".equals(tool.name())),
+                "依赖 worker 的首轮 schema 应继承前置 search provenance");
+    }
+
     private static LlmClient.ChatResponse response(String content) {
         return new LlmClient.ChatResponse("assistant", content, null, 100, 20);
+    }
+
+    private static LlmClient.ChatResponse toolResponse(String id, String name, String arguments) {
+        return new LlmClient.ChatResponse(
+                "assistant",
+                "",
+                List.of(new LlmClient.ToolCall(
+                        id,
+                        new LlmClient.ToolCall.Function(name, arguments))),
+                100,
+                20);
+    }
+
+    private static Object readField(Object target, String fieldName) throws Exception {
+        Field field = target.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return field.get(target);
     }
 
     private static final class NoOpMemoryManager extends MemoryManager {
@@ -406,6 +482,7 @@ class AgentOrchestratorTest {
 
     private static final class StubGLMClient extends GLMClient {
         private final Queue<ChatResponse> responses;
+        private final List<List<Tool>> toolSnapshots = new ArrayList<>();
 
         private StubGLMClient(List<ChatResponse> responses) {
             super("test-key");
@@ -419,6 +496,7 @@ class AgentOrchestratorTest {
 
         @Override
         public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
+            toolSnapshots.add(tools == null ? List.of() : List.copyOf(tools));
             ChatResponse response = responses.poll();
             if (response == null) {
                 throw new IOException("缺少预设响应");
@@ -427,6 +505,30 @@ class AgentOrchestratorTest {
                 listener.onContentDelta(response.content());
             }
             return response;
+        }
+    }
+
+    private static final class RecordingWebRegistry extends ToolRegistry {
+        private final List<ToolInvocation> invocations = new ArrayList<>();
+
+        @Override
+        public List<ToolExecutionResult> executeTools(List<ToolInvocation> calls) {
+            invocations.addAll(calls);
+            return calls.stream()
+                    .map(call -> new ToolExecutionResult(
+                            call.id(),
+                            call.name(),
+                            call.argumentsJson(),
+                            "web_search".equals(call.name())
+                                    ? "1. 目标文章 https://example.com/article"
+                                    : "已抓取",
+                            0,
+                            false,
+                            List.of(),
+                            true,
+                            "web_search".equals(call.name())
+                                    ? List.of("https://example.com/article") : List.of()))
+                    .toList();
         }
     }
 

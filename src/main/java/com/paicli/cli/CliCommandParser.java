@@ -44,6 +44,7 @@ final class CliCommandParser {
         SKILL_ON,
         SKILL_OFF,
         SKILL_RELOAD,
+        BETTER_HARNESS,
         CONFIG,
         EXPORT
     }
@@ -280,6 +281,16 @@ final class CliCommandParser {
 
         if (trimmed.equalsIgnoreCase("/export")) {
             return new ParsedCommand(CommandType.EXPORT, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/better-harness")) {
+            return new ParsedCommand(CommandType.BETTER_HARNESS, null);
+        }
+
+        if (trimmed.regionMatches(true, 0, "/better-harness ", 0, 16)) {
+            return new ParsedCommand(
+                    CommandType.BETTER_HARNESS,
+                    trimmed.substring(16).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/mcp")) {

@@ -17,7 +17,9 @@ public record McpCallToolResult(List<McpContent> content, boolean isError) {
 
     public ToolOutput toToolOutput() {
         if (content == null || content.isEmpty()) {
-            return ToolOutput.text(isError ? "MCP 工具返回错误，但没有错误正文" : "");
+            return isError
+                    ? ToolOutput.failure("MCP 工具返回错误，但没有错误正文")
+                    : ToolOutput.text("");
         }
         List<LlmClient.ContentPart> imageParts = new ArrayList<>();
         String text = content.stream()
@@ -33,7 +35,7 @@ public record McpCallToolResult(List<McpContent> content, boolean isError) {
                 })
                 .filter(s -> !s.isBlank())
                 .collect(Collectors.joining("\n\n"));
-        return new ToolOutput(text, imageParts);
+        return new ToolOutput(text, imageParts, !isError, List.of());
     }
 
     private static String formatImage(McpContent item, List<LlmClient.ContentPart> imageParts) {

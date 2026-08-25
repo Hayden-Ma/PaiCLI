@@ -28,6 +28,8 @@ mvn test -DskipTests=false
 
 - 单轮对话驱动的 `ReAct` 循环
 - 支持工具调用：读文件、写文件、列目录、文件 glob、代码 grep、执行命令、创建项目、RAG 语义辅助检索、联网搜索、MCP 动态工具
+- ReAct、Plan 单任务和 Multi-Agent SubAgent 默认不限制执行轮数，由模型在不再调用工具时自然结束；无人值守或严格成本控制场景可用 `-Dpaicli.react.hard.max.iterations=N` 显式设置上限
+- 显式轮数/Token 上限或重复调用安全阀命中后，会关闭工具并额外执行一次最佳努力收尾，明确返回部分成果、未完成项和下一步，而不是直接丢弃过程结果
 - 更适合简单任务或单步操作
 
 ### 第二期：Plan-and-Execute + DAG
@@ -86,13 +88,16 @@ mvn test -DskipTests=false
 - 内置 `GLMClient`、`DeepSeekClient`、`StepClient`、`KimiClient`、`FreeLlmApiClient`、`AgnesClient` 六个瘦实现
 - `/model glm-5.1` / `/model glm-5v-turbo` 明确切 GLM 模型；`/model deepseek` / `/model step` / `/model kimi` / `/model freellmapi` / `/model agnes` 切 provider 并读取配置里的具体模型
 - 配置持久化到 `~/.paicli/config.json`，API Key 可从配置、环境变量或 `.env` 读取
+- OpenAI-compatible provider 共用有限重试：`408` / `429` / 可恢复 `5xx` 与瞬时连接故障默认总尝试 3 次，采用指数退避 + jitter 并读取 `Retry-After`；确定性 `4xx` 直接失败。SSE 尚未交付输出时可安全重发，已经流给终端的半截内容不会自动重放
 
 ### 第九期：联网能力 + Web 工具
 
 - `web_search` 抽象成 `SearchProvider` 接口，内置三个实现：智谱 Web Search（默认，与 GLM 共用 Key，0.01–0.05 元/次）、SerpAPI（国际通用付费）、SearXNG（开源自托管免费）
-- `web_fetch` 新工具：URL → OkHttp 抓取 → Jsoup 解析 → 简易 readability → Markdown 正文
-- 当当前模型是 `step-3.7-flash*` 且自动/显式 `step_search` 远程 server 已就绪时，内置 `web_search` / `web_fetch` 会优先走 StepSearch MCP；未就绪或调用失败时自动回退到原 provider。
-- ReAct 对“最新/当前/今天/今年/2026/趋势/新闻/版本”等时效性问题会先做一次 `web_search` 预检并注入本轮上下文，避免模型在工具可用时误说无法实时搜索；用户明确不要联网时跳过。
+- `web_fetch` 新工具：有可信来源的 URL → OkHttp 抓取 → Jsoup 解析 → 简易 readability → Markdown 正文
+- 联网不再对“最新/当前/今天/趋势/新闻/版本”等关键词做自动 freshness 预检。顶层用户输入只是标题、主题或摘录而没有任务目标时，PaiCLI 会先询问用户，本轮不调用工具；用户明确要求不要联网时始终优先遵从。
+- 模型不得根据标题猜测 URL。明确要求查找但没有 URL 时先 `web_search`；`web_fetch` 和浏览器导航只接受用户实际提交的顶层原文（不含 `@path` / MCP resource 展开正文）中的 URL，或当前执行分支由搜索 provider 返回的结构化 `discoveredUrls`。搜索正文/snippet/query 回显/错误提示、`web_fetch` 正文、浏览器结果和普通文件/命令输出里的链接不会自动取得访问授权；StepSearch MCP 的非结构化结果文本也不会生成 URL 凭据。
+- 运行时 `TurnToolPolicy` 覆盖 ReAct / Plan / Team，并在 StepSearch、内置 Web provider 和 MCP / Chrome 路由之前校验顶层意图与 URL 来源；Plan 审阅补充会重建策略。并行任务/worker 不共享新发现的 URL，只有 DAG 中声明的后继依赖会继承前置分支的类型化 `web_search` URL 凭据，不从任务回复文本重新抽取。grounded URL 先只开放导航，成功导航只建立当前页读取上下文，页面读取不扩充 URL 授权；点击/填写等交互需顶层原文明确授权。shared Chrome 状态跨轮读取，非 PaiCLI 创建的标签页只在用户明确要求时开放只读，不能由 Agent 导航、改写或关闭；导航工具返回的全量标签页清单会在回灌模型前裁掉。被拒绝的调用不能靠切换工具绕过。
+- 当前模型是 `step-3.7-flash*` 且自动/显式 `step_search` 远程 server 已就绪时，通过 `TurnToolPolicy` 后的内置 `web_search` / `web_fetch` 会优先走 StepSearch MCP；未就绪或调用失败时自动回退到原 provider。
 - 默认安全策略：屏蔽 `file://` / 内网 / loopback；30 秒超时；5MB 响应上限；每分钟 30 次限流
 - 边界明确：SPA / 防爬墙站点会返回空正文 + 已知边界提示，Agent 会 fallback 到浏览器 MCP 路线
 
@@ -156,6 +161,27 @@ mvn test -DskipTests=false
 
 设计意图：从「写工具」演进到「打包专家手册」。当工具堆成山（PaiCLI 当前内置 9 个 + MCP 60+ 工具），用 Skill 给 LLM 一份按场景展开的"专家手册"，比往 system prompt 里塞更多规则更可扩展。
 
+### Better Harness 原生审计
+
+PaiCLI 内置 `better-harness` Skill 和 `/better-harness` 命令，用于审查编码 Agent 外层工作流，而不只是最终代码 diff。实现基于 QoderAI Better Harness 的 Agent Work Loop 方法，并针对 PaiCLI 的 Java 运行时、`ConversationLedger`、`PAI.md`、Skill、MCP 与 HITL 资产做了原生适配，不依赖 Node。
+
+- `/better-harness` 或 `/better-harness normal`：正常深度审查，生成持久化报告
+- `/better-harness quick`：缩小项目摘录和候选 finding 上限，快速建立基线
+- `/better-harness --inline`：只在当前终端输出，不创建报告文件
+- 三路证据保持独立：当前会话脱敏元数据、Project Harness、Agent Customize
+- 三路 evidence specialist 并行运行且不暴露工具，lead 只基于三个结果做最终定级和归并
+- 运行期间展示 5 个确定性工作单元、三路审查完成数、当前阶段、累计耗时和 ESC 取消提示，不再用静态等待或估算进度冒充真实完成度
+- 终端报告统一经过 PaiCLI Markdown 渲染器，标题、强调、列表、表格和代码块按当前终端宽度显示，不直接打印 Markdown 源码标记
+- 默认不读取消息正文、reasoning、工具参数/结果、Memory 正文、用户目录资产或其他 provider
+- 持久化输出位于 `.paicli/better-harness/<run-id>/`：`report.md`、`report.html`、`findings.json`
+- 一次报告只能证明当前机制和观测证据，不能单独证明工作流已经因修复而改善；效果需要后续可比较 Task Episode
+
+### LLM-as-a-Judge 离线评测核心
+
+`com.paicli.eval` 提供可独立调用的 Rubric 评分和 Pairwise 双向对比组件。Judge 只返回逐维分数与证据，总分、权重和通过阈值由 Java 确定性计算；Pairwise 会交换 A/B 位置复评，前后不一致时降级为 `TIE`，用于暴露位置偏见。
+
+当前交付是 Java 核心库和单元测试，不是 `/eval` 命令，也不会自动读取可能包含敏感内容的原始会话账本。数据集加载、批量 Runner、报告持久化、Judge 人工校准和真实业务指标仍需基于具体评测任务补齐。使用示例与边界见 [`docs/llm-as-a-judge.md`](docs/llm-as-a-judge.md)。
+
 ### 第十六期：TUI 产品化（v16.1 形态修正后：双形态可切换）
 
 v16.1 抽出 `Renderer` 接口 + 三个实现：
@@ -168,8 +194,9 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 
 - 三种形态共享同一套 `Agent` / `ToolRegistry` / `MemoryManager` / MCP server / SkillRegistry / HITL handler，不创建孤立空会话
 - 普通输入走 ReAct；`/plan <任务>` 走 Plan-and-Execute；`/team <任务>` 走 Multi-Agent；`/cancel` 可取消运行中任务
-- 通用命令：`/clear`、`/context`、`/memory`、`/memory clear`、`/save <事实>`、`/export`、`/hitl`、`/hitl on`、`/hitl off`、`/config`、`/exit`
-- 对话历史保存到 `~/.paicli/history/session_*.jsonl`
+- 通用命令：`/clear`、`/context`、`/memory`、`/memory clear`、`/save <事实>`、`/export`、`/better-harness`、`/hitl`、`/hitl on`、`/hitl off`、`/config`、`/exit`
+- Lanterna 的展示快照保存到 `~/.paicli/history/session_*.jsonl`
+- 原始会话账本独立保存到 `~/.paicli/history/raw/session-*.jsonl`：默认 CLI 的 ReAct / Plan / Team 共享同一个 append-only 文件，system、user、assistant、tool_call、tool_result 都保留完整 `LlmClient.Message`（含 reasoning、工具参数/结果和图片 payload）。`/clear` 和上下文压缩只改模型发送视图，不改写旧账本；POSIX 下目录为 0700、文件为 0600。账本可能包含敏感内容，请勿提交或随意分享
 - 兼容旧设置：`PAICLI_TUI=true` 自动映射为 `PAICLI_RENDERER=lanterna`（已 deprecated）
 - `PAICLI_NO_STATUSBAR=true` 在 inline 模式下禁用 JLine 底部 dock（不适合 ANSI 光标控制的终端）
 - `NO_COLOR=1` 禁用所有 ANSI 颜色，保留布局
@@ -292,6 +319,7 @@ Tips for getting started:
 
 - 🧠 短期记忆、长期记忆与相关记忆检索
 - 📦 长对话摘要压缩与 Token 预算管理
+- 📚 原始 system/user/assistant/tool 消息 append-only 落盘，压缩与 `/clear` 不改写历史账本
 - 🧮 长上下文动态预算、prompt cache 可见化与成本估算
 - 💾 `/memory` 与 `/save` 记忆管理入口
 
@@ -386,6 +414,7 @@ export AGNES_BASE_URL=https://apihub.agnes-ai.com/v1
 
 长期记忆默认保存在用户目录下的 `~/.paicli/memory/long_term_memory.json`。
 长期记忆只保存显式保存意图下的稳定事实：`/save <事实>`，或用户在自然语言里明确说“记一下 / 记住 / 以后记得”时由 Agent 调用 `save_memory`。默认保存为当前项目作用域；跨项目通用偏好可用 `/save --global <事实>` 或 `save_memory(scope=global)`。它不应包含一次性任务请求或临时文件名/目录名。
+重复记忆只会在相同 `type + scope + project` 域内合并：先规范化 Unicode 宽窄、大小写、空白和普通标点，再保守识别少量中文语法助词差异。数字、代码符号或实质内容不同的事实不会被自动覆盖；当前仍不提供事实冲突消解，冲突条目可通过 `/memory list` 审计后显式删除。
 可用 `/memory list` 查看长期记忆，`/memory search <关键词>` 搜索当前项目可见记忆，`/memory delete <id>` 删除单条记忆。
 
 项目级记忆使用 Markdown 文件维护，和 `/save` 的长期记忆分工不同：
@@ -629,8 +658,8 @@ I
 - `execute_command` - 在当前项目目录执行短时 Shell 命令（默认 60 秒超时，黑名单拦截破坏性命令）
 - `create_project` - 创建项目结构（java/python/node）
 - `search_code` - 语义检索代码库（自然语言查询，适合作为模糊语义或常规搜索无果时的辅助）
-- `web_search` - 搜索互联网获取实时信息
-- `web_fetch` - 抓取已知 URL 并提取正文 Markdown
+- `web_search` - 在用户目标明确且需要联网时搜索互联网信息
+- `web_fetch` - 抓取当前顶层用户原文提供或本执行分支成功 `web_search` 结果发现的 URL，并提取正文 Markdown
 - `revert_turn` - 恢复到最近第 N 个 pre-turn 快照（走 HITL 与审计）
 - `mcp__{server}__{tool}` - MCP server 动态提供的外部工具
 - `mcp__{server}__list_resources` / `mcp__{server}__read_resource` - 支持 resources 的 MCP server 自动注册的虚拟工具
@@ -684,6 +713,7 @@ I
 - `save_memory` - Agent 内置工具，仅在用户明确要求保存长期偏好或稳定事实时调用；默认 `scope=project`，跨项目通用偏好才用 `scope=global`
 - `/init` - 生成精简项目级记忆 `PAI.md`；已存在时不覆盖，`/init --force` 可重写
 - `/export` - 导出当前 ReAct 会话对话记录为 Markdown（包含完整 system prompt），写入 `~/.paicli/exports/session-*.md`
+- `/better-harness [quick|normal] [--inline]` - 审查当前项目的 AI 编码工作流；默认在 `.paicli/better-harness/` 生成 Markdown、HTML 和 findings JSON
 - `/index [路径]` - 索引代码库（默认当前目录）
 - `/search <查询>` - 语义检索代码（RAG 辅助路径）
 - `/graph <类名>` - 查看代码关系图谱
@@ -775,6 +805,8 @@ src/main/java/com/paicli
 │   ├── ContextMode.java        # short / balanced / long 模式
 │   ├── ContextProfile.java     # 模型窗口与上下文策略
 │   └── TokenUsageFormatter.java # Token / cache / 成本展示
+├── history/
+│   └── ConversationLedger.java # 原始会话 append-only JSONL 账本
 ├── memory/
 │   ├── MemoryEntry.java        # 记忆条目
 │   ├── ConversationMemory.java # 短期记忆

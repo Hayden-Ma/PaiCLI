@@ -37,8 +37,11 @@ final class InlineActivityDisplay implements AutoCloseable {
     private ScheduledFuture<?> tickTask;
     private boolean active;
     private boolean closed;
+    private boolean activityMode;
     private String label = "Thinking";
     private boolean showCancelHint = true;
+    private int completedWork = -1;
+    private int totalWork = -1;
     private long startedNanos;
     private int frame;
     private int renderedRows;
@@ -76,7 +79,10 @@ final class InlineActivityDisplay implements AutoCloseable {
         clearLocked();
         reasoning.setLength(0);
         this.label = (label == null || label.isBlank()) ? "Thinking" : label.trim();
+        this.activityMode = false;
         this.showCancelHint = true;
+        this.completedWork = -1;
+        this.totalWork = -1;
         this.startedNanos = System.nanoTime();
         this.frame = 0;
         this.active = true;
@@ -85,13 +91,20 @@ final class InlineActivityDisplay implements AutoCloseable {
     }
 
     synchronized void beginActivity(String label, String detail) {
+        beginActivity(label, detail, false);
+    }
+
+    synchronized void beginActivity(String label, String detail, boolean cancelable) {
         if (closed) {
             return;
         }
         clearLocked();
         reasoning.setLength(0);
         this.label = (label == null || label.isBlank()) ? "Working" : label.trim();
-        this.showCancelHint = false;
+        this.activityMode = true;
+        this.showCancelHint = cancelable;
+        this.completedWork = -1;
+        this.totalWork = -1;
         this.startedNanos = System.nanoTime();
         this.frame = 0;
         this.active = true;
@@ -101,6 +114,28 @@ final class InlineActivityDisplay implements AutoCloseable {
         }
         renderLocked();
         restartTickLocked();
+    }
+
+    synchronized void updateActivity(String detail, int completed, int total) {
+        if (closed) {
+            return;
+        }
+        if (!active || !activityMode) {
+            beginActivity("Working", detail, false);
+        }
+        reasoning.setLength(0);
+        if (detail != null && !detail.isBlank()) {
+            reasoning.append(detail);
+            trimReasoning();
+        }
+        if (total > 0) {
+            this.totalWork = total;
+            this.completedWork = Math.max(0, Math.min(total, completed));
+        } else {
+            this.totalWork = -1;
+            this.completedWork = -1;
+        }
+        renderLocked();
     }
 
     synchronized void appendThinking(String delta) {
@@ -227,14 +262,24 @@ final class InlineActivityDisplay implements AutoCloseable {
     private List<AttributedString> buildLines() {
         int cols = Math.max(20, TerminalCapabilities.safeSize(terminal).getColumns() - 1);
         List<AttributedString> lines = new ArrayList<>();
-        if (!showCancelHint) {
-            lines.add(fit("  ✢ " + label + "...", cols, STATUS_STYLE));
-            lines.add(fit("    " + progressBar(cols) + " " + progressPercent() + "%", cols, STATUS_STYLE));
+        if (activityMode) {
+            String suffix = (showCancelHint ? " (esc to cancel, " : " (")
+                    + elapsedSeconds() + "s)";
+            lines.add(fit("  " + spinner() + " " + label + "..." + suffix, cols, STATUS_STYLE));
+            int percent = progressPercent();
+            String count = totalWork > 0
+                    ? completedWork + "/" + totalWork + " · "
+                    : "";
+            lines.add(fit("    " + progressBar(cols) + " " + count + percent + "%",
+                    cols, STATUS_STYLE));
+            List<String> detailLines = reasoningLines();
+            if (!detailLines.isEmpty()) {
+                lines.add(fit("  │ " + detailLines.get(detailLines.size() - 1),
+                        cols, QUOTE_STYLE));
+            }
             return lines;
         }
-        String suffix = showCancelHint
-                ? " (esc to cancel, " + elapsedSeconds() + "s)"
-                : " (" + elapsedSeconds() + "s)";
+        String suffix = " (esc to cancel, " + elapsedSeconds() + "s)";
         lines.add(fit("  " + spinner() + " " + label + "..." + suffix, cols, STATUS_STYLE));
 
         List<String> quoteLines = reasoningLines();
@@ -290,11 +335,20 @@ final class InlineActivityDisplay implements AutoCloseable {
     private String progressBar(int cols) {
         int width = Math.max(10, Math.min(40, cols - 12));
         int percent = progressPercent();
-        int filled = Math.max(1, Math.min(width - 1, (int) Math.round(width * percent / 100.0)));
+        int filled = (int) Math.round(width * percent / 100.0);
+        if (totalWork <= 0) {
+            filled = Math.max(1, Math.min(width - 1, filled));
+        } else {
+            filled = Math.max(0, Math.min(width, filled));
+        }
         return "▰".repeat(filled) + "▱".repeat(width - filled);
     }
 
     private int progressPercent() {
+        if (totalWork > 0) {
+            return Math.max(0, Math.min(100,
+                    (int) Math.round(completedWork * 100.0 / totalWork)));
+        }
         long elapsedMillis = Math.max(0L, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos));
         double curve = 1.0 - Math.exp(-elapsedMillis / 15_000.0);
         return Math.max(1, Math.min(95, (int) Math.round(curve * 95)));

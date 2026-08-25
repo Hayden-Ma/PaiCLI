@@ -80,6 +80,24 @@ public interface Renderer extends AutoCloseable {
         }
     }
 
+    /**
+     * 开始通用活动面板，并声明任务是否可由用户取消。
+     *
+     * <p>旧渲染器可忽略 cancelable，继续使用原活动面板行为。
+     */
+    default void beginActivity(String label, String detail, boolean cancelable) {
+        beginActivity(label, detail);
+    }
+
+    /**
+     * 更新活动面板中的当前阶段和确定性进度，不重置累计耗时。
+     */
+    default void updateActivity(String detail, int completed, int total) {
+        if (detail != null && !detail.isBlank()) {
+            appendThinking("\n" + detail);
+        }
+    }
+
     /** 结束并清理通用临时活动面板。 */
     default void endActivity() {
         endThinking();

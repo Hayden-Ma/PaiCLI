@@ -14,6 +14,8 @@
 - 定位：面向商业使用的 Java Agent CLI 产品，对标 Claude Code
 - 已交付 23 期（ReAct → Plan+DAG → Memory → RAG → Multi-Agent → HITL → 并行工具 → 多模型 → 联网 → MCP 核心 → MCP 高级 → 长上下文 → Chrome DevTools → CDP 会话复用 → Skill → TUI → LSP 诊断 → Side-Git 快照 → Prompt 分层 → Runtime API → 图片输入 → 微信 iLink 通道文本 MVP）
 - `PAI.md` 是 PaiCLI 的项目级记忆文件：启动时自动注入 system prompt，适合团队共享的长期稳定规则；个人/会变化的经验继续用 `/save` 长期记忆。
+- 内置 `/better-harness [quick|normal] [--inline]`：并行审查 Session / Project Harness / Agent Customize 三路脱敏证据，默认输出到 `.paicli/better-harness/<run-id>/`。
+- `eval/` 提供 LLM-as-a-Judge 核心库：Rubric 逐维评分由 Java 计算加权总分，Pairwise 通过交换 A/B 位置复评来暴露位置偏见；当前没有 `/eval` 命令、批量 Runner 或人工一致率数据。
 - 下一步：OAuth / sampling / recovery 作为后续 MCP 增强
 - Banner 版本：`v16.1.0`，Maven 产物：`paicli-1.0-SNAPSHOT.jar`（两者不一致是正常状态）
 
@@ -38,6 +40,7 @@ mvn test -Dtest=XxxTest -DskipTests=false   # 针对性
 mvn test -DskipTests=false                  # 全量回归
 /init                    # 生成精简项目级记忆 PAI.md；已有文件不覆盖，/init --force 可重写
 /export                  # 导出当前 ReAct 会话为 Markdown，包含完整 system prompt
+/better-harness          # 审查当前项目的 AI 编码工作流并生成持久化报告
 ```
 
 ## 架构概览
@@ -61,6 +64,7 @@ MCP 配置会合并用户级 `~/.paicli/mcp.json` 与项目级 `.paicli/mcp.json
 DeepSeek V4 / Kimi thinking 模式下，assistant tool-call 消息的 `reasoning_content` 必须随下一轮请求历史带回；其他 provider 默认只把 reasoning 写日志 / 展示。
 DeepSeek SSE 调用默认强制 HTTP/1.1，避免部分网络/网关下 HTTP/2 长流被远端重置成 `stream was reset: INTERNAL_ERROR`。
 DeepSeek 当前按文本 provider 处理：`supportsImageInput()` 返回 false，历史或工具回灌里的图片 `ContentPart` 会在请求序列化时替换为文本提示，不能把 `image_url` block 发给 DeepSeek API。
+OpenAI-compatible LLM 请求统一由 `LlmRetryPolicy` 做有限重试：默认总尝试 3 次，仅覆盖 `408` / `429` / 可恢复 `5xx` 和瞬时连接 / 读取故障，指数退避 + jitter，并在等待上限内读取 `Retry-After`；`400` / `401` 等确定性错误直接失败。SSE 未出现 `[DONE]` 或非空 `finish_reason` 视为中断；尚未向 `StreamListener` 交付内容时可重发，已交付 reasoning/content 后不得自动重放，避免重复输出。相关系统属性见 `.env.example`。
 
 讯飞星辰 MaaS provider 名为 `xfyun`，默认 Base URL 为 `https://maas-api.cn-huabei-1.xf-yun.com/v2`。`model` 必须使用服务管控页展示的 `modelId`；公开模型名 / Hugging Face 仓库名不一定可直接调用。微调模型用 `/config provider xfyun --lora-id <resourceId>` 配置服务卡片上的 resourceId，PaiCLI 会作为 HTTP header `lora_id` 发出。`xfyun` 当前按 MaaS 文档走纯对话请求，不向上游发送 PaiCLI 内置工具列表。
 Agnes provider 名为 `agnes`，默认 Base URL 为 `https://apihub.agnes-ai.com/v1`，默认模型 `agnes-2.0-flash`，走 OpenAI-compatible Chat Completions，默认 1M context window，支持流式输出和 tools。
@@ -74,6 +78,7 @@ src/main/java/com/paicli/
 ├── browser/     BrowserSession, BrowserGuard, SensitivePagePolicy
 ├── llm/         GLMClient, DeepSeekClient, StepClient, KimiClient, FreeLlmApiClient, AgnesClient
 ├── context/     ContextProfile, ContextMode, TokenUsageFormatter
+├── history/     ConversationLedger（原始会话 append-only JSONL 账本）
 ├── memory/      MemoryManager, ConversationHistoryCompactor, LongTermMemory
 ├── plan/        Planner, ExecutionPlan, Task
 ├── rag/         CodeIndex, CodeRetriever, VectorStore, CodeChunker
@@ -89,6 +94,7 @@ src/main/java/com/paicli/
 ├── web/         SearchProvider, WebFetcher, HtmlExtractor, NetworkPolicy
 ├── policy/      PathGuard, CommandGuard, AuditLog
 ├── skill/       SkillRegistry, SkillContextBuffer, SkillIndexFormatter
+├── harness/     BetterHarnessRunner, BetterHarnessEvidenceCollector
 └── render/      Renderer, InlineRenderer, PlainRenderer, RendererFactory
 ```
 
@@ -113,6 +119,8 @@ src/main/java/com/paicli/
 - 启动期会加载 `~/.paicli/PAI.md`、项目根 `PAI.md`、项目根 `.paicli/PAI.md`、`PAI.local.md`、`.paicli/PAI.local.md`，按此顺序注入 Project Context；`@relative/path.md` 可导入项目根内文件，总注入内容有字符预算，避免项目记忆变成 token 噪音。
 - `/init` 会根据当前项目生成短 `PAI.md`，只放 commands / project positioning / architecture / pitfalls / don'ts；默认不覆盖已有文件。
 - `/export` 导出当前 ReAct `conversationHistory` 为 Markdown 到 `~/.paicli/exports/session-*.md`；只支持无参数命令，包含完整 system prompt，便于检查 LLM 实际接收前的指令。
+- `/better-harness` 走 PaiCLI 原生四阶段审查：确定性脱敏证据快照 → 三路无工具 specialist 并行分析 → lead 汇总 → Java 确定性渲染。终端必须实时显示 5 个确定性工作单元、先完成先反馈的三路审查进度、累计耗时和 ESC 取消提示，不能只打印启动文案后静默等待；最终 Markdown 必须经过 `TerminalMarkdownRenderer` 按当前终端宽度渲染，不能直接输出 `#` / `**` 等源码标记。默认只读取当前 ledger 元数据和项目内公开工程资产，不读取消息正文、工具参数/结果、Memory 正文或用户目录配置；`--inline` 不写文件。
+- 默认 CLI 会创建一个 `ConversationLedger` 并在 ReAct / Plan / Team 三条路径间共享，原始 `LlmClient.Message` 以 append-only JSONL 写入 `~/.paicli/history/raw/session-*.jsonl`。记录包含 mode / actor / source，以及完整 system / user / assistant / tool_call / tool_result（含 reasoning、工具参数和结果、图片 payload）；`/clear`、图片裁剪和 conversationHistory 压缩只改发送视图，只能向账本追加边界事件，不能改写或删除旧行。该目录在 POSIX 上使用 0700、文件使用 0600；内容可能敏感，不要提交或随意分享。
 - JLine 交互升级计划记录在 `docs/phase-22-jline-interaction-upgrade.md`。
 
 ## 关键行为约束（Agent 必读）
@@ -122,9 +130,11 @@ src/main/java/com/paicli/
 - 长期记忆只通过 `/save` 或用户明确要求保存；不要自动提取事实
 - `PAI.md` 管团队共享的项目规则，长期记忆管个人或项目作用域的稳定事实；不要把一次性协作经验写进 `PAI.md`
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
+- 长期记忆去重以 `type + scope + project` 为边界，只做确定性的 Unicode/格式规范化与保守语法助词近似匹配；不要把它描述成事实冲突消解
 - 长期记忆必须可审计和可删除：`/memory list` / `/memory search <关键词>` / `/memory delete <id>` / `/memory clear`
 - 两道压缩不要混淆：shortTermMemory 压缩 vs conversationHistory 压缩（后者是防 window 超限的关键）
 - 自动压缩阈值按 Claude Code 风格预留摘要输出和安全缓冲：大窗口使用 `window - 20k - 13k`，例如 200k 窗口约 167k 触发、1M 窗口约 967k 触发；小窗口按比例缩小预留。
+- ReAct、Plan 单任务和 SubAgent 默认不设固定迭代上限；`paicli.react.hard.max.iterations` 仅在显式配置正整数时启用。显式轮数/Token 预算或停滞检测命中后必须禁用工具并做一次最佳努力收尾，返回“部分完成”结果，不能直接丢弃已有工作。
 
 ### HITL + 策略层
 
@@ -147,10 +157,13 @@ src/main/java/com/paicli/
 
 ### Web + Browser
 
-- 每轮 system prompt 会注入当前日期/时区，用于相对日期理解；联网搜索不再由 prompt 的 Freshness Policy 强制，是否调用 `web_search` 交给模型基于工具 schema 和用户目标自主决定。
+- 每轮 system prompt 会注入当前日期/时区，用于相对日期理解；不做基于“最新/当前/今天”等关键词的自动 freshness 预检。模型只能在顶层用户目标明确时选择联网工具，用户明确要求不要联网时优先遵从。
+- 当前顶层输入只是裸标题、主题或摘录，没有动作、问题或目标时，先澄清，本轮不调用任何工具；不得自行猜测 URL。
+- 用户明确要求查找但没有提供 URL 时，先 `web_search` 再基于结果继续；`web_fetch` 与浏览器导航 URL 只能来自用户实际提交的顶层原文（不含 `@path` / MCP resource 展开正文），或本执行分支成功完成的 `web_search` 结构化 `discoveredUrls`。搜索正文、snippet、query 回显、错误提示、`web_fetch` 正文、浏览器导航/快照/网络列表、普通本地工具输出、模型 reasoning / 回复 / tool arguments 都不能扩充 URL 授权；当前 StepSearch MCP 的非结构化文本不会生成 URL 凭据。
+- 运行时 `TurnToolPolicy` 覆盖 ReAct / Plan / Team，在 StepSearch、内置 Web provider 或 MCP / Chrome 路由之前执行；Plan 审阅补充会重建策略。Plan 并行任务和 Team worker 各用独立策略副本，不能跨分支共享新发现的 URL；只有 DAG 中声明的后继依赖才会继承前置分支的类型化 `web_search` URL 凭据，不从任务回复文本重新提取。grounded URL 只开放导航，成功导航只建立当前页的读取上下文；读取结果不产生新 URL 授权，点击/填写等交互仍需顶层原文明确授权。shared Chrome 状态必须从真实 `BrowserSession` 跨轮读取，非 PaiCLI 创建的标签页只能在用户明确要求时只读，不能由 Agent 导航、改写或关闭；导航结果不得把完整标签页清单回灌模型。策略拒绝不得通过换工具或换 provider 绕过。
 - “当前项目/当前 README/当前文件/当前代码”等表达属于本地上下文任务，通常应由模型选择 `glob_files` / `grep_code` / `read_file`，而不是联网工具。
 - 当前模型为 `step-3.7-flash*` 且自动/显式 `step_search` MCP 的 `web_search` / `web_fetch` 已就绪时，内置 `web_search` / `web_fetch` 会优先转调 StepSearch MCP；未就绪或调用失败时回退到原 SearchProvider / WebFetcher。
-- 已知 URL 先 `web_fetch`，SPA/防爬墙 fallback 到 Chrome DevTools MCP
+- 有可信来源的已知 URL 先 `web_fetch`，SPA/防爬墙 fallback 到 Chrome DevTools MCP
 - 浏览器读取优先 `take_snapshot`，不默认 `take_screenshot`
 - 公开页面不要提前切 shared 模式
 
@@ -222,6 +235,8 @@ src/main/java/com/paicli/
 | 模型/API | llm/*Client.java + LlmClientFactory.java |
 | RAG 语义辅助 | CodeRetriever.java + CodeIndex.java + VectorStore.java |
 | Multi-Agent | AgentOrchestrator.java + SubAgent.java |
+| Better Harness | BetterHarnessRunner.java + BetterHarnessEvidenceCollector.java |
+| LLM-as-a-Judge | eval/LlmJudge.java + eval/PositionBalancedPairwiseJudge.java |
 | MCP | McpServerManager.java + McpClient.java |
 | TUI/渲染 | render/Renderer.java + RendererFactory.java |
 

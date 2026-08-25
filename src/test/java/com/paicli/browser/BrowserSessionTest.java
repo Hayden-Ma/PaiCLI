@@ -51,7 +51,24 @@ class BrowserSessionTest {
         session.recordOpenedTab("page-1");
 
         assertTrue(session.isAgentOpenedTab("page-1"));
+        assertEquals("page-1", session.currentPageId());
+        assertTrue(session.hasAgentOwnedCurrentPage());
         assertFalse(session.isAgentOpenedTab("page-2"));
+    }
+
+    @Test
+    void selectingOrForgettingTabsKeepsCurrentOwnershipAccurate() {
+        BrowserSession session = new BrowserSession();
+        session.recordOpenedTab("page-1");
+        session.recordOpenedTab("page-2");
+
+        session.selectTab("page-1");
+        assertEquals("page-1", session.currentPageId());
+
+        session.forgetTab("page-1");
+        assertNull(session.currentPageId());
+        assertFalse(session.hasAgentOwnedCurrentPage());
+        assertTrue(session.isAgentOpenedTab("page-2"));
     }
 
     @Test
