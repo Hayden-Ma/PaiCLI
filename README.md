@@ -42,11 +42,11 @@ mvn test -DskipTests=false
 
 ### 第三期：Memory + 上下文工程
 
-- 短期记忆管理当前对话与工具结果
+- 每个 Agent 实例用自己的 `conversationHistory` 管理当前对话与工具结果，不再复制第二份影子短期记忆
 - 长期记忆通过 `/save <事实>` 或用户明确说“记一下 / 记住”时的 `save_memory` 保存关键事实，默认项目级作用域，跨会话复用
 - 项目级记忆通过 `PAI.md` / `.paicli/PAI.md` 启动自动注入，适合提交到仓库的团队共享规则；`PAI.local.md` / `.paicli/PAI.local.md` 只做本地覆盖
 - 注入给模型的相关记忆只使用长期稳定事实，不把当前轮短期对话误当成“历史记忆”
-- 对话接近预算时自动做摘要压缩
+- 对话接近预算时自动做摘要压缩；可选 Session Memory 增量摘要快速路径，不可用时回退完整对话摘要
 - 新增 `/memory` 查看状态、`/memory list/search/delete/clear` 管理长期记忆、`/save` 手动保存事实；Agent 在用户明确说“记一下 / 记住”时可调用 `save_memory`
 
 ### 第四期：RAG 检索 + 代码库理解
@@ -120,7 +120,7 @@ mvn test -DskipTests=false
 - `LlmClient` 声明模型能力：`maxContextWindow()`、`supportsPromptCaching()`、`promptCacheMode()`
 - GLM-5.1 默认 200k window，DeepSeek V4 默认 1M window，Agnes 2.0 Flash 默认 1M window，StepFun 默认 256k window，Kimi K2.6 默认 256k window，FreeLLMAPI 默认按 128k 保守预算
 - `AgentBudget` 按当前模型动态计算预算，默认 `80% * maxContextWindow`，仍可用系统属性覆盖
-- short / balanced / long 三种上下文模式：长上下文模式跳过摘要压缩，语义检索 topK 可提升到 20
+- 上下文预算按模型 window 连续派生：所有窗口都保留自动压缩，较大窗口可启用更多 MCP resource 索引能力
 - `search_code` 未显式传 `top_k` 时按上下文模式自适应；默认代码定位仍优先实时 grep/read
 - 长上下文模式下自动把 MCP resources 的 URI / 描述索引注入 system prompt，不自动注入正文
 - inline 模式下 Token / cached input tokens / 估算成本 / 耗时进入底部状态栏，避免占用正文输出区
@@ -317,8 +317,8 @@ Tips for getting started:
 
 ### 第三期
 
-- 🧠 短期记忆、长期记忆与相关记忆检索
-- 📦 长对话摘要压缩与 Token 预算管理
+- 🧠 Agent conversationHistory 短期上下文、长期记忆与相关记忆检索
+- 📦 Session Memory 快速压缩、完整摘要回退与 Token 预算管理
 - 📚 原始 system/user/assistant/tool 消息 append-only 落盘，压缩与 `/clear` 不改写历史账本
 - 🧮 长上下文动态预算、prompt cache 可见化与成本估算
 - 💾 `/memory` 与 `/save` 记忆管理入口
@@ -717,7 +717,7 @@ I
 - `/index [路径]` - 索引代码库（默认当前目录）
 - `/search <查询>` - 语义检索代码（RAG 辅助路径）
 - `/graph <类名>` - 查看代码关系图谱
-- `/clear` - 清空当前对话历史、短期记忆、待注入 Skill 上下文和上一轮检索记忆注入；长期记忆保留
+- `/clear` - 清空当前 ReAct 对话历史、Session Memory 预计算状态、待注入 Skill 上下文和上一轮检索记忆注入；长期记忆保留
 - `/exit` / `/quit` - 退出程序
 
 ## 运行效果
@@ -802,16 +802,17 @@ src/main/java/com/paicli
 │   ├── FreeLlmApiClient.java   # 本地 FreeLLMAPI OpenAI-compatible 网关客户端
 │   └── AgnesClient.java        # Agnes AI OpenAI-compatible 客户端
 ├── context/
-│   ├── ContextMode.java        # short / balanced / long 模式
+│   ├── ContextMode.java        # 旧模式名兼容枚举
 │   ├── ContextProfile.java     # 模型窗口与上下文策略
 │   └── TokenUsageFormatter.java # Token / cache / 成本展示
 ├── history/
 │   └── ConversationLedger.java # 原始会话 append-only JSONL 账本
 ├── memory/
 │   ├── MemoryEntry.java        # 记忆条目
-│   ├── ConversationMemory.java # 短期记忆
 │   ├── LongTermMemory.java     # 长期记忆
-│   ├── ContextCompressor.java  # 上下文压缩
+│   ├── SessionMemoryCompactor.java # 增量会话摘要快速压缩
+│   ├── ConversationHistoryCompactor.java # 完整对话摘要回退
+│   ├── AutoCompactionManager.java # 双路径自动压缩协调
 │   ├── TokenBudget.java        # Token 预算管理
 │   ├── MemoryRetriever.java    # 记忆检索
 │   └── MemoryManager.java      # 记忆门面类

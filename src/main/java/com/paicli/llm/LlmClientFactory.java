@@ -29,6 +29,7 @@ public class LlmClientFactory {
         return switch (normalized) {
             case "glm" -> new GLMClient(apiKey, model);
             case "deepseek" -> new DeepSeekClient(apiKey, model);
+            case "hunyuan" -> new HunyuanClient(apiKey, model, baseUrl);
             case "step" -> new StepClient(apiKey, model, baseUrl);
             case "kimi" -> new KimiClient(apiKey, model, baseUrl);
             case "freellmapi" -> new FreeLlmApiClient(apiKey, model, baseUrl);
@@ -44,7 +45,7 @@ public class LlmClientFactory {
             return client;
         }
 
-        for (String provider : new String[]{"glm", "deepseek", "step", "kimi", "freellmapi", "xfyun", "agnes"}) {
+        for (String provider : new String[]{"glm", "deepseek", "hunyuan", "step", "kimi", "freellmapi", "xfyun", "agnes"}) {
             client = create(provider, config);
             if (client != null) {
                 return client;
@@ -58,6 +59,7 @@ public class LlmClientFactory {
         String normalized = provider.trim().toLowerCase();
         return switch (normalized) {
             case "stepfun", "step-fun" -> "step";
+            case "hy4", "hy4-preview", "tokenhub", "tencent-hunyuan", "tencent_hunyuan" -> "hunyuan";
             case "moonshot", "moonshotai", "moonshot-ai" -> "kimi";
             case "free-llm-api", "free_llm_api", "freellm", "free-llm" -> "freellmapi";
             case "xfyun-maas", "xfyun_maas", "iflytek", "iflytek-maas", "iflytek_maas", "maas" -> "xfyun";

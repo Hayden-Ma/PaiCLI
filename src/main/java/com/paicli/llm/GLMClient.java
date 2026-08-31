@@ -1,5 +1,7 @@
 package com.paicli.llm;
 
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
 public class GLMClient extends AbstractOpenAiCompatibleClient {
 
     private static final String CODING_API_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
@@ -39,6 +41,26 @@ public class GLMClient extends AbstractOpenAiCompatibleClient {
     }
 
     @Override
+    protected boolean shouldSendReasoningContentInRequestHistory() {
+        return isGlm53();
+    }
+
+    @Override
+    protected void customizeRequestBody(ObjectNode requestBody) {
+        if (!isGlm53()) {
+            return;
+        }
+        requestBody.put("temperature", 1.0);
+        requestBody.put("top_p", 0.95);
+        requestBody.put("reasoning_effort", "max");
+        ObjectNode thinking = requestBody.putObject("thinking");
+        thinking.put("type", "enabled");
+        thinking.put("clear_thinking", false);
+        requestBody.put("tool_stream", true);
+        requestBody.putObject("stream_options").put("include_usage", true);
+    }
+
+    @Override
     public String getModelName() {
         return model;
     }
@@ -50,7 +72,12 @@ public class GLMClient extends AbstractOpenAiCompatibleClient {
 
     @Override
     public int maxContextWindow() {
-        return 200_000;
+        return isGlm53() ? 1_000_000 : 200_000;
+    }
+
+    @Override
+    public boolean supportsImageInput() {
+        return true;
     }
 
     @Override
@@ -81,5 +108,9 @@ public class GLMClient extends AbstractOpenAiCompatibleClient {
 
     private boolean isGlm5v() {
         return model != null && model.trim().toLowerCase().startsWith("glm-5v");
+    }
+
+    private boolean isGlm53() {
+        return model != null && model.trim().toLowerCase().startsWith("glm-5.3");
     }
 }

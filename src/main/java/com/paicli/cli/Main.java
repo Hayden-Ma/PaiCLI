@@ -224,7 +224,7 @@ public class Main {
         LlmClient llmClient = LlmClientFactory.createFromConfig(config);
         if (llmClient == null) {
             System.err.println("❌ 错误: 未找到可用的 API Key");
-            System.err.println("请在 .env 文件中添加 GLM_API_KEY、DEEPSEEK_API_KEY、STEP_API_KEY、KIMI_API_KEY、FREELLMAPI_API_KEY、XFYUN_MAAS_API_KEY 或 AGNES_API_KEY");
+            System.err.println("请在 .env 文件中添加 GLM_API_KEY、DEEPSEEK_API_KEY、HUNYUAN_API_KEY、STEP_API_KEY、KIMI_API_KEY、FREELLMAPI_API_KEY、XFYUN_MAAS_API_KEY 或 AGNES_API_KEY");
             System.exit(1);
         }
         AtomicReference<LlmClient> llmClientRef = new AtomicReference<>(llmClient);
@@ -579,10 +579,13 @@ public class Main {
                         if (selection == null || selection.isEmpty()) {
                             ui.println("🤖 当前模型: " + llmClient.getModelName() + " (" + llmClient.getProviderName() + ")");
                             ui.println("   GLM 明确模型：");
+                            ui.println("   /model glm-5.3-flash - 切换到 GLM-5.3-Flash");
                             ui.println("   /model glm-5.1       - 切换到 GLM-5.1");
                             ui.println("   /model glm-5v-turbo  - 切换到 GLM-5V-Turbo 多模态");
                             ui.println("   其它 provider 使用你配置里的具体模型：");
                             ui.println("   /model deepseek      - 切换到 DeepSeek（读取配置模型）");
+                            ui.println("   /model hunyuan       - 切换到混元（读取配置模型）");
+                            ui.println("   /model hy4-preview   - 切换到混元 Hy4 preview");
                             ui.println("   /model step          - 切换到 StepFun（读取配置模型）");
                             ui.println("   /model kimi          - 切换到 Kimi（读取配置模型）");
                             ui.println("   /model freellmapi    - 切换到本地 FreeLLMAPI（读取配置模型）");
@@ -1644,15 +1647,19 @@ public class Main {
     static List<SlashCommandHint> slashCommandHints() {
         return List.of(
                 new SlashCommandHint("/model", "/model", "查看当前模型"),
+                new SlashCommandHint("/model glm-5.3-flash", "/model glm-5.3-flash", "切换到 GLM-5.3-Flash"),
                 new SlashCommandHint("/model glm-5.1", "/model glm-5.1", "切换到 GLM-5.1"),
                 new SlashCommandHint("/model glm-5v-turbo", "/model glm-5v-turbo", "切换到 GLM-5V-Turbo 多模态"),
                 new SlashCommandHint("/model deepseek", "/model deepseek", "切换到 DeepSeek（读取配置模型）"),
+                new SlashCommandHint("/model hunyuan", "/model hunyuan", "切换到混元（读取配置模型）"),
+                new SlashCommandHint("/model hy4-preview", "/model hy4-preview", "切换到混元 Hy4 preview"),
                 new SlashCommandHint("/model step", "/model step", "切换到 StepFun（读取配置模型）"),
                 new SlashCommandHint("/model kimi", "/model kimi", "切换到 Kimi（读取配置模型）"),
                 new SlashCommandHint("/model freellmapi", "/model freellmapi", "切换到本地 FreeLLMAPI（读取配置模型）"),
                 new SlashCommandHint("/model xfyun", "/model xfyun", "切换到讯飞星辰 MaaS（读取配置模型）"),
                 new SlashCommandHint("/model agnes", "/model agnes", "切换到 Agnes 2.0 Flash（读取配置模型）"),
                 new SlashCommandHint("/config provider freellmapi ", "/config provider freellmapi <选项>", "配置本地 FreeLLMAPI provider"),
+                new SlashCommandHint("/config provider hunyuan ", "/config provider hunyuan <选项>", "配置混元 provider"),
                 new SlashCommandHint("/config provider xfyun ", "/config provider xfyun <选项>", "配置讯飞星辰 MaaS provider"),
                 new SlashCommandHint("/config provider agnes ", "/config provider agnes <选项>", "配置 Agnes provider"),
                 new SlashCommandHint("/plan", "/plan", "下一条任务使用 Plan-and-Execute 模式"),
@@ -1830,7 +1837,7 @@ public class Main {
             return;
         }
         String hint = switch (selected) {
-            case 0, 1 -> "💡 GLM: /model glm-5.1 / /model glm-5v-turbo；其它: /model deepseek|step|kimi|freellmapi|xfyun|agnes 读取配置模型";
+            case 0, 1 -> "💡 GLM: /model glm-5.3-flash / /model glm-5.1 / /model glm-5v-turbo；其它: /model deepseek|hunyuan|step|kimi|freellmapi|xfyun|agnes 读取配置模型";
             case 2 -> "💡 切换 HITL: /hitl on / /hitl off";
             case 3 -> "💡 管理 Skill: /skill list / /skill on <name> / /skill off <name>";
             case 4 -> "💡 切换渲染器（重启后生效）: PAICLI_RENDERER=inline|lanterna|plain";
@@ -1945,10 +1952,12 @@ public class Main {
                 用法:
                   /config provider freellmapi --base-url http://localhost:5173/v1 --api-key <key> --model auto
                   /config provider freellmapi --model qwen/qwen3-coder:free --default
+                  /config provider hunyuan --base-url https://tokenhub.tencentmaas.com/v1 --api-key <key> --model hy4-preview --default
                   /config provider xfyun --base-url https://maas-api.cn-huabei-1.xf-yun.com/v2 --api-key <key> --model Qwen3.6-35B-A3B --default
                   /config provider xfyun --lora-id <resourceId>
                   /config provider agnes --api-key <key> --model agnes-2.0-flash --default
                   /model freellmapi
+                  /model hunyuan
                   /model xfyun
                   /model agnes
                 """.stripTrailing();
@@ -2007,6 +2016,7 @@ public class Main {
         String provider = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
         return switch (provider) {
             case "stepfun", "step-fun" -> "step";
+            case "hy4", "hy4-preview", "tokenhub", "tencent-hunyuan", "tencent_hunyuan" -> "hunyuan";
             case "moonshot", "moonshotai", "moonshot-ai" -> "kimi";
             case "free-llm-api", "free_llm_api", "freellm", "free-llm" -> "freellmapi";
             case "xfyun-maas", "xfyun_maas", "iflytek", "iflytek-maas", "iflytek_maas", "maas" -> "xfyun";
@@ -2016,7 +2026,7 @@ public class Main {
     }
 
     private static boolean isSupportedProvider(String provider) {
-        return List.of("glm", "deepseek", "step", "kimi", "freellmapi", "xfyun", "agnes").contains(provider);
+        return List.of("glm", "deepseek", "hunyuan", "step", "kimi", "freellmapi", "xfyun", "agnes").contains(provider);
     }
 
     private static String maskSecret(String value) {
@@ -2879,6 +2889,9 @@ public class Main {
         return switch (normalized) {
             case "glm" -> new ModelSelection("glm", "glm-5.1", true);
             case "deepseek" -> new ModelSelection("deepseek", null, false);
+            case "hunyuan", "hy4", "tokenhub", "tencent-hunyuan", "tencent_hunyuan" ->
+                    new ModelSelection("hunyuan", null, false);
+            case "hy4-preview" -> new ModelSelection("hunyuan", value, true);
             case "step", "stepfun", "step-fun" -> new ModelSelection("step", null, false);
             case "kimi", "moonshot", "moonshotai", "moonshot-ai" -> new ModelSelection("kimi", null, false);
             case "freellmapi", "free-llm-api", "free_llm_api", "freellm", "free-llm" ->
@@ -2893,6 +2906,9 @@ public class Main {
                 }
                 if (normalized.startsWith("deepseek")) {
                     yield new ModelSelection("deepseek", value, true);
+                }
+                if (normalized.startsWith("hy4-") || normalized.startsWith("hunyuan-")) {
+                    yield new ModelSelection("hunyuan", value, true);
                 }
                 if (normalized.startsWith("step")) {
                     yield new ModelSelection("step", value, true);

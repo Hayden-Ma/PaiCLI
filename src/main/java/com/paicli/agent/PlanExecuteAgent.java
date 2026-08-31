@@ -6,7 +6,7 @@ import com.paicli.history.ConversationLedger;
 import com.paicli.llm.LlmClient;
 import com.paicli.llm.LlmTraceLogger;
 import com.paicli.lsp.LspDiagnosticReport;
-import com.paicli.memory.ConversationHistoryCompactor;
+import com.paicli.memory.AutoCompactionManager;
 import com.paicli.memory.MemoryManager;
 import com.paicli.plan.*;
 import com.paicli.prompt.PromptAssembler;
@@ -110,7 +110,7 @@ public class PlanExecuteAgent {
     private final Planner planner;
     private final PlanReviewHandler reviewHandler;
     private final MemoryManager memoryManager;
-    private final ConversationHistoryCompactor historyCompactor;
+    private final AutoCompactionManager autoCompactionManager;
     private final PrintStream out;
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private Supplier<String> externalContextSupplier = () -> "";
@@ -152,7 +152,7 @@ public class PlanExecuteAgent {
         this.planner = planner != null ? planner : new Planner(llmClient, this.out);
         this.reviewHandler = reviewHandler == null ? (goal, plan) -> PlanReviewDecision.execute() : reviewHandler;
         this.memoryManager = memoryManager != null ? memoryManager : new MemoryManager(llmClient);
-        this.historyCompactor = new ConversationHistoryCompactor(llmClient);
+        this.autoCompactionManager = new AutoCompactionManager(llmClient);
         this.toolRegistry.setContextProfile(this.memoryManager.getContextProfile());
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
         this.memoryManager.setProjectPath(this.toolRegistry.getProjectPath());
@@ -203,12 +203,11 @@ public class PlanExecuteAgent {
     }
 
     private void maybeCompactHistory(List<LlmClient.Message> messages, PrintStream out, String actor) {
-        if (historyCompactor == null) return;
         int trigger = memoryManager.getContextProfile().compressionTriggerTokens();
         int beforeMessages = messages.size();
         try {
-            boolean compacted = historyCompactor.compactIfNeeded(messages, trigger);
-            if (compacted) {
+            AutoCompactionManager.Result result = autoCompactionManager.compactIfNeeded(messages, trigger);
+            if (result.compacted()) {
                 conversationLedger.appendEvent(
                         "compaction",
                         "plan",
@@ -216,7 +215,8 @@ public class PlanExecuteAgent {
                         "automatic",
                         Map.of(
                                 "beforeMessages", beforeMessages,
-                                "afterMessages", messages.size()));
+                                "afterMessages", messages.size(),
+                                "strategy", result.strategy().name().toLowerCase()));
                 if (out != null) {
                     out.println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
                 }
@@ -260,7 +260,6 @@ public class PlanExecuteAgent {
                 submittedUserInput,
                 toolRegistry.isSharedBrowserSession(),
                 toolRegistry.hasAgentOwnedCurrentBrowserPage());
-        memoryManager.addUserMessage(userInput);
         conversationLedger.appendMessage(
                 "plan", "plan-agent", "user_input", LlmClient.Message.user(userInput));
         StreamState streamState = new StreamState();
@@ -272,7 +271,6 @@ public class PlanExecuteAgent {
             }
             PlanRunOutcome outcome = runWithPlan(userInput, streamState);
             if (outcome.persistAssistantMessage() && outcome.result() != null && !outcome.result().isBlank()) {
-                memoryManager.addAssistantMessage("[计划结果] " + outcome.result());
                 conversationLedger.appendMessage(
                         "plan",
                         "plan-agent",
@@ -286,7 +284,6 @@ public class PlanExecuteAgent {
         } catch (Exception e) {
             log.error("Plan run failed", e);
             String errorMessage = "❌ 执行失败: " + e.getMessage();
-            memoryManager.addAssistantMessage(errorMessage);
             conversationLedger.appendMessage(
                     "plan",
                     "plan-agent",
@@ -623,14 +620,8 @@ public class PlanExecuteAgent {
                         budget.totalCachedInputTokens());
                 if (!allResults.isEmpty() && (response.content() == null || response.content().isBlank())) {
                     String toolOnlyResult = allResults.toString().trim();
-                    if (!toolOnlyResult.isBlank()) {
-                        memoryManager.addAssistantMessage("[计划任务 " + task.getId() + "] " + toolOnlyResult);
-                    }
                     streamRenderer.finish();
                     return TaskRunResult.of(toolOnlyResult, streamRenderer.hasStreamedOutput(), taskToolPolicy);
-                }
-                if (response.content() != null && !response.content().isBlank()) {
-                    memoryManager.addAssistantMessage("[计划任务 " + task.getId() + "] " + response.content());
                 }
                 streamRenderer.finish();
                 return TaskRunResult.of(response.content(), streamRenderer.hasStreamedOutput(), taskToolPolicy);
@@ -652,7 +643,6 @@ public class PlanExecuteAgent {
             List<ToolExecutionResult> toolResults = executeToolCalls(
                     task.getId(), response.toolCalls(), taskToolPolicy, toolExposure);
             for (ToolExecutionResult toolResult : toolResults) {
-                memoryManager.addToolResult(toolResult.name(), toolResult.result());
                 allResults.append(toolResult.result()).append("\n");
                 appendTaskMessage(
                         messages,
@@ -705,7 +695,6 @@ public class PlanExecuteAgent {
             content = allResults.toString().trim();
         }
         String partialResult = formatPartialResult(description, content);
-        memoryManager.addAssistantMessage("[计划任务 " + task.getId() + "] " + partialResult);
         memoryManager.recordTokenUsage(
                 budget.totalInputTokens(),
                 budget.totalOutputTokens(),

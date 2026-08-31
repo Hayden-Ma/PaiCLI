@@ -162,7 +162,6 @@ public class AgentOrchestrator {
         planner.setTurnToolPolicy(turnToolPolicy);
         workers.forEach(worker -> worker.setTurnToolPolicy(turnToolPolicy));
         reviewer.setTurnToolPolicy(turnToolPolicy);
-        memoryManager.addUserMessage(userInput);
         conversationLedger.appendMessage(
                 "team",
                 "orchestrator",
@@ -248,7 +247,6 @@ public class AgentOrchestrator {
 
         // 6. 汇总结果
         String finalResult = buildFinalResult(steps);
-        memoryManager.addAssistantMessage("[多Agent结果] " + finalResult);
         conversationLedger.appendMessage(
                 "team",
                 "orchestrator",

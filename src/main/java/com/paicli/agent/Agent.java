@@ -6,7 +6,7 @@ import com.paicli.context.ContextProfile;
 import com.paicli.context.TokenUsageFormatter;
 import com.paicli.history.ConversationLedger;
 import com.paicli.lsp.LspDiagnosticReport;
-import com.paicli.memory.ConversationHistoryCompactor;
+import com.paicli.memory.AutoCompactionManager;
 import com.paicli.memory.ExplicitMemoryHints;
 import com.paicli.memory.MemoryManager;
 import com.paicli.prompt.PromptAssembler;
@@ -50,7 +50,7 @@ public class Agent {
     private final ToolRegistry toolRegistry;
     private final List<LlmClient.Message> conversationHistory;
     private final MemoryManager memoryManager;
-    private final ConversationHistoryCompactor historyCompactor;
+    private final AutoCompactionManager autoCompactionManager;
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private Supplier<String> externalContextSupplier = () -> "";
     private SkillRegistry skillRegistry;
@@ -69,7 +69,7 @@ public class Agent {
         this.toolRegistry = toolRegistry;
         this.conversationHistory = new ArrayList<>();
         this.memoryManager = new MemoryManager(llmClient);
-        this.historyCompactor = new ConversationHistoryCompactor(llmClient);
+        this.autoCompactionManager = new AutoCompactionManager(llmClient);
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
         this.memoryManager.setProjectPath(this.toolRegistry.getProjectPath());
@@ -99,7 +99,7 @@ public class Agent {
     public void setLlmClient(LlmClient llmClient) {
         this.llmClient = llmClient;
         this.memoryManager.setLlmClient(llmClient);
-        this.historyCompactor.setLlmClient(llmClient);
+        this.autoCompactionManager.setLlmClient(llmClient);
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
     }
@@ -161,8 +161,6 @@ public class Agent {
                 toolRegistry.isSharedBrowserSession(),
                 toolRegistry.hasAgentOwnedCurrentBrowserPage());
         pruneHistoricalImagePayloads();
-        // 存入短期记忆
-        memoryManager.addUserMessage(userInput);
         storeExplicitBrowserMemoryHint(userInput);
 
         // 检索相关长期记忆，注入到 system prompt
@@ -190,9 +188,8 @@ public class Agent {
                 pushStatus(budget, startNanos, "idle");
                 return "⏹️ 已取消当前任务。";
             }
-            // 调 LLM 前评估 conversationHistory 是否接近 window 上限；超阈值就把早期消息压缩成摘要。
-            // 这是与第 3 期 Memory 短期记忆压缩并行的另一道压缩——后者只压 shortTermMemory，
-            // 真正决定下一轮 LLM input token 的是这里。
+            // 调 LLM 前只评估真正发送的 conversationHistory。会话记忆快速路径和完整摘要
+            // 回退路径都由同一个协调器管理，不再复制一份影子短期记忆。
             injectPendingLspDiagnostics();
             maybeCompactHistory();
             AgentBudget.ExitReason exitReason = budget.check();
@@ -248,7 +245,6 @@ public class Agent {
                     List<ToolExecutionResult> toolResults = executeToolCalls(
                             response.toolCalls(), iteration, turnToolPolicy, toolExposure);
                     for (ToolExecutionResult toolResult : toolResults) {
-                        memoryManager.addToolResult(toolResult.name(), toolResult.result());
                         appendConversationMessage(
                                 LlmClient.Message.tool(toolResult.id(), toolResult.result()),
                                 "tool_execution");
@@ -272,9 +268,6 @@ public class Agent {
                         LlmClient.Message.assistant(
                                 response.reasoningContent(),
                                 response.content()));
-
-                // 存入记忆
-                memoryManager.addAssistantMessage(response.content());
 
                 // 记录 token 使用
                 memoryManager.recordTokenUsage(budget.totalInputTokens(), budget.totalOutputTokens(), budget.totalCachedInputTokens());
@@ -340,7 +333,6 @@ public class Agent {
                     "agent",
                     "budget_finalization_response",
                     LlmClient.Message.assistant(response.reasoningContent(), partialResult));
-            memoryManager.addAssistantMessage(partialResult);
             memoryManager.recordTokenUsage(
                     budget.totalInputTokens(),
                     budget.totalOutputTokens(),
@@ -370,6 +362,7 @@ public class Agent {
      * 清空对话历史并重建基础系统提示，不影响长期记忆条目
      */
     public void clearHistory() {
+        autoCompactionManager.clear(conversationHistory);
         conversationLedger.appendEvent(
                 "history_clear",
                 "react",
@@ -381,8 +374,6 @@ public class Agent {
                 LlmClient.Message.system(buildSystemPrompt("")),
                 "history_reset");
 
-        // 清空短期记忆
-        memoryManager.clearShortTerm();
         if (skillContextBuffer != null) {
             skillContextBuffer.clear();
         }
@@ -395,11 +386,11 @@ public class Agent {
         long beforeTokens = estimateCurrentContextTokens();
         int beforeMessages = conversationHistory.size();
         try {
-            boolean compacted = historyCompactor.compactNow(conversationHistory);
-            if (compacted) {
+            AutoCompactionManager.Result result = autoCompactionManager.compactNow(conversationHistory);
+            if (result.compacted()) {
                 recordCompaction("manual", beforeMessages, beforeTokens);
             }
-            return new CompactionResult(compacted, beforeTokens, estimateCurrentContextTokens(), null);
+            return new CompactionResult(result.compacted(), beforeTokens, estimateCurrentContextTokens(), null);
         } catch (Exception e) {
             log.warn("manual conversationHistory compaction failed", e);
             return new CompactionResult(false, beforeTokens, estimateCurrentContextTokens(), e.getMessage());
@@ -443,15 +434,17 @@ public class Agent {
     }
 
     private void maybeCompactHistory() {
-        if (historyCompactor == null) return;
         int trigger = memoryManager.getContextProfile().compressionTriggerTokens();
         int beforeMessages = conversationHistory.size();
         long beforeTokens = estimateCurrentContextTokens();
         try {
-            boolean compacted = historyCompactor.compactIfNeeded(conversationHistory, trigger);
-            if (compacted) {
-                recordCompaction("automatic", beforeMessages, beforeTokens);
-                renderer().stream().println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
+            AutoCompactionManager.Result result = autoCompactionManager.compactIfNeeded(conversationHistory, trigger);
+            if (result.compacted()) {
+                recordCompaction("automatic:" + result.strategy().name().toLowerCase(), beforeMessages, beforeTokens);
+                String strategy = result.strategy() == AutoCompactionManager.Strategy.SESSION_MEMORY
+                        ? "会话记忆摘要"
+                        : "完整对话摘要";
+                renderer().stream().println("📦 上下文接近窗口上限，已通过" + strategy + "压缩后继续。");
             }
         } catch (Exception e) {
             log.warn("conversationHistory compaction failed", e);
@@ -600,6 +593,11 @@ public class Agent {
                 formatTokens(triggerTokens),
                 (int) (profile.compressionTriggerRatio() * 100),
                 formatTokens(triggerRemaining)));
+        sb.append("  自动压缩: ")
+                .append(autoCompactionManager.isSessionMemoryEnabled()
+                        ? "Session Memory 优先，完整摘要回退"
+                        : "完整摘要（Session Memory 实验开关关闭）")
+                .append("\n");
         sb.append("  MCP resources 自动索引: ")
                 .append(profile.mcpResourceIndexEnabled() ? "开启" : "关闭（window 不足 32k）")
                 .append("\n");

@@ -1,5 +1,6 @@
 package com.paicli.llm;
 
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import okhttp3.OkHttpClient;
 import okhttp3.Protocol;
 
@@ -51,6 +52,17 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
     }
 
     @Override
+    protected void customizeRequestBody(ObjectNode requestBody) {
+        if (!isDeepSeekV4()) {
+            return;
+        }
+        requestBody.put("temperature", 1.0);
+        requestBody.put("top_p", 0.95);
+        requestBody.put("reasoning_effort", "max");
+        requestBody.putObject("thinking").put("type", "enabled");
+    }
+
+    @Override
     public boolean supportsImageInput() {
         return false;
     }
@@ -83,6 +95,10 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
     @Override
     public String promptCacheMode() {
         return "automatic-prefix-cache";
+    }
+
+    private boolean isDeepSeekV4() {
+        return model != null && model.trim().toLowerCase().startsWith("deepseek-v4-");
     }
 
 }

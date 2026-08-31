@@ -6,7 +6,7 @@ import com.paicli.history.ConversationLedger;
 import com.paicli.llm.LlmClient;
 import com.paicli.llm.LlmTraceLogger;
 import com.paicli.lsp.LspDiagnosticReport;
-import com.paicli.memory.ConversationHistoryCompactor;
+import com.paicli.memory.AutoCompactionManager;
 import com.paicli.context.ContextProfile;
 import com.paicli.prompt.PromptAssembler;
 import com.paicli.prompt.PromptContext;
@@ -53,7 +53,7 @@ public class SubAgent {
     private Supplier<String> externalContextSupplier = () -> "";
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
-    private final ConversationHistoryCompactor historyCompactor;
+    private final AutoCompactionManager autoCompactionManager;
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private TurnToolPolicy turnToolPolicy;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
@@ -65,7 +65,7 @@ public class SubAgent {
         this.toolRegistry = toolRegistry;
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
         this.conversationHistory = new ArrayList<>();
-        this.historyCompactor = new ConversationHistoryCompactor(llmClient);
+        this.autoCompactionManager = new AutoCompactionManager(llmClient);
         this.conversationHistory.add(LlmClient.Message.system(getSystemPrompt()));
     }
 
@@ -122,13 +122,13 @@ public class SubAgent {
     }
 
     private void maybeCompactHistory(PrintStream out) {
-        if (historyCompactor == null) return;
         ContextProfile profile = toolRegistry == null ? null : toolRegistry.getContextProfile();
         if (profile == null) return;
         int beforeMessages = conversationHistory.size();
         try {
-            boolean compacted = historyCompactor.compactIfNeeded(conversationHistory, profile.compressionTriggerTokens());
-            if (compacted) {
+            AutoCompactionManager.Result result = autoCompactionManager.compactIfNeeded(
+                    conversationHistory, profile.compressionTriggerTokens());
+            if (result.compacted()) {
                 conversationLedger.appendEvent(
                         "compaction",
                         "team",
@@ -136,7 +136,8 @@ public class SubAgent {
                         "automatic",
                         Map.of(
                                 "beforeMessages", beforeMessages,
-                                "afterMessages", conversationHistory.size()));
+                                "afterMessages", conversationHistory.size(),
+                                "strategy", result.strategy().name().toLowerCase()));
                 if (out != null) {
                     out.println("📦 [" + name + "] 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
                 }
@@ -412,6 +413,7 @@ public class SubAgent {
      * 清空对话历史（保留系统提示词），用于处理下一个独立任务
      */
     public void clearHistory() {
+        autoCompactionManager.clear(conversationHistory);
         LlmClient.Message systemMsg = conversationHistory.get(0);
         conversationLedger.appendEvent(
                 "history_clear",

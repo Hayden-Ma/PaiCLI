@@ -10,15 +10,12 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * 压缩 ReAct 主循环里的 {@code conversationHistory}（即 {@code List<LlmClient.Message>}）。
+ * 完整对话摘要压缩器，直接压缩 Agent 实际发给 LLM 的
+ * {@code conversationHistory}（即 {@code List<LlmClient.Message>}）。
  *
- * 与 {@link ContextCompressor} 的区别：
- * - {@code ContextCompressor} 压的是 {@link ConversationMemory}（PaiCLI 的短期记忆条目）
- * - 本类压的是 Agent 实际发给 LLM 的消息列表
- *
- * 第 3 期 Memory 设计假设"LLM 调用从 shortTermMemory 重建消息"，但实际 Agent 直接维护
- * conversationHistory，与 shortTermMemory 并行。两个度量错位导致旧版压缩从未真正缩短
- * 即将发给 LLM 的 token——本类是在 Agent.run 主循环里"调 LLM 前评估并压缩"的补丁。
+ * 本类是自动压缩的稳定回退路径，也是手动 {@code /compact} 使用的路径。
+ * 实验性的会话记忆快速路径由 {@link SessionMemoryCompactor} 提前生成摘要，二者最终都只会
+ * 重建同一份 conversationHistory，不再维护一份与真实输入脱节的影子短期记忆。
  *
  * 算法：
  * 1. 估算 conversationHistory 当前 token，未达 trigger 直接返回 false
@@ -93,14 +90,8 @@ public class ConversationHistoryCompactor {
         int currentTokens = TokenBudget.estimateMessagesTokens(history);
         if (!force && currentTokens < triggerTokens) return false;
 
-        int systemEnd = "system".equals(history.get(0).role()) ? 1 : 0;
-
-        List<Integer> userIndices = new ArrayList<>();
-        for (int i = systemEnd; i < history.size(); i++) {
-            if ("user".equals(history.get(i).role())) {
-                userIndices.add(i);
-            }
-        }
+        int systemEnd = systemEnd(history);
+        List<Integer> userIndices = userIndices(history, systemEnd);
         int effectiveRetainRounds = Math.max(1, retainRounds);
         if (userIndices.size() <= effectiveRetainRounds) {
             log.info("compactIfNeeded skip: only {} user turns, < retain {}",
@@ -126,13 +117,10 @@ public class ConversationHistoryCompactor {
             return false;
         }
 
-        List<LlmClient.Message> rebuilt = new ArrayList<>();
-        for (int i = 0; i < systemEnd; i++) {
-            rebuilt.add(history.get(i));
-        }
-        rebuilt.add(LlmClient.Message.user("[已压缩的历史对话摘要]\n" + summary.trim()));
-        rebuilt.add(LlmClient.Message.assistant("好的，我已了解之前的上下文，请继续。"));
-        rebuilt.addAll(history.subList(splitIdx, history.size()));
+        List<LlmClient.Message> rebuilt = rebuildWithSummary(
+                history,
+                splitIdx,
+                "[已压缩的历史对话摘要]\n" + summary.trim());
 
         int afterTokens = TokenBudget.estimateMessagesTokens(rebuilt);
         history.clear();
@@ -180,5 +168,35 @@ public class ConversationHistoryCompactor {
 
     public int retainRecentRounds() {
         return retainRecentRounds;
+    }
+
+    static int systemEnd(List<LlmClient.Message> history) {
+        return history != null && !history.isEmpty() && "system".equals(history.get(0).role()) ? 1 : 0;
+    }
+
+    static List<Integer> userIndices(List<LlmClient.Message> history, int start) {
+        List<Integer> indices = new ArrayList<>();
+        if (history == null) return indices;
+        for (int i = Math.max(0, start); i < history.size(); i++) {
+            if ("user".equals(history.get(i).role())) {
+                indices.add(i);
+            }
+        }
+        return indices;
+    }
+
+    static List<LlmClient.Message> rebuildWithSummary(
+            List<LlmClient.Message> history,
+            int splitIdx,
+            String summaryMessage) {
+        int systemEnd = systemEnd(history);
+        List<LlmClient.Message> rebuilt = new ArrayList<>();
+        for (int i = 0; i < systemEnd; i++) {
+            rebuilt.add(history.get(i));
+        }
+        rebuilt.add(LlmClient.Message.user(summaryMessage));
+        rebuilt.add(LlmClient.Message.assistant("好的，我已了解之前的上下文，请继续。"));
+        rebuilt.addAll(history.subList(splitIdx, history.size()));
+        return rebuilt;
     }
 }

@@ -12,7 +12,9 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -35,6 +37,33 @@ class ToolRegistryTest {
         assertFalse(output.successful());
         assertFalse(result.successful());
         assertTrue(result.discoveredUrls().isEmpty());
+    }
+
+    @Test
+    void exposesToolDefinitionsInStableNameOrder() {
+        ToolRegistry registry = new ToolRegistry();
+
+        List<String> names = registry.getToolDefinitions().stream()
+                .map(com.paicli.llm.LlmClient.Tool::name)
+                .toList();
+        List<String> sorted = names.stream().sorted().toList();
+
+        assertEquals(sorted, names);
+    }
+
+    @Test
+    void removesCredentialsButKeepsBuildEnvironmentForBenchmarkShells() {
+        Map<String, String> environment = new LinkedHashMap<>();
+        environment.put("PATH", "/usr/bin");
+        environment.put("JAVA_HOME", "/jdk");
+        environment.put("DEEPSEEK_API_KEY", "secret");
+        environment.put("ANTHROPIC_AUTH_TOKEN", "secret");
+        environment.put("AWS_SECRET_ACCESS_KEY", "secret");
+        environment.put("DATABASE_PASSWORD", "secret");
+
+        ToolRegistry.removeSensitiveCommandEnvironment(environment);
+
+        assertEquals(Map.of("PATH", "/usr/bin", "JAVA_HOME", "/jdk"), environment);
     }
 
     @Test

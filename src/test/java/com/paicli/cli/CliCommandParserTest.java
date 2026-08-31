@@ -97,6 +97,16 @@ class CliCommandParserTest {
         assertEquals("agnes", agnes.provider());
         assertEquals("agnes-2.0-flash", agnes.model());
         assertEquals(true, agnes.explicitModel());
+
+        Main.ModelSelection hunyuan = Main.resolveModelSelection("hunyuan");
+        assertEquals("hunyuan", hunyuan.provider());
+        assertNull(hunyuan.model());
+        assertEquals(false, hunyuan.explicitModel());
+
+        Main.ModelSelection hy4 = Main.resolveModelSelection("hy4-preview");
+        assertEquals("hunyuan", hy4.provider());
+        assertEquals("hy4-preview", hy4.model());
+        assertEquals(true, hy4.explicitModel());
     }
 
     @Test
@@ -145,6 +155,19 @@ class CliCommandParserTest {
         assertEquals("https://apihub.agnes-ai.com/v1", update.baseUrl());
         assertEquals("sk-test", update.apiKey());
         assertEquals("agnes-2.0-flash", update.model());
+        assertEquals(true, update.setDefault());
+    }
+
+    @Test
+    void parsesHunyuanProviderConfigUpdateFromHy4Alias() {
+        Main.ProviderConfigUpdate update = Main.parseProviderConfigUpdate(
+                "provider hy4 --base-url https://tokenhub.tencentmaas.com/v1 --api-key sk-test --model hy4-preview --default");
+
+        assertNull(update.error());
+        assertEquals("hunyuan", update.provider());
+        assertEquals("https://tokenhub.tencentmaas.com/v1", update.baseUrl());
+        assertEquals("sk-test", update.apiKey());
+        assertEquals("hy4-preview", update.model());
         assertEquals(true, update.setDefault());
     }
 

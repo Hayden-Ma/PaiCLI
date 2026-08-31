@@ -101,6 +101,7 @@ public class ToolRegistry {
     private LspManager lspManager = new LspManager(projectPath);
     private SnapshotService snapshotService = SnapshotService.forProject(Path.of(projectPath));
     private boolean customSnapshotService;
+    private boolean sanitizeCommandEnvironment;
     private volatile String currentProvider = "";
     private volatile String currentModel = "";
 
@@ -145,6 +146,16 @@ public class ToolRegistry {
      */
     public String getProjectPath() {
         return projectPath;
+    }
+
+    /**
+     * Removes credential-like variables from child processes launched by
+     * {@code execute_command}. This is opt-in so normal interactive sessions keep
+     * their existing environment behavior, while unattended benchmark workers can
+     * prevent model-authentication credentials from leaking into evaluated shells.
+     */
+    public void setSanitizeCommandEnvironment(boolean sanitizeCommandEnvironment) {
+        this.sanitizeCommandEnvironment = sanitizeCommandEnvironment;
     }
 
     public void setContextProfile(ContextProfile contextProfile) {
@@ -1068,6 +1079,7 @@ public class ToolRegistry {
      */
     public List<com.paicli.llm.LlmClient.Tool> getToolDefinitions() {
         return tools.values().stream()
+                .sorted(Comparator.comparing(Tool::name))
                 .map(t -> new com.paicli.llm.LlmClient.Tool(t.name(), t.description(), t.parameters()))
                 .toList();
     }
@@ -1413,6 +1425,9 @@ public class ToolRegistry {
             ProcessBuilder pb = new ProcessBuilder("bash", "-c", normalized);
             pb.directory(new File(projectPath));
             pb.redirectErrorStream(true);
+            if (sanitizeCommandEnvironment) {
+                removeSensitiveCommandEnvironment(pb.environment());
+            }
             process = pb.start();
 
             Process runningProcess = process;
@@ -1443,6 +1458,31 @@ public class ToolRegistry {
         } finally {
             outputReaderExecutor.shutdownNow();
         }
+    }
+
+    static void removeSensitiveCommandEnvironment(Map<String, String> environment) {
+        if (environment == null || environment.isEmpty()) {
+            return;
+        }
+        environment.keySet().removeIf(ToolRegistry::isSensitiveEnvironmentName);
+    }
+
+    static boolean isSensitiveEnvironmentName(String name) {
+        if (name == null || name.isBlank()) {
+            return false;
+        }
+        String normalized = name.trim().toUpperCase(Locale.ROOT);
+        return normalized.endsWith("_API_KEY")
+                || normalized.endsWith("_AUTH_TOKEN")
+                || normalized.endsWith("_ACCESS_TOKEN")
+                || normalized.endsWith("_REFRESH_TOKEN")
+                || normalized.endsWith("_SECRET")
+                || normalized.endsWith("_PASSWORD")
+                || normalized.contains("PRIVATE_KEY")
+                || normalized.contains("SECRET_ACCESS_KEY")
+                || normalized.contains("CLIENT_SECRET")
+                || normalized.equals("ANTHROPIC_AUTH_TOKEN")
+                || normalized.equals("AUTHORIZATION");
     }
 
     private String readProcessOutput(Process process) throws Exception {

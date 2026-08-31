@@ -61,6 +61,19 @@ class PaiCliCompleterTest {
     }
 
     @Test
+    void completesHunyuanModelNames() {
+        PaiCliCompleter completer = new PaiCliCompleter(List::of);
+        List<Candidate> providerCandidates = new ArrayList<>();
+        List<Candidate> modelCandidates = new ArrayList<>();
+
+        completer.complete(null, parsed("/model hun", "hun"), providerCandidates);
+        completer.complete(null, parsed("/model hy", "hy"), modelCandidates);
+
+        assertTrue(providerCandidates.stream().anyMatch(c -> c.value().equals("hunyuan")));
+        assertTrue(modelCandidates.stream().anyMatch(c -> c.value().equals("hy4-preview")));
+    }
+
+    @Test
     void completesConfigProviderCommand() {
         PaiCliCompleter completer = new PaiCliCompleter(List::of);
         List<Candidate> candidates = new ArrayList<>();
@@ -88,6 +101,16 @@ class PaiCliCompleterTest {
         completer.complete(null, parsed("/config provider xf", "xf"), candidates);
 
         assertTrue(candidates.stream().anyMatch(c -> c.value().equals("xfyun ")));
+    }
+
+    @Test
+    void completesHunyuanProviderCommand() {
+        PaiCliCompleter completer = new PaiCliCompleter(List::of);
+        List<Candidate> candidates = new ArrayList<>();
+
+        completer.complete(null, parsed("/config provider hu", "hu"), candidates);
+
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("hunyuan ")));
     }
 
     @Test

@@ -115,6 +115,7 @@ public class PaiCliConfig {
         String envKey = switch (provider.toLowerCase()) {
             case "glm" -> "GLM_MODEL";
             case "deepseek" -> "DEEPSEEK_MODEL";
+            case "hunyuan" -> "HUNYUAN_MODEL";
             case "kimi" -> "KIMI_MODEL";
             case "freellmapi" -> "FREELLMAPI_MODEL";
             case "xfyun" -> "XFYUN_MAAS_MODEL";
@@ -160,6 +161,7 @@ public class PaiCliConfig {
         String envKey = switch (provider.toLowerCase()) {
             case "glm" -> "GLM_API_KEY";
             case "deepseek" -> "DEEPSEEK_API_KEY";
+            case "hunyuan" -> "HUNYUAN_API_KEY";
             case "step" -> "STEP_API_KEY";
             case "kimi" -> "KIMI_API_KEY";
             case "freellmapi" -> "FREELLMAPI_API_KEY";
@@ -205,6 +207,7 @@ public class PaiCliConfig {
     private static String loadBaseUrlFromEnv(String provider) {
         String envKey = switch (provider.toLowerCase()) {
             case "step" -> "STEP_BASE_URL";
+            case "hunyuan" -> "HUNYUAN_BASE_URL";
             case "kimi" -> "KIMI_BASE_URL";
             case "freellmapi" -> "FREELLMAPI_BASE_URL";
             case "xfyun" -> "XFYUN_MAAS_BASE_URL";

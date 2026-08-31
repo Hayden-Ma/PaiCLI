@@ -2,8 +2,6 @@ package com.paicli.memory;
 
 import com.paicli.llm.LlmClient;
 import com.paicli.context.ContextProfile;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -13,14 +11,13 @@ import java.util.UUID;
 /**
  * Memory 管理器 - Memory 系统的门面类
  *
- * 统一管理短期记忆、长期记忆、上下文压缩和检索，
- * 为 Agent 提供简洁的记忆存取接口。
+ * 统一管理跨会话长期记忆、检索和 token 统计。
+ *
+ * <p>当前会话的短期上下文由各 Agent 自己的 conversationHistory 维护，并由
+ * {@link AutoCompactionManager} 直接压缩；这里不再复制保存第二份消息列表。</p>
  */
 public class MemoryManager {
-    private static final Logger log = LoggerFactory.getLogger(MemoryManager.class);
-    private final ConversationMemory shortTermMemory;
     private final LongTermMemory longTermMemory;
-    private final ContextCompressor compressor;
     private final MemoryRetriever retriever;
     private TokenBudget tokenBudget;
     private ContextProfile contextProfile;
@@ -30,38 +27,32 @@ public class MemoryManager {
         this(llmClient, ContextProfile.from(llmClient), null);
     }
 
-    /**
-     * @param llmClient      LLM 客户端（用于压缩时的摘要生成）
-     * @param shortTermBudget 短期记忆 token 预算
-     * @param contextWindow  模型上下文窗口大小
-     */
-    public MemoryManager(LlmClient llmClient, int shortTermBudget, int contextWindow) {
-        this(llmClient, shortTermBudget, contextWindow, null);
+    /** 兼容旧调用签名；短期上下文不再由 MemoryManager 保存。 */
+    public MemoryManager(LlmClient llmClient, int ignoredShortTermBudget, int contextWindow) {
+        this(llmClient, ignoredShortTermBudget, contextWindow, null);
     }
 
-    public MemoryManager(LlmClient llmClient, int shortTermBudget, int contextWindow, LongTermMemory longTermMemory) {
-        this(llmClient, ContextProfile.custom(contextWindow, shortTermBudget), longTermMemory);
+    /** 兼容旧调用签名；第二个参数不再参与预算计算。 */
+    public MemoryManager(LlmClient llmClient, int ignoredShortTermBudget, int contextWindow,
+                         LongTermMemory longTermMemory) {
+        this(llmClient, ContextProfile.custom(contextWindow), longTermMemory);
     }
 
     private MemoryManager(LlmClient llmClient, ContextProfile contextProfile, LongTermMemory longTermMemory) {
         this.contextProfile = contextProfile;
-        this.shortTermMemory = new ConversationMemory(contextProfile.shortTermMemoryBudget());
         this.longTermMemory = longTermMemory != null ? longTermMemory : new LongTermMemory();
-        this.compressor = new ContextCompressor(llmClient);
-        this.retriever = new MemoryRetriever(shortTermMemory, this.longTermMemory);
+        this.retriever = new MemoryRetriever(this.longTermMemory);
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
         this.currentProject = defaultProjectKey();
     }
 
     public void setLlmClient(LlmClient llmClient) {
-        this.compressor.setLlmClient(llmClient);
         applyContextProfile(ContextProfile.from(llmClient));
     }
 
     public void applyContextProfile(ContextProfile contextProfile) {
         this.contextProfile = contextProfile;
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
-        this.shortTermMemory.setMaxTokens(contextProfile.shortTermMemoryBudget());
     }
 
     public void setProjectPath(String projectPath) {
@@ -69,58 +60,6 @@ public class MemoryManager {
             return;
         }
         this.currentProject = normalizeProjectKey(projectPath);
-    }
-
-    /**
-     * 添加用户消息到短期记忆
-     */
-    public void addUserMessage(String content) {
-        MemoryEntry entry = new MemoryEntry(
-                "user-" + UUID.randomUUID().toString().substring(0, 8),
-                content,
-                MemoryEntry.MemoryType.CONVERSATION,
-                Map.of("source", "user"),
-                MemoryEntry.estimateTokens(content)
-        );
-        shortTermMemory.store(entry);
-        compressIfNeeded();
-    }
-
-    /**
-     * 添加助手回复到短期记忆
-     */
-    public void addAssistantMessage(String content) {
-        MemoryEntry entry = new MemoryEntry(
-                "assistant-" + UUID.randomUUID().toString().substring(0, 8),
-                content,
-                MemoryEntry.MemoryType.CONVERSATION,
-                Map.of("source", "assistant"),
-                MemoryEntry.estimateTokens(content)
-        );
-        shortTermMemory.store(entry);
-        compressIfNeeded();
-    }
-
-    // 工具结果在记忆中的最大长度（完整结果已在任务消息历史里，记忆只需保留摘要）
-    private static final int MAX_TOOL_RESULT_CHARS = 500;
-
-    /**
-     * 添加工具执行结果到短期记忆（截断过长结果，避免快速撑满预算）
-     */
-    public void addToolResult(String toolName, String result) {
-        String truncated = result.length() > MAX_TOOL_RESULT_CHARS
-                ? result.substring(0, MAX_TOOL_RESULT_CHARS) + "...(已截断)"
-                : result;
-        String content = "[" + toolName + "] " + truncated;
-        MemoryEntry entry = new MemoryEntry(
-                "tool-" + UUID.randomUUID().toString().substring(0, 8),
-                content,
-                MemoryEntry.MemoryType.TOOL_RESULT,
-                Map.of("source", "tool", "toolName", toolName),
-                MemoryEntry.estimateTokens(content)
-        );
-        shortTermMemory.store(entry);
-        compressIfNeeded();
     }
 
     /**
@@ -183,35 +122,6 @@ public class MemoryManager {
     }
 
     /**
-     * 检查并触发压缩（由 Agent 在 LLM 调用前主动调用）
-     *
-     * @return 是否执行了压缩
-     */
-    public boolean compressIfNeeded() {
-        // 压缩永远可触发，模式概念已删除。触发条件仅看占用率是否到达 ContextProfile 配置的自动压缩阈值。
-        if (!tokenBudget.needsCompression(shortTermMemory, contextProfile.compressionTriggerRatio())) {
-            return false;
-        }
-        int beforeTokens = shortTermMemory.getTokenCount();
-        log.info("上下文占用达到压缩阈值（{}%），触发短期记忆压缩",
-                (int) (contextProfile.compressionTriggerRatio() * 100));
-        String summary = compressor.compress(shortTermMemory);
-        if (summary != null) {
-            int afterTokens = shortTermMemory.getTokenCount();
-            String preview = summary.substring(0, Math.min(100, summary.length()));
-            log.info("短期记忆压缩完成: {} -> {} tokens, summaryPreview={}", beforeTokens, afterTokens, preview);
-        }
-        return summary != null;
-    }
-
-    /**
-     * 清空短期记忆（保留长期记忆）
-     */
-    public void clearShortTerm() {
-        shortTermMemory.clear();
-    }
-
-    /**
      * 清空长期记忆
      */
     public void clearLongTerm() {
@@ -223,13 +133,12 @@ public class MemoryManager {
      */
     public String getSystemStatus() {
         return "上下文策略: " + contextProfile.summary() + "\n" +
-                shortTermMemory.getStatusSummary() + "\n" +
+                "短期上下文: 由当前 Agent conversationHistory 维护\n" +
                 longTermMemory.getStatusSummary() + "\n" +
                 tokenBudget.getUsageReport();
     }
 
     // Getter
-    public ConversationMemory getShortTermMemory() { return shortTermMemory; }
     public LongTermMemory getLongTermMemory() { return longTermMemory; }
     public TokenBudget getTokenBudget() { return tokenBudget; }
     public ContextProfile getContextProfile() { return contextProfile; }

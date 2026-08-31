@@ -35,7 +35,7 @@ class PlanExecuteAgentTest {
     Path tempDir;
 
     @Test
-    void shouldWritePlanExecutionArtifactsBackToShortTermMemoryOnly() throws Exception {
+    void shouldKeepPlanExecutionArtifactsInTheTaskConversationOnly() throws Exception {
         Path sampleFile = Files.createFile(tempDir.resolve("sample.txt"));
         Files.writeString(sampleFile, "plan-memory-content");
 
@@ -74,14 +74,13 @@ class PlanExecuteAgentTest {
 
         String result = agent.run("请读取测试文件并确认内容");
 
-        List<String> shortTermContents = memoryManager.getShortTermMemory().getAll().stream()
-                .map(entry -> entry.getContent())
-                .toList();
-
         assertTrue(result.contains("计划执行完成"));
-        assertTrue(shortTermContents.stream().anyMatch(content -> content.contains("请读取测试文件并确认内容")));
-        assertTrue(shortTermContents.stream().anyMatch(content -> content.contains("plan-memory-content")));
-        assertTrue(shortTermContents.stream().anyMatch(content -> content.contains("已读取并确认文件内容")));
+        assertTrue(llmClient.messageSnapshots.stream().flatMap(List::stream)
+                .anyMatch(message -> message.content() != null
+                        && message.content().contains("请读取测试文件并确认内容")));
+        assertTrue(llmClient.messageSnapshots.stream().flatMap(List::stream)
+                .anyMatch(message -> message.content() != null
+                        && message.content().contains("plan-memory-content")));
         assertEquals(0, memoryManager.getLongTermMemory().size());
     }
 
@@ -366,6 +365,7 @@ class PlanExecuteAgentTest {
     private static final class StubGLMClient extends GLMClient {
         private final Queue<StubResponse> responses;
         private final List<List<Tool>> toolSnapshots = new ArrayList<>();
+        private final List<List<Message>> messageSnapshots = new ArrayList<>();
 
         private StubGLMClient(List<ChatResponse> responses) {
             super("test-key");
@@ -389,6 +389,7 @@ class PlanExecuteAgentTest {
         @Override
         public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
             toolSnapshots.add(tools == null ? List.of() : List.copyOf(tools));
+            messageSnapshots.add(List.copyOf(messages));
             StubResponse stubResponse = responses.poll();
             if (stubResponse == null) {
                 throw new IOException("缺少预设响应");

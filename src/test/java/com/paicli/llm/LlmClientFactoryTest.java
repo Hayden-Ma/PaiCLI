@@ -41,6 +41,28 @@ class LlmClientFactoryTest {
     }
 
     @Test
+    void createsHunyuanClientFromHy4AliasAndConfiguredProvider() {
+        PaiCliConfig config = new PaiCliConfig();
+        config.getProviders().put("hunyuan",
+                new PaiCliConfig.ProviderConfig(
+                        "test-hunyuan-key",
+                        "https://tokenhub.tencentmaas.com/v1",
+                        "hy4-preview"));
+
+        LlmClient client = LlmClientFactory.create("hy4", config);
+        LlmClient previewAliasClient = LlmClientFactory.create("hy4-preview", config);
+
+        HunyuanClient hunyuanClient = assertInstanceOf(HunyuanClient.class, client);
+        assertInstanceOf(HunyuanClient.class, previewAliasClient);
+        assertEquals("hunyuan", hunyuanClient.getProviderName());
+        assertEquals("hy4-preview", hunyuanClient.getModelName());
+        assertEquals("https://tokenhub.tencentmaas.com/v1/chat/completions", hunyuanClient.getApiUrl());
+        assertEquals(1_000_000, hunyuanClient.maxContextWindow());
+        assertEquals(false, hunyuanClient.supportsImageInput());
+        assertEquals(true, hunyuanClient.supportsPromptCaching());
+    }
+
+    @Test
     void createsStepClientFromStepfunAliasAndCustomBaseUrl() {
         PaiCliConfig config = new PaiCliConfig();
         config.setProviders(new LinkedHashMap<>());

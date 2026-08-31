@@ -227,8 +227,11 @@ class MainInputNormalizationTest {
     void slashCommandChoicesAreRenderedDirectlyWithoutJLineConfirmationText() {
         String choices = Main.formatSlashCommandChoices(120);
 
+        assertTrue(choices.contains("/model glm-5.3-flash"), choices);
         assertTrue(choices.contains("/model glm-5.1"), choices);
         assertTrue(choices.contains("/model glm-5v-turbo"), choices);
+        assertTrue(choices.contains("/model hunyuan"), choices);
+        assertTrue(choices.contains("/model hy4-preview"), choices);
         assertTrue(choices.contains("/model step"), choices);
         assertTrue(choices.contains("/model kimi"), choices);
         assertTrue(choices.contains("/model freellmapi"), choices);

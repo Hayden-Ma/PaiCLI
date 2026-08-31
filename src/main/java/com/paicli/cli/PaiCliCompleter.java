@@ -89,9 +89,12 @@ final class PaiCliCompleter implements Completer {
         }
         String value = input.length() <= 7 ? "" : input.substring(7);
         addMatching(candidates, "模型", value,
+                option("glm-5.3-flash", "GLM-5.3-Flash 1M 长上下文"),
                 option("glm-5.1", "GLM-5.1 长上下文"),
                 option("glm-5v-turbo", "GLM-5V 多模态"),
                 option("deepseek", "DeepSeek，读取配置模型"),
+                option("hunyuan", "混元，读取配置模型"),
+                option("hy4-preview", "混元 Hy4 preview"),
                 option("step", "StepFun，读取配置模型"),
                 option("kimi", "Kimi/Moonshot，读取配置模型"),
                 option("freellmapi", "本地 FreeLLMAPI，读取配置模型"),
@@ -118,6 +121,7 @@ final class PaiCliCompleter implements Completer {
                         option("freellmapi ", "本地 FreeLLMAPI"),
                         option("glm ", "GLM"),
                         option("deepseek ", "DeepSeek"),
+                        option("hunyuan ", "混元 Hy4"),
                         option("step ", "StepFun"),
                         option("kimi ", "Kimi/Moonshot"),
                         option("xfyun ", "讯飞星辰 MaaS"),
