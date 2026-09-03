@@ -2,6 +2,7 @@ package com.paicli.lsp;
 
 import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParseResult;
+import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.Problem;
 import com.github.javaparser.Range;
 import com.github.javaparser.ast.CompilationUnit;
@@ -20,7 +21,10 @@ import java.util.Map;
 public class LspManager {
     private static final Logger log = LoggerFactory.getLogger(LspManager.class);
 
-    private final JavaParser javaParser = new JavaParser();
+    // JavaParser 默认语言级别低于 JAVA_14，会把项目里正常的 record / switch 表达式等
+    // Java 17 语法误报成 parse error；显式对齐 pom.xml 的 <release>17</release>。
+    private final JavaParser javaParser = new JavaParser(new ParserConfiguration()
+            .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17));
     private final Map<Path, List<LspDiagnostic>> pendingByFile = new LinkedHashMap<>();
     private Path projectRoot;
 

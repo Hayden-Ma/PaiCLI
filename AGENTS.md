@@ -46,6 +46,10 @@ mvn test -DskipTests=false                  # 全量
 
 三条执行路径共享 ToolRegistry / MemoryManager / SnapshotService / ConversationLedger：ReAct（`Agent.java`，默认）、Plan-and-Execute（`PlanExecuteAgent.java`，`/plan`）、Multi-Agent（`AgentOrchestrator.java`，`/team`）。
 
+`execute_command` 的 shell 选择按平台分支：Windows 用 `cmd.exe /d /s /c`（避免 `bash` 命中 WSL 桩程序 `C:\Windows\System32\bash.exe`），macOS / Linux 用 `bash -c`；命令文本需按对应 shell 语法给出，`CommandGuard` 黑名单始终按原始命令文本匹配。不要为某个平台硬编码单一 shell。
+
+LSP post-edit 诊断用 JavaParser，语言级别固定 JAVA_17（与 pom.xml `<release>17</release>` 对齐）；不要用默认 `new JavaParser()`，否则 record / switch 表达式会被误报成 parse error。
+
 ```
 src/main/java/com/paicli/
 ├── agent/  cli/  plan/  memory/  context/  history/  prompt/

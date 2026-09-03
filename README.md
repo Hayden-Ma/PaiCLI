@@ -277,7 +277,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 ### 第十七期：LSP 诊断注入（MVP）
 
 - `write_file` / `edit_file` 成功后触发 post-edit 诊断，诊断结果不会阻塞工具主流程
-- 当前 MVP 对 Java 文件使用 JavaParser 做轻量语法诊断，不依赖本机安装 JDT LS
+- 当前 MVP 对 Java 文件使用 JavaParser 做轻量语法诊断，语言级别固定 JAVA_17（与 pom.xml 的 `<release>17</release>` 对齐，避免 record / switch 表达式等新语法被误报成 parse error），不依赖本机安装 JDT LS
 - ReAct、Plan-and-Execute、Multi-Agent 三条路径都会在下一轮 LLM 请求前注入 pending 诊断
 - 诊断按 error / warning / info、文件、行列号、message 格式化，默认最多注入 20 条
 - 配置：`PAICLI_LSP_ENABLED=false` 可关闭，`PAICLI_LSP_MAX_DIAGNOSTICS=20` 可调整注入上限
@@ -769,7 +769,7 @@ I
 - `list_dir` - 列出目录内容
 - `glob_files` - 按文件名 glob 实时查找项目内文件（只读，自动跳过常见构建/依赖目录）
 - `grep_code` - 按关键字或正则实时搜索项目内代码，优先使用 ripgrep，返回文件、行号、可选上下文、partial 状态与 suggested_reads
-- `execute_command` - 在当前项目目录执行短时 Shell 命令（默认 60 秒超时，黑名单拦截破坏性命令）
+- `execute_command` - 在当前项目目录执行短时 Shell 命令（默认 60 秒超时，黑名单拦截破坏性命令；Windows 用 `cmd.exe /d /s /c`，macOS / Linux 用 `bash -c`，命令文本需按对应 shell 语法给出）
 - `create_project` - 创建项目结构（java/python/node）
 - `search_code` - 语义检索代码库（自然语言查询，适合作为模糊语义或常规搜索无果时的辅助）
 - `web_search` - 在用户目标明确且需要联网时搜索互联网信息
@@ -780,7 +780,7 @@ I
 
 同一轮模型返回多个工具调用时，PaiCLI 只并行执行只读工具；写文件、执行命令、MCP 等有副作用的调用按模型给出的顺序逐个执行。如果工具之间有数据依赖（例如需要先读结果再决定怎么改），模型仍应分多轮调用。`edit_file` 匹配 `old_text` 时先按字面量查找，找不到且文件使用 CRLF 换行时，会把 `old_text` / `new_text` 中的 `\n` 转成 `\r\n` 再匹配，替换后保留文件原有换行风格。
 
-文件类与代码检索工具（`read_file` / `write_file` / `edit_file` / `list_dir` / `glob_files` / `grep_code` / `create_project`）路径强制限定在项目根之内，越界请求会被策略层拒绝。`edit_file` 使用 `path`、`old_text`、`new_text` 参数，原文必须在已有文件中恰好出现一次；多处匹配时请补充上下文。编辑后的文件上限为 5MB，编辑操作与整文件写入一样触发 HITL、审计、diff 展示和编辑后诊断。`execute_command` 通过命令黑名单拦截 `sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / `curl|sh` 等。`revert_turn` 会批量回写工作区，默认触发 HITL 和审计。所有 `mcp__` 前缀工具默认触发 HITL 和审计。详见 `/policy`。
+文件类与代码检索工具（`read_file` / `write_file` / `edit_file` / `list_dir` / `glob_files` / `grep_code` / `create_project`）路径强制限定在项目根之内，越界请求会被策略层拒绝。`edit_file` 使用 `path`、`old_text`、`new_text` 参数，原文必须在已有文件中恰好出现一次；多处匹配时请补充上下文。编辑后的文件上限为 5MB，编辑操作与整文件写入一样触发 HITL、审计、diff 展示和编辑后诊断。`execute_command` 通过命令黑名单拦截 `sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / `curl|sh` 等，黑名单按原始命令文本匹配、与平台 shell 无关。`revert_turn` 会批量回写工作区，默认触发 HITL 和审计。所有 `mcp__` 前缀工具默认触发 HITL 和审计。详见 `/policy`。
 
 ## 命令
 
@@ -850,7 +850,7 @@ I
 ║   ██████╔╝███████║██║     ██║     ██║     ██║            ║
 ║   ██╔═══╝ ██╔══██║██║     ██║     ██║     ██║            ║
 ║   ██║     ██║  ██║███████╗╚██████╗███████╗██║            ║
-║   ╚═╝     ╚═╝  ╚═╝╚══════╝ ╚═════╝╚══════╝╚═╝            ║
+║   ╚═╝     ╚═╝  ╚═╝╚══════╝ ╚═════╝╚═════╝╚═╝            ║
 ║                                                          ║
 ║              简单的 Java Agent CLI v1.0.0                ║
 ║                                                          ║

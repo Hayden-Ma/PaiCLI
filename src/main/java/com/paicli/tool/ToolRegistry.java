@@ -64,6 +64,10 @@ public class ToolRegistry {
     private static final int MAX_COMMAND_OUTPUT_CHARS = 8_000;
     // 开启工具输出卸载时，命令输出先完整捕获到这个上限，超过 MAX_COMMAND_OUTPUT_CHARS 的部分写入会话文件而不是丢弃。
     private static final int MAX_COMMAND_CAPTURE_CHARS = 2_000_000;
+    // Windows 上 ProcessBuilder("bash") 会解析到 C:\Windows\System32\bash.exe（WSL 桩程序），
+    // 未安装 WSL 发行版时所有命令都会直接失败；因此 Windows 用 cmd.exe，其他平台继续用 bash。
+    private static final boolean IS_WINDOWS =
+            System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
     private static final int MAX_READ_FILE_LINES = 2_000;
     private static final int MAX_GREP_RESULTS = 200;
     private static final int MAX_GREP_CONTEXT_LINES = 5;
@@ -1655,12 +1659,17 @@ public class ToolRegistry {
 
         Process process = null;
         try {
+            // Windows 下 "bash" 会命中 WSL 桩程序 C:\Windows\System32\bash.exe，未装发行版时
+            // 任何命令都直接失败；因此无沙箱时 Windows 走 cmd.exe（/d 跳过 AutoRun，/s 规避引号处理），
+            // 其他平台继续用 bash。命令围栏 CommandGuard 仍按原始命令文本拦截。
             CommandSandbox activeSandbox = commandSandbox;
             CommandSandbox.Invocation sandboxInvocation = activeSandbox == null
                     ? null
                     : activeSandbox.prepare(Path.of(projectPath), normalized);
             ProcessBuilder pb = sandboxInvocation == null
-                    ? new ProcessBuilder("bash", "-c", normalized)
+                    ? (IS_WINDOWS
+                        ? new ProcessBuilder("cmd.exe", "/d", "/s", "/c", normalized)
+                        : new ProcessBuilder("bash", "-c", normalized))
                     : new ProcessBuilder(sandboxInvocation.arguments());
             pb.directory(sandboxInvocation == null
                     ? new File(projectPath)

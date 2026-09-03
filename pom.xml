@@ -57,6 +57,13 @@
             <version>4.0.0</version>
             <classifier>jdk11</classifier>
         </dependency>
+        <!-- JLine Windows 终端原生库：无此依赖时 Windows 下 JLine 降级 dumb 终端，
+             触发 "终端不支持 ANSI" 回退 plain 并导致中文乱码 -->
+        <dependency>
+            <groupId>org.jline</groupId>
+            <artifactId>jline-terminal-jni</artifactId>
+            <version>4.0.0</version>
+        </dependency>
 
         <!-- QR code rendering for terminal-based WeChat iLink login -->
         <dependency>
@@ -126,6 +133,14 @@
 
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <release>17</release>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
