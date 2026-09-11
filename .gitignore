@@ -22,3 +22,6 @@ target/
 Thumbs.db
 /reports
 temp_articles.json
+
+# 代码索引产物
+.codegraph/
