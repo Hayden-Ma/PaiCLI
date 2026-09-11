@@ -11,8 +11,10 @@ import java.util.stream.Collectors;
  * 记忆检索器 - 根据查询从长期记忆中检索最相关的信息。
  *
  * 检索策略：
- * 1. 关键词匹配：直接匹配内容中的关键词
- * 2. 类型优先：不同场景优先检索不同类型的记忆
+ * 1. BM25 相关度打分（k1=1.5, b=0.75）：查询侧用 jieba 分词提取词项；中文场景下词项
+ *    频率按子串出现次数统计，规避分词歧义导致的漏召回；文档长度按字符数归一；IDF
+ *    采用 Lucene 变体 ln(1 + (N - df + 0.5) / (df + 0.5))，保证权重非负
+ * 2. 短语加成：内容完整包含查询原文时额外加权
  * 3. 时间衰减：越近的记忆权重越高
  *
  * 注入 system prompt 时每条记忆都带写入时间和最后核实时间；超过
@@ -23,6 +25,9 @@ public class MemoryRetriever {
     static final String STALE_DAYS_ENV = "PAICLI_MEMORY_STALE_DAYS";
     static final int DEFAULT_STALE_DAYS = 30;
     static final String STALE_LABEL = "可能已过时";
+    static final double K1 = 1.5;
+    static final double B = 0.75;
+    static final double EXACT_MATCH_BOOST = 1.25;
 
     private final LongTermMemory longTermMemory;
     private final Duration staleAfter;
@@ -63,10 +68,20 @@ public class MemoryRetriever {
     }
 
     public List<MemoryEntry> retrieveLongTerm(String query, int limit, String projectKey) {
-        return longTermMemory.getAll().stream()
+        List<MemoryEntry> entries = longTermMemory.getAll().stream()
                 .filter(entry -> LongTermMemory.isVisibleInProject(entry, projectKey))
-                .map(entry -> new ScoredEntry(entry, computeRelevanceScore(entry, query) * 1.2, false))
-                .filter(scoredEntry -> scoredEntry.score() > 0)
+                .collect(Collectors.toList());
+        if (entries.isEmpty()) return List.of();
+
+        String queryLower = query == null ? "" : query.toLowerCase(Locale.ROOT).trim();
+        Set<String> queryTerms = MemoryQueryTokenizer.tokenize(queryLower);
+        if (queryTerms.isEmpty()) {
+            if (queryLower.isEmpty()) return List.of();
+            // 分词后为空的单字/特殊查询回退为整体子串匹配
+            queryTerms = Set.of(queryLower);
+        }
+
+        return rank(entries, queryTerms, queryLower).stream()
                 .sorted(Comparator.comparingDouble(ScoredEntry::score).reversed())
                 .limit(limit)
                 .map(ScoredEntry::entry)
@@ -149,37 +164,73 @@ public class MemoryRetriever {
         }
     }
 
-    /**
-     * 计算记忆条目与查询的相关度分数
-     */
-    private double computeRelevanceScore(MemoryEntry entry, String query) {
-        String contentLower = entry.getContent().toLowerCase();
-        String queryLower = query.toLowerCase();
+    private List<ScoredEntry> rank(List<MemoryEntry> entries, Set<String> queryTerms, String queryLower) {
+        int docCount = entries.size();
+        Map<String, Integer> docFreq = new HashMap<>();
+        List<Map<String, Integer>> termFrequencies = new ArrayList<>(docCount);
+        List<String> loweredContents = new ArrayList<>(docCount);
+        long totalLength = 0;
 
-        // 1. 精确匹配加分
-        if (contentLower.contains(queryLower)) {
-            return 1.0;
-        }
-
-        // 2. 关键词匹配
-        Set<String> queryWords = MemoryQueryTokenizer.tokenize(queryLower);
-        int matchedWords = 0;
-        for (String word : queryWords) {
-            if (!word.isEmpty() && contentLower.contains(word)) {
-                matchedWords++;
+        for (MemoryEntry entry : entries) {
+            String contentLower = entry.getContent().toLowerCase(Locale.ROOT);
+            Map<String, Integer> tf = new HashMap<>();
+            for (String term : queryTerms) {
+                int count = countOccurrences(contentLower, term);
+                if (count > 0) {
+                    tf.put(term, count);
+                    docFreq.merge(term, 1, Integer::sum);
+                }
             }
+            termFrequencies.add(tf);
+            loweredContents.add(contentLower);
+            totalLength += Math.max(1, contentLower.length());
         }
+        double avgDocLength = (double) totalLength / docCount;
 
-        if (matchedWords == 0) return 0;
+        List<ScoredEntry> scored = new ArrayList<>(docCount);
+        for (int i = 0; i < docCount; i++) {
+            MemoryEntry entry = entries.get(i);
+            double score = bm25(termFrequencies.get(i), docFreq, docCount,
+                    avgDocLength, Math.max(1, loweredContents.get(i).length()));
+            if (score <= 0) continue;
+            if (loweredContents.get(i).contains(queryLower)) {
+                score *= EXACT_MATCH_BOOST;
+            }
+            scored.add(new ScoredEntry(entry, score * timeDecay(entry), false));
+        }
+        return scored;
+    }
 
-        double keywordScore = (double) matchedWords / queryWords.size();
+    /**
+     * 标准 BM25：sum over query terms of idf * tf*(k1+1) / (tf + k1*(1-b+b*dl/avgdl))
+     */
+    private double bm25(Map<String, Integer> tf, Map<String, Integer> docFreq, int docCount,
+                        double avgDocLength, int docLength) {
+        double score = 0;
+        for (Map.Entry<String, Integer> termTf : tf.entrySet()) {
+            int df = docFreq.getOrDefault(termTf.getKey(), 1);
+            double idf = Math.log(1 + (docCount - df + 0.5) / (df + 0.5));
+            int freq = termTf.getValue();
+            double lengthNorm = 1 - B + B * docLength / avgDocLength;
+            score += idf * freq * (K1 + 1) / (freq + K1 * lengthNorm);
+        }
+        return score;
+    }
 
-        // 3. 时间衰减（越近分数越高，简单实现）
+    private static double timeDecay(MemoryEntry entry) {
         long ageMs = System.currentTimeMillis() - entry.getTimestamp().toEpochMilli();
         double ageHours = ageMs / (1000.0 * 60 * 60);
-        double timeDecay = Math.max(0.5, 1.0 - ageHours / 24.0); // 24小时内从1.0衰减到0.5
+        return Math.max(0.5, 1.0 - ageHours / 24.0); // 24小时内从1.0衰减到0.5
+    }
 
-        return keywordScore * timeDecay;
+    private static int countOccurrences(String content, String term) {
+        int count = 0;
+        int index = 0;
+        while ((index = content.indexOf(term, index)) >= 0) {
+            count++;
+            index += term.length();
+        }
+        return count;
     }
 
     private record ScoredEntry(MemoryEntry entry, double score, boolean fromShortTerm) {}

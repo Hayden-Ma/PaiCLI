@@ -65,4 +65,35 @@ class MemoryRetrieverTest {
         assertTrue(context.contains("当前项目使用 Java 17"));
         assertFalse(context.contains("其他项目使用 Python"));
     }
+
+    @Test
+    void shouldRankHigherTermFrequencyFirst() {
+        longTerm.store(new MemoryEntry("frequent", "redis 缓存服务，缓存层依赖 redis，redis 集群",
+                MemoryEntry.MemoryType.FACT, null, 10));
+        longTerm.store(new MemoryEntry("once", "redis 是一个键值数据库",
+                MemoryEntry.MemoryType.FACT, null, 10));
+        var results = retriever.retrieve("redis", 5);
+        assertEquals("frequent", results.get(0).getId());
+    }
+
+    @Test
+    void shouldNormalizeByDocumentLength() {
+        longTerm.store(new MemoryEntry("short", "部署使用 docker",
+                MemoryEntry.MemoryType.FACT, null, 10));
+        longTerm.store(new MemoryEntry("long", "docker 是一个容器运行时平台，可以帮助开发者构建、发布和运行"
+                        + "分布式应用，团队也用它做持续集成和自动化测试环境",
+                MemoryEntry.MemoryType.FACT, null, 10));
+        var results = retriever.retrieve("docker", 5);
+        assertEquals("short", results.get(0).getId());
+    }
+
+    @Test
+    void shouldUpweightRareTermsOverCommonOnes() {
+        longTerm.store(new MemoryEntry("common1", "测试 工具", MemoryEntry.MemoryType.FACT, null, 10));
+        longTerm.store(new MemoryEntry("common2", "测试 框架", MemoryEntry.MemoryType.FACT, null, 10));
+        longTerm.store(new MemoryEntry("common3", "测试 环境", MemoryEntry.MemoryType.FACT, null, 10));
+        longTerm.store(new MemoryEntry("rare", "kubernetes 部署脚本", MemoryEntry.MemoryType.FACT, null, 10));
+        var results = retriever.retrieve("测试 kubernetes", 5);
+        assertEquals("rare", results.get(0).getId());
+    }
 }
