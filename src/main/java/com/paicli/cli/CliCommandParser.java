@@ -49,6 +49,7 @@ final class CliCommandParser {
         SKILL_OFF,
         SKILL_RELOAD,
         BETTER_HARNESS,
+        EVAL_BENCH,
         CONFIG,
         EXPORT
     }
@@ -318,6 +319,14 @@ final class CliCommandParser {
             return new ParsedCommand(
                     CommandType.BETTER_HARNESS,
                     trimmed.substring(16).trim());
+        }
+
+        if (trimmed.equalsIgnoreCase("/eval")) {
+            return new ParsedCommand(CommandType.EVAL_BENCH, null);
+        }
+
+        if (trimmed.regionMatches(true, 0, "/eval ", 0, 6)) {
+            return new ParsedCommand(CommandType.EVAL_BENCH, trimmed.substring(6).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/mcp")) {

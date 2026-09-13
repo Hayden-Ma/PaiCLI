@@ -874,6 +874,12 @@ public class Main {
                         }
                         continue;
                     }
+                    case EVAL_BENCH -> {
+                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "eval"));
+                        runEvalFromPayload(command.payload(), ui);
+                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        continue;
+                    }
                     case EXPORT -> {
                         handleExportCommand(ui, reactAgent);
                         continue;
@@ -1110,6 +1116,64 @@ public class Main {
                 && args.length >= 1
                 && "serve".equalsIgnoreCase(args[0])
                 && java.util.Arrays.stream(args).anyMatch("--http"::equalsIgnoreCase);
+    }
+
+    /**
+     * 交互式评测入口：/eval [--suite <suite.json>] [--runs k] [--out dir]
+     * 参数与 bench 子命令一致；未指定 suite 时默认跑 benchmarks/paicli-smoke-v0.1/suite.json。
+     * 评测期间同步占用终端，完成后自动回到输入。
+     */
+    private static void runEvalFromPayload(String payload, PrintStream ui) {
+        String[] tokens = payload == null || payload.isBlank()
+                ? new String[0]
+                : payload.trim().split("\\s+");
+        String[] args = new String[tokens.length + 1];
+        args[0] = "eval";
+        System.arraycopy(tokens, 0, args, 1, tokens.length);
+        BenchCliArgs benchArgs = parseBenchArgs(args);
+        if (benchArgs.suitePath() == null) {
+            benchArgs = new BenchCliArgs(
+                    Path.of("benchmarks", "paicli-smoke-v0.1", "suite.json"),
+                    benchArgs.outputRoot(), benchArgs.runs(), benchArgs.options());
+        }
+
+        Path suitePath = benchArgs.suitePath();
+        if (!Files.exists(suitePath)) {
+            ui.println("❌ 评测 suite 不存在: " + suitePath + "\n");
+            ui.println("   用法: /eval [--suite <suite.json>] [--runs k] [--out dir] "
+                    + "[--case-timeout-seconds n] [--verifier-timeout-seconds n] "
+                    + "[--max-iterations n] [--token-budget n] [--allow-commands a,b]\n");
+            return;
+        }
+
+        PaiCliConfig config = PaiCliConfig.load();
+        LlmClient client = LlmClientFactory.createFromConfig(config);
+        if (client == null) {
+            ui.println("❌ 未找到可用的 API Key，/eval 需要真实模型调用\n");
+            return;
+        }
+
+        try {
+            SuiteDefinition suite = SuiteDefinition.load(suitePath);
+            CaseRunner.Options options = benchArgs.options();
+            int runs = benchArgs.runs();
+            Path outputRoot = benchArgs.outputRoot();
+            BenchmarkRunner runner = new BenchmarkRunner(client, options);
+            ui.println("🔬 评测开始: suite=" + suite.name()
+                    + " model=" + client.getProviderName() + "/" + client.getModelName()
+                    + " runsPerCase=" + runs);
+            ui.println("   评测期间终端会被占用，完成后自动回到输入。\n");
+            BenchmarkRunner.SuiteReport report = runner.run(suite, runs, outputRoot);
+            ui.println();
+            ui.println("✅ 评测完成: " + report.runId());
+            ui.println("   加权得分: " + report.weightedScore());
+            ui.printf(Locale.ROOT, "   pass@1: %.1f%%   pass@k: %.1f%%   pass^k: %.1f%%   全部通过: %s%n",
+                    report.passAt1Percent(), report.passAtKPercent(), report.passHatKPercent(),
+                    report.allPassedAtLeastOnce());
+            ui.println("   报告: " + outputRoot.toAbsolutePath().resolve(report.runId()).resolve("report.md") + "\n");
+        } catch (Exception e) {
+            ui.println("❌ /eval 运行失败: " + (e.getMessage() == null ? e : e.getMessage()) + "\n");
+        }
     }
 
     private static void startRuntimeApiAndBlock(String[] args) {
@@ -1918,6 +1982,8 @@ public class Main {
                 new SlashCommandHint("/better-harness quick", "/better-harness quick", "快速生成 Better Harness 报告"),
                 new SlashCommandHint("/better-harness normal", "/better-harness normal", "完整生成 Better Harness 报告"),
                 new SlashCommandHint("/better-harness --inline", "/better-harness --inline", "只在终端输出，不写报告文件"),
+                new SlashCommandHint("/eval", "/eval", "运行评测 suite（默认 paicli-smoke-v0.1）"),
+                new SlashCommandHint("/eval ", "/eval [--suite <suite.json>] [--runs k]", "指定 suite / 采样次数运行评测"),
                 new SlashCommandHint("/export", "/export", "导出当前会话对话记录为 Markdown"),
                 new SlashCommandHint("/exit", "/exit", "退出 PaiCLI"),
                 new SlashCommandHint("/quit", "/quit", "退出 PaiCLI")

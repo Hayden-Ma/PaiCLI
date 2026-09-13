@@ -14,6 +14,8 @@ PaiCLI 仓库给 Agent / 新线程的首读入口，Codex 直接读取，Claude 
 - 下一步：MCP OAuth / sampling / recovery
 - 配套教程与面试文章的唯一源在 `docs/articles/`，改完用 `tools/sync-articles-to-javabetter.sh` 同步到 javabetter.cn 副本
 
+- `eval/` 提供 LLM-as-a-Judge 核心库：Rubric 逐维评分由 Java 计算加权总分，Pairwise 通过交换 A/B 位置复评来暴露位置偏见；当前 `/eval` 与 `bench` 只跑确定性 suite（command / trajectory verifier），没有批量 Runner 或人工一致率数据。
+
 ### 评测（Native AgentBench）
 
 - 2026-09-05 起用户因 Token 消耗暂停评测：**不主动恢复评测实现、真实模型调用或 Docker 运行**，只按用户逐阶段明确授权单次执行，默认不启子代理
@@ -38,6 +40,8 @@ mvn test -Dtest=XxxTest -DskipTests=false   # 针对性（必须带 -DskipTests=
 mvn test -DskipTests=false                  # 全量
 java -jar target/paicli-1.0-SNAPSHOT.jar bench --suite benchmarks/paicli-smoke-v0.1/suite.json   # 无头评测 suite（pass@1/pass@k/加权得分，退出码 0/1/2）
 scripts/nightly-bench.sh                    # 每夜回归评测（打包 + bench，退出码透传）
+
+/eval                       # 交互式 CLI 内评测，默认跑 benchmarks/paicli-smoke-v0.1/suite.json，可带 bench 同款参数
 ```
 
 交互命令：`/plan`、`/team`、`/mode auto|plan|ask`（Shift+Tab 循环）、`/hitl on|default`、`/save`、`/memory`、`/compact`、`/context`、`/init`、`/export`、`/better-harness`、`/wechat`。未识别的 `/xxx` 在 CLI 层报“未知命令”，不回退给 Agent。
@@ -52,7 +56,7 @@ scripts/nightly-bench.sh                    # 每夜回归评测（打包 + benc
 
 LSP post-edit 诊断用 JavaParser，语言级别固定 JAVA_17（与 pom.xml `<release>17</release>` 对齐）；不要用默认 `new JavaParser()`，否则 record / switch 表达式会被误报成 parse error。
 
-评测体系（`eval/benchmark/`）：suite.json（`SuiteDefinition`/`CaseDefinition` 严格校验）→ `BenchmarkRunner` 按 case × repeat 编排 → `CaseRunner` 物化 fixture 临时工作区、用隔离长期记忆 + `BenchmarkToolRegistry` 非交互策略（execute_command 默认拒绝、联网/浏览器/MCP 拒绝、`setSanitizeCommandEnvironment` 防凭证泄漏）跑受限 ReAct → `ProcessBuilder` 直传参数执行 verifierCommand（`{workspace}` 占位符替换，cwd=suite 目录，隐藏测试放 `hidden/` 不进工作区）→ `ScoreAggregator` 聚合 + `BenchmarkArtifactStore` 脱敏落盘。启动入口 `bench` 解析在 `Main.parseBenchArgs`。verifierType 支持 `command`（退出码判定）与 `trajectory`（读 raw.jsonl 校验 mustCallInOrder / mustCallAny / mustNotCall / maxLlmCalls 确定性轨迹规则）；轨迹规则是叠加层——hidden/{caseId}/trajectory.json 存在即在主判定之外追加校验，pass = 主判定 AND 轨迹；报告含 pass@1 / pass@k / pass^k、效率列（平均 LLM 轮数 / 工具调用数 / 耗时）与稳定性方差列（成功率与效率指标的样本标准差，k<2 时恒为 0；summarize 用 n-1 分母，只在 `--runs 2+` 时有区分度）。终端闭环类 case 依赖 `--allow-commands` 命令白名单（`*` 结尾前缀匹配，其余精确匹配，nightly 脚本已带默认值）。评测 v0.1 只支持 react 模式；`AgentBudget` 兜底由 run 前设置/恢复系统属性实现（`paicli.react.hard.max.iterations` / `paicli.react.token.budget`）。
+评测体系（`eval/benchmark/`）：suite.json（`SuiteDefinition`/`CaseDefinition` 严格校验）→ `BenchmarkRunner` 按 case × repeat 编排 → `CaseRunner` 物化 fixture 临时工作区、用隔离长期记忆 + `BenchmarkToolRegistry` 非交互策略（execute_command 默认拒绝、联网/浏览器/MCP 拒绝、`setSanitizeCommandEnvironment` 防凭证泄漏）跑受限 ReAct → `ProcessBuilder` 直传参数执行 verifierCommand（`{workspace}` 占位符替换，cwd=suite 目录，隐藏测试放 `hidden/` 不进工作区）→ `ScoreAggregator` 聚合 + `BenchmarkArtifactStore` 脱敏落盘。无头入口 `bench` 与交互入口 `/eval`（默认 suite、复用同套参数解析）都在 `Main`：`parseBenchArgs` 解析、`runBench`/`runEvalFromPayload` 执行。verifierType 支持 `command`（退出码判定）与 `trajectory`（读 raw.jsonl 校验 mustCallInOrder / mustCallAny / mustNotCall / maxLlmCalls 确定性轨迹规则）；轨迹规则是叠加层——hidden/{caseId}/trajectory.json 存在即在主判定之外追加校验，pass = 主判定 AND 轨迹；报告含 pass@1 / pass@k / pass^k、效率列（平均 LLM 轮数 / 工具调用数 / 耗时）与稳定性方差列（成功率与效率指标的样本标准差，k<2 时恒为 0；summarize 用 n-1 分母，只在 `--runs 2+` 时有区分度）。终端闭环类 case 依赖 `--allow-commands` 命令白名单（`*` 结尾前缀匹配，其余精确匹配，nightly 脚本已带默认值）。评测 v0.1 只支持 react 模式；`AgentBudget` 兜底由 run 前设置/恢复系统属性实现（`paicli.react.hard.max.iterations` / `paicli.react.token.budget`）。
 ```
 src/main/java/com/paicli/
 ├── agent/  cli/  plan/  memory/  context/  history/  prompt/

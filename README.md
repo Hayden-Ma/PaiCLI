@@ -30,6 +30,10 @@ mvn test -DskipTests=false
 # 无头评测（需要已配置 API Key；退出码 0=全部通过 / 1=有 case 失败 / 2=运行错误）
 java -jar target/paicli-1.0-SNAPSHOT.jar bench   --suite benchmarks/paicli-smoke-v0.1/suite.json --runs 1 --out benchmarks/results
 
+# 交互式 CLI 内评测（默认跑 benchmarks/paicli-smoke-v0.1/suite.json，可带 bench 同款参数）
+/eval
+/eval --suite benchmarks/paicli-smoke-v0.1/suite.json --runs 3 --case-timeout-seconds 900
+
 # 每夜定时跑（打包 + 评测 + 退出码透传）
 scripts/nightly-bench.sh
 ```
@@ -260,11 +264,9 @@ relay v9 保留 v6 引入的宿主登记的多服务目录与 server 绑定的 M
 
 `com.paicli.eval` 提供可独立调用的 Rubric 评分和 Pairwise 双向对比组件。Judge 只返回逐维分数与证据，总分、权重和通过阈值由 Java 确定性计算；Pairwise 会交换 A/B 位置复评，前后不一致时降级为 `TIE`，用于暴露位置偏见。
 
-`com.paicli.eval.benchmark` 另已交付独立的 dev-pilot Coordinator / Worker。它可加载 [`benchmarks/paicli-native-agentbench-v0.1/dev-suite.json`](benchmarks/paicli-native-agentbench-v0.1/dev-suite.json) 中的 8 个公开 sibling case，默认用 `FILE_ONLY` 工具面运行每个新 Worker，并可用无网络、只读挂载的 Docker verifier 检查最终状态。`DOCKER_RELAY` 另将 Candidate 运行在无网络、只读根文件系统和资源限额容器中，provider 与 API key 只留在宿主；可信 thin runner 与 Candidate jar 独立校验、独立快照和只读挂载。Runner 已按 manifest 分发 ReAct / Plan / Team，并提供 `REASONING_ONLY`、`READ_ONLY`、`FILE_ONLY`、`LOCAL_COMMAND` 四种静态 fail-closed 工具面；当前公开 8 题仍全部是 ReAct，Plan / Team 的专用轨迹 verifier 尚未完成。Coordinator 精确锁定 `deepseek/deepseek-v4-flash`、`hunyuan/hy4-preview` 和 `glm/glm-5.3-flash`；完整原始会话位于 owner-only 的 `conversation/raw/benchmark-episode.jsonl`，不得直接放入公开报告。该 Runner 是独立 Java 入口，不是 `/eval` 交互命令。
-
-Runner 已从 SSE 采集服务端 resolved model 与 usage-presence，并对 HOST / Docker 共用同一证据门禁；成功调用的模型身份、usage、请求指纹或 cap 证据无法证明时，episode 标为 evaluation-invalid，不会被偷算成 PaiCLI 的 0 分，而 Candidate 未发起 provider call 仍按有效失败处理。正式合同 v3 对三个模型统一冻结 1,000,000 context 和每次 16,384 output，E3 的 60k–100k token 只是同一 fixture 的工作量。既有 `0.1-dev.2` 两个完整 run 生成于该能力之前，仍如实记录 `UNAVAILABLE/false`；后续 DeepSeek 与 GLM 单题 Docker relay 冒烟已同时闭环 resolved model、usage 和请求指纹，但 `subset=true` 且只验证基础设施。final generator 已物化 24/28 题，不过整套仍为 `NOT_INTEGRATED` 原型。当前产出只能称为 dev-pilot 诊断，不是正式榜单。正式 score 仍阻塞于：formal preflight 尚未驱动完整生产批次、独立 Worker image 未冻结、Hy4 凭证预检与真实运行尚未完成、28 题隐藏 final 与三个模型各三次重复未完成。LLM-as-a-Judge 使用示例与边界见 [`docs/llm-as-a-judge.md`](docs/llm-as-a-judge.md)。
-
 2026-09-04 新一轮完整 Docker relay 运行已取得两家的真实 model / usage / 指纹证据；修复 verifier 临时副本权限后，对两家全部原始产物对称复验，均为 8/8、开发诊断分 100。原始自动 89 分因同一 verifier 故障失效，旧 JSON 保留，复验没有再次调用模型。最新 [报告](benchmarks/paicli-native-agentbench-v0.1/DEV-PILOT-REPORT-2026-09-04.md) / [机器摘要](benchmarks/paicli-native-agentbench-v0.1/dev-pilot-results-2026-09-04.json) 与 [8 月 31 日历史报告](benchmarks/paicli-native-agentbench-v0.1/DEV-PILOT-REPORT-2026-08-31.md) 分开保存；仍为 `publishable=false`，不得当作正式榜单。
+
+`/eval` 与 `bench` 子命令目前只跑确定性 suite（command / trajectory verifier），尚未把 Judge 接进 case 判定；数据集加载、批量 Runner、Judge 人工校准和真实业务指标仍需基于具体评测任务补齐。
 
 ### 第十六期：TUI 产品化（v16.1 形态修正后：双形态可切换）
 
@@ -278,7 +280,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 
 - 三种形态共享同一套 `Agent` / `ToolRegistry` / `MemoryManager` / MCP server / SkillRegistry / HITL handler，不创建孤立空会话
 - 普通输入走 ReAct；`/plan <任务>` 走 Plan-and-Execute；`/team <任务>` 走 Multi-Agent；`/cancel` 可取消运行中任务
-- 通用命令：`/mode`（或 Shift+Tab）、`/clear`、`/context`、`/memory`、`/memory clear`、`/save <事实>`、`/export`、`/better-harness`、`/hitl`、`/hitl on`、`/hitl default`、`/config`、`/exit`
+- 通用命令：`/mode`（或 Shift+Tab）、`/clear`、`/context`、`/memory`、`/memory clear`、`/save <事实>`、`/export`、`/better-harness`、`/eval`、`/hitl`、`/hitl on`、`/hitl default`、`/config`、`/exit`
 - Lanterna 的展示快照保存到 `~/.paicli/history/session_*.jsonl`
 - 原始会话账本独立保存到 `~/.paicli/history/raw/session-*.jsonl`：默认 CLI 的 ReAct / Plan / Team 共享同一个 append-only 文件，system、user、assistant、tool_call、tool_result 都保留完整 `LlmClient.Message`（含 reasoning、工具参数/结果和图片 payload）。`/clear` 和上下文压缩只改模型发送视图，不改写旧账本；POSIX 下目录为 0700、文件为 0600。账本可能包含敏感内容，请勿提交或随意分享
 - 兼容旧设置：`PAICLI_TUI=true` 自动映射为 `PAICLI_RENDERER=lanterna`（已 deprecated）

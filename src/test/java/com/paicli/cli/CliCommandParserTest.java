@@ -48,6 +48,23 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesEvalCommandWithoutPayload() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/eval");
+
+        assertEquals(CliCommandParser.CommandType.EVAL_BENCH, command.type());
+        assertNull(command.payload());
+    }
+
+    @Test
+    void parsesEvalCommandWithSuiteAndRuns() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse(
+                "/eval --suite benchmarks/paicli-smoke-v0.1/suite.json --runs 3");
+
+        assertEquals(CliCommandParser.CommandType.EVAL_BENCH, command.type());
+        assertEquals("--suite benchmarks/paicli-smoke-v0.1/suite.json --runs 3", command.payload());
+    }
+
+    @Test
     void parsesConcreteModelNameAsSwitchModelPayload() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/model step-custom-model");
 
