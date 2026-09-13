@@ -90,9 +90,10 @@ public record CaseDefinition(
         if (verifierCommand == null) {
             throw new IllegalArgumentException("verifierCommand must not be null: " + id);
         }
-        if (verifierType == VerifierType.NONE) {
+        if (verifierType == VerifierType.NONE || verifierType == VerifierType.TRAJECTORY) {
             if (!verifierCommand.isEmpty()) {
-                throw new IllegalArgumentException("verifierCommand must be empty when verifierType=none: " + id);
+                throw new IllegalArgumentException(
+                        "verifierCommand must be empty when verifierType=" + verifierType.toJson() + ": " + id);
             }
             return;
         }
@@ -279,7 +280,7 @@ public record CaseDefinition(
     }
 
     public enum VerifierType {
-        NONE, COMMAND;
+        NONE, COMMAND, TRAJECTORY;
 
         @JsonCreator
         public static VerifierType fromJson(String value) {

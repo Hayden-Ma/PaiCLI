@@ -22,6 +22,18 @@ mvn test -Dtest=CodeSearchGoldenSetTest -DskipTests=false
 mvn test -DskipTests=false
 ```
 
+除单元回归外，仓库自带可执行评测 suite（`benchmarks/paicli-smoke-v0.1/`），用真实模型跑
+任务并用隐藏 verifier 判定，产出 pass@1 / pass@k / 加权得分与每夜趋势，用于衡量 Agent
+能力本身是否退化：
+
+```bash
+# 无头评测（需要已配置 API Key；退出码 0=全部通过 / 1=有 case 失败 / 2=运行错误）
+java -jar target/paicli-1.0-SNAPSHOT.jar bench   --suite benchmarks/paicli-smoke-v0.1/suite.json --runs 1 --out benchmarks/results
+
+# 每夜定时跑（打包 + 评测 + 退出码透传）
+scripts/nightly-bench.sh
+```
+
 ## 演进历程
 
 ### 第一期：ReAct Agent CLI
@@ -790,6 +802,7 @@ I
 - `paicli wechat start` - 前台启动微信通道
 - `paicli wechat status` - 查看绑定状态和 daemon pid
 - `paicli wechat daemon start|stop|restart|status|logs` - 管理本机微信通道后台进程
+- `paicli bench --suite <suite.json> [--runs k] [--out dir]` - 无头评测：跑 suite 里的全部 case 并输出 pass@1 / pass@k 与加权得分（详见 [benchmarks/paicli-smoke-v0.1/README.md](benchmarks/paicli-smoke-v0.1/README.md)）
 
 交互式斜杠命令：
 
@@ -948,6 +961,11 @@ src/main/java/com/paicli
 │   ├── CodeRelation.java       # 代码关系模型
 │   ├── CodeIndex.java          # 索引管理器
 │   └── CodeRetriever.java      # 检索入口
+├── eval/
+│   ├── benchmark/              # 评测体系：suite/case 定义、CaseRunner 执行 worker、
+│   │                           # BenchmarkRunner 编排（pass@k）、ScoreAggregator、产物落盘
+│   ├── LlmJudge.java           # LLM-as-a-Judge 评审
+│   └── PositionBalancedPairwiseJudge.java
 └── tool/
     └── ToolRegistry.java       # 工具注册表
 ```

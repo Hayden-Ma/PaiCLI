@@ -74,6 +74,10 @@ public final class BenchmarkArtifactStore {
         return writeRedactedJson(runDirectory.resolve("aggregate.json"), aggregate);
     }
 
+    public Path writeSummary(Object summary) throws IOException {
+        return writeRedactedJson(runDirectory.resolve("summary.json"), summary);
+    }
+
     public synchronized EpisodeArtifacts episode(String caseId, String modelId, int repeat) throws IOException {
         return episodeDirectory(caseId, modelId, repeat, null);
     }

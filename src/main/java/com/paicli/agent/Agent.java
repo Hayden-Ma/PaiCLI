@@ -63,6 +63,12 @@ public class Agent {
     private Supplier<Boolean> hitlEnabledSupplier = () -> false;
     private Supplier<String> sessionModeSupplier = () -> null;
     private boolean returnFinalResponseWhenStreamed;
+    /**
+     * 评测 / Runtime 等显式任务信封场景：整条输入就是任务本身，
+     * 不做"是否像任务"的启发式判断，始终暴露工具边界。
+     */
+    private boolean forceActionableTurns;
+
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
 
     public Agent(LlmClient llmClient) {
@@ -70,10 +76,18 @@ public class Agent {
     }
 
     public Agent(LlmClient llmClient, ToolRegistry toolRegistry) {
+        this(llmClient, toolRegistry, null);
+    }
+
+    /**
+     * 注入自定义 MemoryManager（如评测 worker 使用隔离的临时长期记忆库）。
+     * 传 null 时行为与两参构造完全一致。
+     */
+    public Agent(LlmClient llmClient, ToolRegistry toolRegistry, MemoryManager memoryManagerOverride) {
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
         this.conversationHistory = new ArrayList<>();
-        this.memoryManager = new MemoryManager(llmClient);
+        this.memoryManager = memoryManagerOverride != null ? memoryManagerOverride : new MemoryManager(llmClient);
         this.autoCompactionManager = new AutoCompactionManager(llmClient);
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
@@ -127,6 +141,10 @@ public class Agent {
         this.returnFinalResponseWhenStreamed = returnFinalResponseWhenStreamed;
     }
 
+    public void setForceActionableTurns(boolean forceActionableTurns) {
+        this.forceActionableTurns = forceActionableTurns;
+    }
+
     /**
      * 注入 HITL 启用状态的快照源，用于状态栏 / StatusInfo 显示。
      * Main 启动后用 {@code reactAgent.setHitlEnabledSupplier(hitlHandler::isEnabled)} 接进来。
@@ -177,7 +195,7 @@ public class Agent {
 
     private String runInternal(String userInput, String submittedUserInput, boolean explicitTaskEnvelope) {
         log.info("ReAct run started: inputLength={}", userInput == null ? 0 : userInput.length());
-        TurnToolPolicy turnToolPolicy = explicitTaskEnvelope
+        TurnToolPolicy turnToolPolicy = forceActionableTurns || explicitTaskEnvelope
                 ? TurnToolPolicy.forExplicitTask(
                         submittedUserInput,
                         toolRegistry.isSharedBrowserSession(),

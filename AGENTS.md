@@ -36,6 +36,8 @@ mvn test -Pquick                            # 常规回归
 mvn test -Pphase16-smoke                    # TUI 相关
 mvn test -Dtest=XxxTest -DskipTests=false   # 针对性（必须带 -DskipTests=false）
 mvn test -DskipTests=false                  # 全量
+java -jar target/paicli-1.0-SNAPSHOT.jar bench --suite benchmarks/paicli-smoke-v0.1/suite.json   # 无头评测 suite（pass@1/pass@k/加权得分，退出码 0/1/2）
+scripts/nightly-bench.sh                    # 每夜回归评测（打包 + bench，退出码透传）
 ```
 
 交互命令：`/plan`、`/team`、`/mode auto|plan|ask`（Shift+Tab 循环）、`/hitl on|default`、`/save`、`/memory`、`/compact`、`/context`、`/init`、`/export`、`/better-harness`、`/wechat`。未识别的 `/xxx` 在 CLI 层报“未知命令”，不回退给 Agent。
@@ -50,6 +52,7 @@ mvn test -DskipTests=false                  # 全量
 
 LSP post-edit 诊断用 JavaParser，语言级别固定 JAVA_17（与 pom.xml `<release>17</release>` 对齐）；不要用默认 `new JavaParser()`，否则 record / switch 表达式会被误报成 parse error。
 
+评测体系（`eval/benchmark/`）：suite.json（`SuiteDefinition`/`CaseDefinition` 严格校验）→ `BenchmarkRunner` 按 case × repeat 编排 → `CaseRunner` 物化 fixture 临时工作区、用隔离长期记忆 + `BenchmarkToolRegistry` 非交互策略（execute_command 默认拒绝、联网/浏览器/MCP 拒绝、`setSanitizeCommandEnvironment` 防凭证泄漏）跑受限 ReAct → `ProcessBuilder` 直传参数执行 verifierCommand（`{workspace}` 占位符替换，cwd=suite 目录，隐藏测试放 `hidden/` 不进工作区）→ `ScoreAggregator` 聚合 + `BenchmarkArtifactStore` 脱敏落盘。启动入口 `bench` 解析在 `Main.parseBenchArgs`。verifierType 支持 `command`（退出码判定）与 `trajectory`（读 raw.jsonl 校验 mustCallInOrder / mustCallAny / mustNotCall / maxLlmCalls 确定性轨迹规则）；轨迹规则是叠加层——hidden/{caseId}/trajectory.json 存在即在主判定之外追加校验，pass = 主判定 AND 轨迹；报告含 pass@1 / pass@k / pass^k 与效率列（平均 LLM 轮数 / 工具调用数 / 耗时）。评测 v0.1 只支持 react 模式；`AgentBudget` 兜底由 run 前设置/恢复系统属性实现（`paicli.react.hard.max.iterations` / `paicli.react.token.budget`）。
 ```
 src/main/java/com/paicli/
 ├── agent/  cli/  plan/  memory/  context/  history/  prompt/
@@ -146,7 +149,12 @@ src/main/java/com/paicli/
 | Memory | `mvn test -Dtest='com.paicli.memory.*Test'` |
 | Multi-Agent | `mvn test -Dtest=AgentRoleTest,AgentMessageTest,AgentOrchestratorTest` |
 | RAG | `mvn test -Dtest=CodeChunkerTest,CodeAnalyzerTest,VectorStoreTest,CodeIndexTest` |
+<<<<<<< HEAD
 | TUI | `mvn test -Pphase16-smoke` |
+=======
+| 评测体系 | `mvn test -Dtest=CaseRunnerTest,BenchmarkRunnerTest,BenchmarkPolicyDeciderTest,SmokeSuiteDefinitionTest,MainBenchArgsTest` |
+| 常规回归 | `mvn test -Pquick` |
+>>>>>>> 6c24d0a (Add agent benchmark harness with hidden verifiers and pass@k)
 
 ## 导航
 

@@ -10,6 +10,9 @@ import com.paicli.browser.BrowserMode;
 import com.paicli.browser.BrowserSession;
 import com.paicli.browser.SensitivePagePolicy;
 import com.paicli.config.PaiCliConfig;
+import com.paicli.eval.benchmark.BenchmarkRunner;
+import com.paicli.eval.benchmark.CaseRunner;
+import com.paicli.eval.benchmark.SuiteDefinition;
 import com.paicli.hitl.HitlHandler;
 import com.paicli.hitl.HitlToolRegistry;
 import com.paicli.hitl.SwitchableHitlHandler;
@@ -223,6 +226,10 @@ public class Main {
             configureLogging();
             startRuntimeApiAndBlock(args);
             return;
+        }
+        if (isBenchCommand(args)) {
+            configureLogging();
+            System.exit(runBench(args));
         }
 
         configureLogging();
@@ -1007,6 +1014,86 @@ public class Main {
         } catch (IOException e) {
             System.err.println("❌ 终端初始化失败: " + e.getMessage());
             System.exit(1);
+        }
+    }
+
+    private static boolean isBenchCommand(String[] args) {
+        return args != null && args.length >= 1 && "bench".equalsIgnoreCase(args[0]);
+    }
+
+    /**
+     * 无头评测入口：java -jar paicli.jar bench --suite <suite.json> [--runs k] [--out dir]
+     * 退出码：0 = 全部 case pass@k 通过；1 = 存在失败 case；2 = 运行错误（suite 无效 / 无 API Key）。
+     */
+    /** bench 子命令解析结果；suitePath 为 null 表示缺少必选参数。 */
+    record BenchCliArgs(Path suitePath, Path outputRoot, int runs, CaseRunner.Options options) {
+    }
+
+    static BenchCliArgs parseBenchArgs(String[] args) {
+        Path suitePath = null;
+        Path outputRoot = Path.of("benchmarks", "results");
+        int runs = 1;
+        int caseTimeoutSeconds = 600;
+        int verifierTimeoutSeconds = 120;
+        int hardMaxIterations = 40;
+        int tokenBudget = 400_000;
+        boolean keepWorkspaces = false;
+
+        for (int i = 1; i < args.length; i++) {
+            String flag = args[i].toLowerCase(java.util.Locale.ROOT);
+            switch (flag) {
+                case "--suite" -> { if (i + 1 < args.length) suitePath = Path.of(args[++i]); }
+                case "--out" -> { if (i + 1 < args.length) outputRoot = Path.of(args[++i]); }
+                case "--runs" -> { if (i + 1 < args.length) runs = Integer.parseInt(args[++i]); }
+                case "--case-timeout-seconds" -> { if (i + 1 < args.length) caseTimeoutSeconds = Integer.parseInt(args[++i]); }
+                case "--verifier-timeout-seconds" -> { if (i + 1 < args.length) verifierTimeoutSeconds = Integer.parseInt(args[++i]); }
+                case "--max-iterations" -> { if (i + 1 < args.length) hardMaxIterations = Integer.parseInt(args[++i]); }
+                case "--token-budget" -> { if (i + 1 < args.length) tokenBudget = Integer.parseInt(args[++i]); }
+                case "--keep-workspaces" -> keepWorkspaces = true;
+                default -> { }
+            }
+        }
+        return new BenchCliArgs(suitePath, outputRoot, runs, new CaseRunner.Options(
+                caseTimeoutSeconds, verifierTimeoutSeconds, hardMaxIterations, tokenBudget, keepWorkspaces));
+    }
+
+    private static int runBench(String[] args) {
+        BenchCliArgs benchArgs = parseBenchArgs(args);
+        if (benchArgs.suitePath() == null) {
+            System.err.println("用法: bench --suite <suite.json> [--runs k] [--out dir] "
+                    + "[--case-timeout-seconds n] [--verifier-timeout-seconds n] "
+                    + "[--max-iterations n] [--token-budget n] [--keep-workspaces]");
+            return 2;
+        }
+
+        PaiCliConfig config = PaiCliConfig.load();
+        LlmClient client = LlmClientFactory.createFromConfig(config);
+        if (client == null) {
+            System.err.println("❌ 错误: 未找到可用的 API Key，bench 需要真实模型调用");
+            return 2;
+        }
+
+        try {
+            SuiteDefinition suite = SuiteDefinition.load(benchArgs.suitePath());
+            CaseRunner.Options options = benchArgs.options();
+            int runs = benchArgs.runs();
+            Path outputRoot = benchArgs.outputRoot();
+            BenchmarkRunner runner = new BenchmarkRunner(client, options);
+            System.out.println("[bench] suite=" + suite.name()
+                    + " model=" + client.getProviderName() + "/" + client.getModelName()
+                    + " runsPerCase=" + runs);
+            BenchmarkRunner.SuiteReport report = runner.run(suite, runs, outputRoot);
+            System.out.println();
+            System.out.println("✅ 评测完成: " + report.runId());
+            System.out.println("   加权得分: " + report.weightedScore());
+            System.out.printf(java.util.Locale.ROOT, "   pass@1: %.1f%%   pass@k: %.1f%%   pass^k: %.1f%%   全部通过: %s%n",
+                    report.passAt1Percent(), report.passAtKPercent(), report.passHatKPercent(),
+                    report.allPassedAtLeastOnce());
+            System.out.println("   报告: " + outputRoot.toAbsolutePath().resolve(report.runId()).resolve("report.md"));
+            return report.allPassedAtLeastOnce() ? 0 : 1;
+        } catch (Exception e) {
+            System.err.println("❌ bench 运行失败: " + (e.getMessage() == null ? e : e.getMessage()));
+            return 2;
         }
     }
 
