@@ -1,0 +1,5 @@
+{
+  "mustCallAny": [["read_file", "grep_code", "glob_files"]],
+  "mustNotCall": ["web_search", "web_fetch"],
+  "maxLlmCalls": 20
+}

@@ -4,6 +4,7 @@ import com.paicli.agent.Agent;
 import com.paicli.llm.LlmClient;
 import com.paicli.memory.LongTermMemory;
 import com.paicli.memory.MemoryManager;
+import com.paicli.tool.ToolOutput;
 import com.paicli.runtime.CancellationContext;
 import com.paicli.runtime.CancellationToken;
 
@@ -13,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -48,9 +50,14 @@ public final class CaseRunner {
                           int verifierTimeoutSeconds,
                           int hardMaxIterations,
                           int tokenBudget,
-                          boolean keepWorkspaces) {
+                          boolean keepWorkspaces,
+                          List<String> commandAllowlist) {
+        public Options {
+            commandAllowlist = commandAllowlist == null ? List.of() : List.copyOf(commandAllowlist);
+        }
+
         public static Options defaults() {
-            return new Options(600, 120, 40, 400_000, false);
+            return new Options(600, 120, 40, 400_000, false, List.of());
         }
     }
 
@@ -85,7 +92,23 @@ public final class CaseRunner {
             MemoryManager memoryManager = new MemoryManager(
                     baseClient, 1, baseClient.maxContextWindow(), longTermMemory);
 
-            BenchmarkToolRegistry registry = new BenchmarkToolRegistry(BenchmarkToolProfile.FILE_ONLY);
+            BenchmarkPolicyDecider policyDecider = new BenchmarkPolicyDecider(
+                    new BenchmarkPolicyConfig(options.commandAllowlist()));
+            // 上游 BenchmarkToolRegistry 按 profile 收紧工具暴露；终端闭环 case 需要
+            // execute_command，叠加 suite 级命令白名单（* 结尾前缀匹配）后放行。
+            BenchmarkToolProfile profile = options.commandAllowlist().isEmpty()
+                    ? BenchmarkToolProfile.FILE_ONLY
+                    : BenchmarkToolProfile.LOCAL_COMMAND;
+            BenchmarkToolRegistry registry = new BenchmarkToolRegistry(profile) {
+                @Override
+                public ToolOutput executeToolOutput(String name, String argumentsJson) {
+                    BenchmarkPolicyDecider.Decision decision = policyDecider.decide(name, argumentsJson);
+                    if (!decision.allowed()) {
+                        return ToolOutput.failure("评测策略拒绝: " + decision.reason());
+                    }
+                    return super.executeToolOutput(name, argumentsJson);
+                }
+            };
             registry.setProjectPath(workspace.toString());
             registry.setSanitizeCommandEnvironment(true);
 

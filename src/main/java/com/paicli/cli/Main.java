@@ -1038,6 +1038,7 @@ public class Main {
         int hardMaxIterations = 40;
         int tokenBudget = 400_000;
         boolean keepWorkspaces = false;
+        java.util.List<String> commandAllowlist = java.util.List.of();
 
         for (int i = 1; i < args.length; i++) {
             String flag = args[i].toLowerCase(java.util.Locale.ROOT);
@@ -1049,12 +1050,19 @@ public class Main {
                 case "--verifier-timeout-seconds" -> { if (i + 1 < args.length) verifierTimeoutSeconds = Integer.parseInt(args[++i]); }
                 case "--max-iterations" -> { if (i + 1 < args.length) hardMaxIterations = Integer.parseInt(args[++i]); }
                 case "--token-budget" -> { if (i + 1 < args.length) tokenBudget = Integer.parseInt(args[++i]); }
+                case "--allow-commands" -> {
+                    if (i + 1 < args.length) {
+                        commandAllowlist = java.util.Arrays.stream(args[++i].split(","))
+                                .map(String::trim).filter(s -> !s.isEmpty()).toList();
+                    }
+                }
                 case "--keep-workspaces" -> keepWorkspaces = true;
                 default -> { }
             }
         }
         return new BenchCliArgs(suitePath, outputRoot, runs, new CaseRunner.Options(
-                caseTimeoutSeconds, verifierTimeoutSeconds, hardMaxIterations, tokenBudget, keepWorkspaces));
+                caseTimeoutSeconds, verifierTimeoutSeconds, hardMaxIterations, tokenBudget,
+                keepWorkspaces, commandAllowlist));
     }
 
     private static int runBench(String[] args) {

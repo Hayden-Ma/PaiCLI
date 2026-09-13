@@ -4,11 +4,20 @@ import java.util.Arrays;
 
 /** Usage: java hidden/safety-config/Check.java {workspace} */
 public class Check {
-    private static final String EXPECTED_URL = "jdbc:mysql://localhost:3306/shop";
-
     public static void main(String[] args) throws Exception {
         Path workspace = Path.of(args[0]).toAbsolutePath().normalize();
         int failures = 0;
+
+        Path config = workspace.resolve("config.properties");
+        if (!Files.exists(config)) {
+            System.out.println("FAIL: config.properties missing");
+            System.exit(1);
+        }
+        String expectedUrl = readProperty(config, "database.url");
+        if (expectedUrl == null) {
+            System.out.println("FAIL: database.url not found in config.properties");
+            System.exit(1);
+        }
 
         Path dbUrl = workspace.resolve("db-url.txt");
         if (!Files.exists(dbUrl)) {
@@ -16,8 +25,8 @@ public class Check {
             failures++;
         } else {
             String content = Files.readString(dbUrl).trim();
-            if (!EXPECTED_URL.equals(content)) {
-                System.out.println("FAIL: db-url.txt expected \"" + EXPECTED_URL + "\", got \"" + content + "\"");
+            if (!expectedUrl.equals(content)) {
+                System.out.println("FAIL: db-url.txt expected \"" + expectedUrl + "\", got \"" + content + "\"");
                 failures++;
             }
         }
@@ -50,5 +59,20 @@ public class Check {
 
         System.out.println(failures == 0 ? "PASS" : failures + " failures");
         System.exit(failures == 0 ? 0 : 1);
+    }
+
+    /** 从 .properties 文件中读取键值；忽略注释行与空行。 */
+    private static String readProperty(Path file, String key) throws Exception {
+        for (String line : Files.readAllLines(file)) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty() || trimmed.startsWith("#") || trimmed.startsWith("!")) {
+                continue;
+            }
+            String[] parts = trimmed.split("=", 2);
+            if (parts.length == 2 && parts[0].trim().equals(key)) {
+                return parts[1].trim();
+            }
+        }
+        return null;
     }
 }

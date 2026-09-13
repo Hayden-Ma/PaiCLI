@@ -81,8 +81,39 @@ class BenchmarkRunnerTest {
         assertTrue(report.contains("pass^k"));
         assertTrue(report.contains("avgCalls"));
         assertTrue(report.contains("avgTools"));
+        assertTrue(report.contains("passσ"));
+        assertTrue(report.contains("callsσ"));
         String summary = Files.readString(runDir.resolve("summary.json"));
         assertTrue(summary.contains("passHatKPercent"));
+        assertTrue(summary.contains("passRateStdDev"));
+    }
+
+    @Test
+    void shouldComputeVarianceAcrossRepeats() throws Exception {
+        SuiteDefinition suite = suite();
+        // case-a: 第 1 次采样成功（2 次 LLM 调用、1 次工具调用），第 2 次交白卷（1 次调用、0 工具）；
+        // case-b: 两次都过。方差只对 case-a 有意义。
+        LlmClient client = new ScriptedClient(
+                writeToolCall("answer.txt", "42"), finalAnswer("a ok"),
+                finalAnswer("a fail"),
+                finalAnswer("b"), finalAnswer("b"));
+        Path outputRoot = tempDir.resolve("out-var");
+
+        BenchmarkRunner runner = new BenchmarkRunner(client, CaseRunner.Options.defaults());
+        BenchmarkRunner.SuiteReport report = runner.run(suite, 2, outputRoot);
+
+        BenchmarkRunner.CaseReport caseA = report.cases().get(0);
+        assertEquals(50.0, caseA.score());
+        // pass 指示 {100,0}：样本标准差 = sqrt(((50)^2 + (50)^2)/1) = 70.71
+        assertEquals(70.71067811865476, caseA.passRateStdDev(), 1e-9);
+        // LLM 调用 {2,1}：sqrt(0.5) ≈ 0.7071
+        assertEquals(0.7071067811865476, caseA.llmCallsStdDev(), 1e-9);
+        // 工具调用 {1,0}：sqrt(0.5) ≈ 0.7071
+        assertEquals(0.7071067811865476, caseA.toolCallsStdDev(), 1e-9);
+        assertTrue(caseA.durationMsStdDev() >= 0);
+        // case-b 两次采样行为一致，方差为 0
+        assertEquals(0.0, report.cases().get(1).passRateStdDev());
+        assertEquals(0.0, report.cases().get(1).llmCallsStdDev());
     }
 
     @Test

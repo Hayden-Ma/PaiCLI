@@ -67,11 +67,19 @@ public class BenchmarkPolicyDecider {
         }
         for (String allowed : config.commandAllowlist()) {
             String normalized = allowed == null ? "" : allowed.trim();
-            if (!normalized.isBlank() && command.trim().equals(normalized)) {
+            if (normalized.isBlank()) {
+                continue;
+            }
+            // 以 * 结尾的条目按前缀匹配（供终端类 case 放行 javac/java 等工具链命令），其余精确匹配
+            if (normalized.endsWith("*")) {
+                if (command.trim().startsWith(normalized.substring(0, normalized.length() - 1))) {
+                    return Decision.allow();
+                }
+            } else if (command.trim().equals(normalized)) {
                 return Decision.allow();
             }
         }
-        return Decision.deny("评测默认拒绝 execute_command；仅允许精确命中 suite 命令白名单");
+        return Decision.deny("评测默认拒绝 execute_command；仅允许命中 suite 命令白名单（* 结尾为前缀匹配）");
     }
 
     private static boolean isReadOnlyBuiltin(String name) {

@@ -9,4 +9,5 @@ mvn -q clean package -DskipTests
 java -jar target/paicli-1.0-SNAPSHOT.jar bench \
   --suite benchmarks/paicli-smoke-v0.1/suite.json \
   --runs "${BENCH_RUNS:-1}" \
-  --out "${BENCH_OUT:-benchmarks/results}"
+  --out "${BENCH_OUT:-benchmarks/results}" \
+  --allow-commands "javac *,java *,copy *,cp *,find *,findstr *,wc *,python *,cat *,mkdir *,dir *,ls *"

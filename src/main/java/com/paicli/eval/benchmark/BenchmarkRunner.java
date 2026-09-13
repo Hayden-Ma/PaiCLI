@@ -14,13 +14,14 @@ import java.util.Map;
 
 /**
  * 评测编排器：对 suite 内每个 active case 采样 k 次，
- * 汇总 pass@1 / pass@k，并把加权分数交给 ScoreAggregator 聚合，
+ * 汇总 pass@1 / pass@k / pass^k 与稳定性方差（成功率的样本标准差
+ * 及效率指标标准差），并把加权分数交给 ScoreAggregator 聚合，
  * 全部产物（manifest / 每次采样 run.json / verifier.json / answer.md /
  * raw.jsonl / 汇总 summary.json / 人读 report.md）落盘到 run 目录。
  */
 public final class BenchmarkRunner {
 
-    /** 单 case 汇总（跨 k 次采样）。 */
+    /** 单 case 汇总（跨 k 次采样）。末尾四个 StdDev 为各采样间的样本标准差（n-1 分母，k<2 时为 0）。 */
     public record CaseReport(String caseId,
                              String title,
                              String category,
@@ -37,7 +38,11 @@ public final class BenchmarkRunner {
                              String detail,
                              double avgLlmCalls,
                              double avgToolCalls,
-                             long totalDurationMs) {
+                             long totalDurationMs,
+                             double passRateStdDev,
+                             double llmCallsStdDev,
+                             double toolCallsStdDev,
+                             double durationMsStdDev) {
     }
 
     public record SuiteReport(String runId,
@@ -130,14 +135,18 @@ public final class BenchmarkRunner {
         int infra = 0;
         boolean anyTimedOut = false;
         StringBuilder detail = new StringBuilder();
+        List<CaseRunner.EpisodeResult> scoredEpisodes = new ArrayList<>();
         for (CaseRunner.EpisodeResult episode : episodes) {
             if (episode.isInfraError()) {
                 infra++;
                 detail.append("infra: ").append(episode.infraError()).append("; ");
-            } else if (episode.timedOut()) {
-                anyTimedOut = true;
-            } else if (episode.passed()) {
-                passed++;
+            } else {
+                scoredEpisodes.add(episode);
+                if (episode.timedOut()) {
+                    anyTimedOut = true;
+                } else if (episode.passed()) {
+                    passed++;
+                }
             }
         }
         if (infra == episodes.size()) {
@@ -145,7 +154,8 @@ public final class BenchmarkRunner {
                     definition.level(), definition.weight(),
                     episodes.size(), 0, infra, false, false, false,
                     null, ScoreAggregator.ResultStatus.INFRA_ERROR,
-                    detail.toString(), 0, 0, totalDuration(episodes));
+                    detail.toString(), 0, 0, totalDuration(episodes),
+                    0, 0, 0, 0);
         }
         boolean passAt1 = !episodes.isEmpty()
                 && !episodes.get(0).isInfraError()
@@ -156,19 +166,46 @@ public final class BenchmarkRunner {
         if (anyTimedOut) {
             notes = "存在超时采样; " + notes;
         }
-        double scored = episodes.size() - infra;
         return new CaseReport(definition.id(), definition.title(), definition.category(),
                 definition.level(), definition.weight(),
                 episodes.size(), passed, infra,
                 passAt1, passAtK, passed == episodes.size(),
                 score, ScoreAggregator.ResultStatus.SCORED, notes,
-                scored == 0 ? 0 : episodes.stream()
-                        .filter(e -> !e.isInfraError()).mapToLong(e -> e.metrics() == null ? 0 : e.metrics().calls())
-                        .average().orElse(0),
-                scored == 0 ? 0 : episodes.stream()
-                        .filter(e -> !e.isInfraError()).mapToLong(e -> e.metrics() == null ? 0 : e.metrics().toolCalls())
-                        .average().orElse(0),
-                totalDuration(episodes));
+                scoredEpisodes.isEmpty() ? 0 : scoredEpisodes.stream()
+                        .mapToDouble(BenchmarkRunner::calls).average().orElse(0),
+                scoredEpisodes.isEmpty() ? 0 : scoredEpisodes.stream()
+                        .mapToDouble(BenchmarkRunner::tools).average().orElse(0),
+                totalDuration(episodes),
+                sampleStdDev(scoredEpisodes.stream().mapToDouble(e -> e.passed() ? 100.0 : 0.0).toArray()),
+                sampleStdDev(scoredEpisodes.stream().mapToDouble(BenchmarkRunner::calls).toArray()),
+                sampleStdDev(scoredEpisodes.stream().mapToDouble(BenchmarkRunner::tools).toArray()),
+                sampleStdDev(scoredEpisodes.stream().mapToDouble(CaseRunner.EpisodeResult::durationMs).toArray()));
+    }
+
+    private static long calls(CaseRunner.EpisodeResult episode) {
+        return episode.metrics() == null ? 0 : episode.metrics().calls();
+    }
+
+    private static long tools(CaseRunner.EpisodeResult episode) {
+        return episode.metrics() == null ? 0 : episode.metrics().toolCalls();
+    }
+
+    /** 样本标准差（n-1 分母）；样本数 < 2 时返回 0，避免单次采样被误报为"零方差"。 */
+    private static double sampleStdDev(double[] values) {
+        if (values.length < 2) {
+            return 0.0;
+        }
+        double mean = 0;
+        for (double value : values) {
+            mean += value;
+        }
+        mean /= values.length;
+        double sumSquares = 0;
+        for (double value : values) {
+            double diff = value - mean;
+            sumSquares += diff * diff;
+        }
+        return Math.sqrt(sumSquares / (values.length - 1));
     }
 
     private static long totalDuration(List<CaseRunner.EpisodeResult> episodes) {
@@ -221,6 +258,10 @@ public final class BenchmarkRunner {
             entry.put("strictSuccess", caseReport.strictSuccess());
             entry.put("score", caseReport.score());
             entry.put("status", caseReport.status().toString());
+            entry.put("passRateStdDev", round3(caseReport.passRateStdDev()));
+            entry.put("llmCallsStdDev", round3(caseReport.llmCallsStdDev()));
+            entry.put("toolCallsStdDev", round3(caseReport.toolCallsStdDev()));
+            entry.put("durationMsStdDev", round3(caseReport.durationMsStdDev()));
             if (!caseReport.detail().isBlank()) {
                 entry.put("detail", caseReport.detail());
             }
@@ -253,8 +294,8 @@ public final class BenchmarkRunner {
         markdown.append("- pass@k: ").append(String.format(java.util.Locale.ROOT, "%.1f%%", report.passAtKPercent())).append('\n');
         markdown.append("- pass^k: ").append(String.format(java.util.Locale.ROOT, "%.1f%%", report.passHatKPercent())).append('\n');
         markdown.append('\n');
-        markdown.append("| case | category | level | passed | pass@1 | pass@k | score | avgCalls | avgTools | time(s) |\n");
-        markdown.append("|------|----------|-------|--------|--------|--------|-------|----------|----------|---------|\n");
+        markdown.append("| case | category | level | passed | pass@1 | pass@k | score | avgCalls | avgTools | time(s) | passσ | callsσ | toolsσ | timeσ |\n");
+        markdown.append("|------|----------|-------|--------|--------|--------|-------|----------|----------|---------|-------|--------|--------|-------|\n");
         for (CaseReport caseReport : report.cases()) {
             markdown.append("| ").append(caseReport.caseId())
                     .append(" | ").append(caseReport.category())
@@ -266,10 +307,19 @@ public final class BenchmarkRunner {
                     .append(" | ").append(String.format(java.util.Locale.ROOT, "%.1f", caseReport.avgLlmCalls()))
                     .append(" | ").append(String.format(java.util.Locale.ROOT, "%.1f", caseReport.avgToolCalls()))
                     .append(" | ").append(String.format(java.util.Locale.ROOT, "%.1f", caseReport.totalDurationMs() / 1000.0))
+                    .append(" | ").append(String.format(java.util.Locale.ROOT, "%.1f", caseReport.passRateStdDev()))
+                    .append(" | ").append(String.format(java.util.Locale.ROOT, "%.1f", caseReport.llmCallsStdDev()))
+                    .append(" | ").append(String.format(java.util.Locale.ROOT, "%.1f", caseReport.toolCallsStdDev()))
+                    .append(" | ").append(String.format(java.util.Locale.ROOT, "%.1f", caseReport.durationMsStdDev() / 1000.0))
                     .append(" |\n");
         }
         Path target = store.runDirectory().resolve("report.md");
         Files.writeString(target, markdown.toString(), StandardCharsets.UTF_8);
+    }
+
+    /** 保留 3 位小数，避免 summary.json 里出现浮点长尾。 */
+    private static double round3(double value) {
+        return Math.round(value * 1000.0) / 1000.0;
     }
 
     private static void logProgress(String format, Object... args) {

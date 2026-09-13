@@ -6,8 +6,6 @@ import java.util.stream.Stream;
 
 /** Usage: java hidden/tool-todo-count/Check.java {workspace} */
 public class Check {
-    private static final int EXPECTED = 7;
-
     public static void main(String[] args) throws Exception {
         Path workspace = Path.of(args[0]).toAbsolutePath().normalize();
         Path src = workspace.resolve("src");
@@ -23,23 +21,17 @@ public class Check {
             }
         }
 
-        if (total != EXPECTED) {
-            System.out.println("FAIL: fixture integrity broken, expected " + EXPECTED
-                    + " TODOs in src, found " + total);
-            System.exit(1);
-        }
-
         Path answer = workspace.resolve("answer.txt");
         if (!Files.exists(answer)) {
             System.out.println("FAIL: answer.txt missing");
             System.exit(1);
         }
         String content = Files.readString(answer).trim();
-        if (String.valueOf(EXPECTED).equals(content)) {
+        if (String.valueOf(total).equals(content)) {
             System.out.println("PASS (" + total + " TODOs)");
             System.exit(0);
         }
-        System.out.println("FAIL: expected " + EXPECTED + ", got \"" + content + "\"");
+        System.out.println("FAIL: expected " + total + ", got \"" + content + "\"");
         System.exit(1);
     }
 

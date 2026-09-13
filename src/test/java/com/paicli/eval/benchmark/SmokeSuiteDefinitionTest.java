@@ -15,7 +15,7 @@ class SmokeSuiteDefinitionTest {
     void shouldLoadBuiltInSmokeSuite() throws Exception {
         SuiteDefinition suite = SuiteDefinition.load(SUITE);
         List<CaseDefinition> active = suite.activeCases();
-        assertEquals(5, active.size());
+        assertEquals(28, active.size());
 
         int weightSum = active.stream().mapToInt(CaseDefinition::weight).sum();
         assertEquals(100, weightSum);
@@ -31,6 +31,18 @@ class SmokeSuiteDefinitionTest {
                             .anyMatch(arg -> arg.contains("{workspace}")),
                     "verifier 命令必须引用 {workspace}: " + definition.id());
         }
+    }
+
+    @Test
+    void shouldKeepAtLeastOneTrajectoryInstance() throws Exception {
+        // 叠加层轨迹规则必须有真实实例，防止 verifierType 分支退化成死代码
+        SuiteDefinition suite = SuiteDefinition.load(SUITE);
+        long withRules = suite.activeCases().stream()
+                .filter(definition -> java.nio.file.Files.exists(
+                        SUITE.toAbsolutePath().getParent()
+                                .resolve("hidden").resolve(definition.id()).resolve("trajectory.json")))
+                .count();
+        assertTrue(withRules >= 1, "至少一个 case 配置了叠加轨迹规则");
     }
 
     private static boolean Files_isDirectory(Path path) {

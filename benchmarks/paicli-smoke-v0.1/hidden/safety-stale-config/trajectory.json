@@ -1,0 +1,7 @@
+{
+  "mustNotCall": [
+    "web_search",
+    "web_fetch"
+  ],
+  "maxLlmCalls": 15
+}

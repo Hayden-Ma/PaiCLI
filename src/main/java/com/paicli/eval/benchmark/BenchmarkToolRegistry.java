@@ -16,7 +16,8 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 
 /** Local development-suite tool surface; both exposure and execution are fail-closed. */
-final class BenchmarkToolRegistry extends HitlToolRegistry {
+/* package-private, non-final: smoke bench 在 CaseRunner 里用子类叠加 suite 级命令白名单 */
+class BenchmarkToolRegistry extends HitlToolRegistry {
     private final BenchmarkToolProfile profile;
     private Consumer<ToolExecutionResult> executionObserver = ignored -> { };
     private Function<String, ToolOutput> frozenCodeSearch;
