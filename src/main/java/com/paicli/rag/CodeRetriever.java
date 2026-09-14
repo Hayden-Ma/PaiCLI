@@ -17,16 +17,16 @@ import java.util.Set;
  */
 public class CodeRetriever implements AutoCloseable {
     private final EmbeddingClient embeddingClient;
-    private final VectorStore vectorStore;
+    private final RetrievalStore vectorStore;
 
     public CodeRetriever(String projectPath) throws SQLException {
         this.embeddingClient = new EmbeddingClient();
-        this.vectorStore = new VectorStore(Paths.get(projectPath).toAbsolutePath().normalize().toString());
+        this.vectorStore = RetrievalStores.create(projectPath);
     }
 
     public CodeRetriever(String projectPath, EmbeddingClient embeddingClient) throws SQLException {
         this.embeddingClient = embeddingClient;
-        this.vectorStore = new VectorStore(Paths.get(projectPath).toAbsolutePath().normalize().toString());
+        this.vectorStore = RetrievalStores.create(projectPath);
     }
 
     /**

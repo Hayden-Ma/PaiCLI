@@ -17,7 +17,7 @@ import java.util.Map;
  * 向量以 JSON 数组形式存储在 SQLite 中，检索时在内存计算余弦相似度。
  * 对于代码库规模（通常几百到几千个块），此方案足够；规模再大可换 FAISS / pgvector 等。
  */
-public class VectorStore implements AutoCloseable {
+public class VectorStore implements RetrievalStore {
     private static final ObjectMapper mapper = new ObjectMapper();
     private final Connection connection;
     private final String projectPath;

@@ -92,7 +92,7 @@ public class CodeIndex {
         int reindexed = 0;
         int failed = 0;
 
-        try (VectorStore store = new VectorStore(root.toString())) {
+        try (RetrievalStore store = RetrievalStores.create(root.toString())) {
             Map<String, String> existingHashes = forceRebuild ? Map.of() : store.getFileHashes();
             if (forceRebuild) {
                 store.clearProject();
