@@ -25,7 +25,7 @@ public class EmbeddingClient {
 
     public EmbeddingClient() {
         this.provider = getEnv("EMBEDDING_PROVIDER", "ollama");
-        this.model = getEnv("EMBEDDING_MODEL", "nomic-embed-text:latest");
+        this.model = getEnv("EMBEDDING_MODEL", "bge-m3:latest");
         this.baseUrl = getEnv("EMBEDDING_BASE_URL", inferDefaultUrl(provider));
         this.apiKey = getEnv("EMBEDDING_API_KEY", "");
     }

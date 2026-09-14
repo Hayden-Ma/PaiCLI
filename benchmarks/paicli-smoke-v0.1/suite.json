@@ -365,6 +365,41 @@
       "verifierType": "command",
       "verifierCommand": ["java", "hidden/l3-stateful-counter/Check.java", "{workspace}"],
       "status": "active"
+    },
+    {
+      "id": "judge-report-quality",
+      "title": "LLM-judge 示例：代码审查报告质量",
+      "category": "subjective_quality",
+      "level": "L2",
+      "weight": 0,
+      "mode": "react",
+      "fixturePath": "fixtures/judge-report-quality",
+      "prompt": "请审查工作区 src/ProductService.java 的代码，找出其中的问题（正确性、健壮性、可维护性），并在工作区根目录创建 answer.txt 写一份审查报告，包含：发现的问题清单、每个问题的严重程度与位置、以及修复建议。",
+      "verifierType": "llm_judge",
+      "verifierCommand": [],
+      "judgeArtifact": "answer.txt",
+      "judgePassThreshold": 60,
+      "rubrics": [
+        {
+          "name": "correctness",
+          "criteria": "报告是否准确识别了代码中真实存在的 bug 或错误（不夸大、不编造）",
+          "weight": 3,
+          "hardGate": true
+        },
+        {
+          "name": "completeness",
+          "criteria": "报告是否覆盖了代码的主要问题维度（正确性、健壮性、可维护性），无明显遗漏",
+          "weight": 2,
+          "hardGate": false
+        },
+        {
+          "name": "actionability",
+          "criteria": "每个问题是否给出具体、可执行、贴合代码的修复建议，而非泛泛而谈",
+          "weight": 2,
+          "hardGate": false
+        }
+      ],
+      "status": "draft"
     }
   ]
 }

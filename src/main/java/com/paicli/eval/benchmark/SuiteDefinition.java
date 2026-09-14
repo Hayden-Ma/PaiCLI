@@ -7,6 +7,7 @@ import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -25,9 +26,9 @@ public record SuiteDefinition(
 ) {
     private static final ObjectMapper MAPPER = new ObjectMapper(
             JsonFactory.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION).build())
+            .registerModule(new Jdk8Module())
             .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
             .enable(DeserializationFeature.FAIL_ON_NULL_CREATOR_PROPERTIES)
-            .enable(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
     @JsonCreator

@@ -62,10 +62,16 @@ public final class BenchmarkRunner {
     }
 
     private final LlmClient baseClient;
+    private final LlmClient judgeClient;
     private final CaseRunner.Options options;
 
     public BenchmarkRunner(LlmClient baseClient, CaseRunner.Options options) {
+        this(baseClient, null, options);
+    }
+
+    public BenchmarkRunner(LlmClient baseClient, LlmClient judgeClient, CaseRunner.Options options) {
         this.baseClient = baseClient;
+        this.judgeClient = judgeClient;
         this.options = options == null ? CaseRunner.Options.defaults() : options;
     }
 
@@ -83,6 +89,10 @@ public final class BenchmarkRunner {
         manifest.put("suiteVersion", suite.version());
         manifest.put("model", baseClient.getModelName());
         manifest.put("provider", baseClient.getProviderName());
+        if (judgeClient != null) {
+            manifest.put("judgeModel", judgeClient.getModelName());
+            manifest.put("judgeProvider", judgeClient.getProviderName());
+        }
         manifest.put("runsPerCase", runsPerCase);
         manifest.put("options", Map.of(
                 "caseTimeoutSeconds", options.caseTimeoutSeconds(),
@@ -92,7 +102,7 @@ public final class BenchmarkRunner {
         manifest.put("startedAt", Instant.now().toString());
         store.writeManifest(manifest);
 
-        CaseRunner caseRunner = new CaseRunner(baseClient, options);
+        CaseRunner caseRunner = new CaseRunner(baseClient, judgeClient, options);
         List<CaseReport> reports = new ArrayList<>();
         List<ScoreAggregator.CaseScore> scores = new ArrayList<>();
 

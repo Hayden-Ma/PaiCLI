@@ -885,9 +885,14 @@ public class Main {
                         continue;
                     }
                     case INDEX_CODE -> {
-                        String indexPath = command.payload() != null ? command.payload() : ".";
+                        String payload = command.payload() != null ? command.payload() : "";
+                        boolean forceFull = payload.startsWith("--full");
+                        String indexPath = forceFull ? payload.substring("--full".length()).trim() : payload;
+                        if (indexPath.isEmpty()) {
+                            indexPath = ".";
+                        }
                         CodeIndex indexer = new CodeIndex(ui::println);
-                        indexer.index(indexPath);
+                        indexer.index(indexPath, forceFull);
                         ui.println();
 
                         // 同步项目路径到 ToolRegistry，让 search_code 工具可以正常工作
@@ -910,6 +915,7 @@ public class Main {
                                 continue;
                             }
                             List<com.paicli.rag.VectorStore.SearchResult> results = retriever.hybridSearch(query, 5);
+                            results = retriever.markStale(results);
                             if (results.isEmpty()) {
                                 ui.println("📭 未找到相关代码\n");
                             } else {
@@ -1032,13 +1038,15 @@ public class Main {
      * 退出码：0 = 全部 case pass@k 通过；1 = 存在失败 case；2 = 运行错误（suite 无效 / 无 API Key）。
      */
     /** bench 子命令解析结果；suitePath 为 null 表示缺少必选参数。 */
-    record BenchCliArgs(Path suitePath, Path outputRoot, int runs, CaseRunner.Options options) {
+    record BenchCliArgs(Path suitePath, Path outputRoot, int runs, String judgeModel,
+                        CaseRunner.Options options) {
     }
 
     static BenchCliArgs parseBenchArgs(String[] args) {
         Path suitePath = null;
         Path outputRoot = Path.of("benchmarks", "results");
         int runs = 1;
+        String judgeModel = "deepseek-v4-flash";
         int caseTimeoutSeconds = 600;
         int verifierTimeoutSeconds = 120;
         int hardMaxIterations = 40;
@@ -1052,6 +1060,16 @@ public class Main {
                 case "--suite" -> { if (i + 1 < args.length) suitePath = Path.of(args[++i]); }
                 case "--out" -> { if (i + 1 < args.length) outputRoot = Path.of(args[++i]); }
                 case "--runs" -> { if (i + 1 < args.length) runs = Integer.parseInt(args[++i]); }
+                case "--judge-model" -> {
+                    if (i + 1 < args.length) {
+                        String value = args[++i].trim();
+                        if (value.isEmpty() || "none".equalsIgnoreCase(value)) {
+                            judgeModel = null;
+                        } else {
+                            judgeModel = value;
+                        }
+                    }
+                }
                 case "--case-timeout-seconds" -> { if (i + 1 < args.length) caseTimeoutSeconds = Integer.parseInt(args[++i]); }
                 case "--verifier-timeout-seconds" -> { if (i + 1 < args.length) verifierTimeoutSeconds = Integer.parseInt(args[++i]); }
                 case "--max-iterations" -> { if (i + 1 < args.length) hardMaxIterations = Integer.parseInt(args[++i]); }
@@ -1066,7 +1084,7 @@ public class Main {
                 default -> { }
             }
         }
-        return new BenchCliArgs(suitePath, outputRoot, runs, new CaseRunner.Options(
+        return new BenchCliArgs(suitePath, outputRoot, runs, judgeModel, new CaseRunner.Options(
                 caseTimeoutSeconds, verifierTimeoutSeconds, hardMaxIterations, tokenBudget,
                 keepWorkspaces, commandAllowlist));
     }
@@ -1076,7 +1094,7 @@ public class Main {
         if (benchArgs.suitePath() == null) {
             System.err.println("用法: bench --suite <suite.json> [--runs k] [--out dir] "
                     + "[--case-timeout-seconds n] [--verifier-timeout-seconds n] "
-                    + "[--max-iterations n] [--token-budget n] [--keep-workspaces]");
+                    + "[--max-iterations n] [--token-budget n] [--keep-workspaces] [--judge-model m]");
             return 2;
         }
 
@@ -1086,15 +1104,21 @@ public class Main {
             System.err.println("❌ 错误: 未找到可用的 API Key，bench 需要真实模型调用");
             return 2;
         }
+        LlmClient judgeClient = createJudgeClient(client, benchArgs.judgeModel(), config);
+        if (judgeClient == null) {
+            System.err.println("⚠️  警告: LLM-judge 模型不可用（" + benchArgs.judgeModel()
+                    + "），llm_judge 类型 case 将判失败");
+        }
 
         try {
             SuiteDefinition suite = SuiteDefinition.load(benchArgs.suitePath());
             CaseRunner.Options options = benchArgs.options();
             int runs = benchArgs.runs();
             Path outputRoot = benchArgs.outputRoot();
-            BenchmarkRunner runner = new BenchmarkRunner(client, options);
+            BenchmarkRunner runner = new BenchmarkRunner(client, judgeClient, options);
             System.out.println("[bench] suite=" + suite.name()
                     + " model=" + client.getProviderName() + "/" + client.getModelName()
+                    + (judgeClient == null ? "" : " judge=" + judgeClient.getProviderName() + "/" + judgeClient.getModelName())
                     + " runsPerCase=" + runs);
             BenchmarkRunner.SuiteReport report = runner.run(suite, runs, outputRoot);
             System.out.println();
@@ -1119,6 +1143,17 @@ public class Main {
     }
 
     /**
+     * 创建 LLM-judge client：与评测模型同 provider / 同 API Key，仅覆盖模型名。
+     * judgeModel 为 null/blank 时返回 null（禁用 LLM_JUDGE case）。
+     */
+    private static LlmClient createJudgeClient(LlmClient baseClient, String judgeModel, PaiCliConfig config) {
+        if (judgeModel == null || judgeModel.isBlank()) {
+            return null;
+        }
+        return LlmClientFactory.createWithModel(baseClient.getProviderName(), judgeModel, config);
+    }
+
+    /**
      * 交互式评测入口：/eval [--suite <suite.json>] [--runs k] [--out dir]
      * 参数与 bench 子命令一致；未指定 suite 时默认跑 benchmarks/paicli-smoke-v0.1/suite.json。
      * 评测期间同步占用终端，完成后自动回到输入。
@@ -1134,7 +1169,7 @@ public class Main {
         if (benchArgs.suitePath() == null) {
             benchArgs = new BenchCliArgs(
                     Path.of("benchmarks", "paicli-smoke-v0.1", "suite.json"),
-                    benchArgs.outputRoot(), benchArgs.runs(), benchArgs.options());
+                    benchArgs.outputRoot(), benchArgs.runs(), benchArgs.judgeModel(), benchArgs.options());
         }
 
         Path suitePath = benchArgs.suitePath();
@@ -1142,7 +1177,8 @@ public class Main {
             ui.println("❌ 评测 suite 不存在: " + suitePath + "\n");
             ui.println("   用法: /eval [--suite <suite.json>] [--runs k] [--out dir] "
                     + "[--case-timeout-seconds n] [--verifier-timeout-seconds n] "
-                    + "[--max-iterations n] [--token-budget n] [--allow-commands a,b]\n");
+                    + "[--max-iterations n] [--token-budget n] [--allow-commands a,b] "
+                    + "[--judge-model m]\n");
             return;
         }
 
@@ -1152,15 +1188,21 @@ public class Main {
             ui.println("❌ 未找到可用的 API Key，/eval 需要真实模型调用\n");
             return;
         }
+        LlmClient judgeClient = createJudgeClient(client, benchArgs.judgeModel(), config);
+        if (judgeClient == null) {
+            ui.println("⚠️  警告: LLM-judge 模型不可用（" + benchArgs.judgeModel()
+                    + "），llm_judge 类型 case 将判失败\n");
+        }
 
         try {
             SuiteDefinition suite = SuiteDefinition.load(suitePath);
             CaseRunner.Options options = benchArgs.options();
             int runs = benchArgs.runs();
             Path outputRoot = benchArgs.outputRoot();
-            BenchmarkRunner runner = new BenchmarkRunner(client, options);
+            BenchmarkRunner runner = new BenchmarkRunner(client, judgeClient, options);
             ui.println("🔬 评测开始: suite=" + suite.name()
                     + " model=" + client.getProviderName() + "/" + client.getModelName()
+                    + (judgeClient == null ? "" : " judge=" + judgeClient.getProviderName() + "/" + judgeClient.getModelName())
                     + " runsPerCase=" + runs);
             ui.println("   评测期间终端会被占用，完成后自动回到输入。\n");
             BenchmarkRunner.SuiteReport report = runner.run(suite, runs, outputRoot);
@@ -1954,8 +1996,8 @@ public class Main {
                 new SlashCommandHint("/snapshot status", "/snapshot status", "查看 Side-Git 快照状态"),
                 new SlashCommandHint("/snapshot clean", "/snapshot clean", "清理当前项目 Side-Git 快照"),
                 new SlashCommandHint("/restore ", "/restore <N>", "恢复到最近第 N 个 pre-turn 快照"),
-                new SlashCommandHint("/index", "/index", "索引当前代码库"),
-                new SlashCommandHint("/index ", "/index [路径]", "索引指定路径代码库"),
+                new SlashCommandHint("/index", "/index", "增量索引当前代码库（跳过未变更文件）"),
+                new SlashCommandHint("/index ", "/index [--full] [路径]", "索引指定路径；--full 清空全量重建"),
                 new SlashCommandHint("/search ", "/search <查询>", "语义检索代码（RAG 辅助）"),
                 new SlashCommandHint("/graph ", "/graph <类名>", "查看代码关系图谱"),
                 new SlashCommandHint("/clear", "/clear", "清空当前对话历史"),

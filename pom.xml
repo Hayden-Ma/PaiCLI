@@ -29,6 +29,13 @@
             <version>2.16.0</version>
         </dependency>
 
+        <!-- Jackson JDK8 类型支持（Optional 字段反序列化） -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jdk8</artifactId>
+            <version>2.16.0</version>
+        </dependency>
+
         <!-- HTTP客户端 -->
         <dependency>
             <groupId>com.squareup.okhttp3</groupId>

@@ -4,9 +4,12 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.*;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * SQLite 向量存储 + 代码关系图谱持久化
@@ -20,7 +23,8 @@ public class VectorStore implements AutoCloseable {
     private final String projectPath;
 
     public VectorStore(String projectPath) throws SQLException {
-        this.projectPath = projectPath;
+        // 归一化 project key：同一项目无论用相对/绝对路径构造，读写都落在同一 key 上
+        this.projectPath = Paths.get(projectPath).toAbsolutePath().normalize().toString();
         String dbDir = System.getProperty("paicli.rag.dir",
                 System.getProperty("user.home") + "/.paicli/rag");
         java.io.File dir = new java.io.File(dbDir);
@@ -43,6 +47,8 @@ public class VectorStore implements AutoCloseable {
                     name TEXT NOT NULL,
                     content TEXT NOT NULL,
                     embedding_json TEXT,
+                    start_line INTEGER DEFAULT 0,
+                    end_line INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """;
@@ -61,6 +67,17 @@ public class VectorStore implements AutoCloseable {
                 )
                 """;
 
+        // 文件 hash 表：增量索引用（记录每个文件索引时的内容指纹）
+        String createIndexedFiles = """
+                CREATE TABLE IF NOT EXISTS indexed_files (
+                    project_path TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (project_path, file_path)
+                )
+                """;
+
         // 索引加速查询
         String createIdxProject = "CREATE INDEX IF NOT EXISTS idx_project ON code_chunks(project_path)";
         String createIdxFile = "CREATE INDEX IF NOT EXISTS idx_file ON code_chunks(file_path)";
@@ -72,6 +89,10 @@ public class VectorStore implements AutoCloseable {
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(createChunks);
             stmt.execute(createRelations);
+            stmt.execute(createIndexedFiles);
+            // 旧库迁移：补行号列（已存在时 SQLite 报 duplicate column，忽略）
+            addColumnIfMissing(stmt, "code_chunks", "start_line", "INTEGER DEFAULT 0");
+            addColumnIfMissing(stmt, "code_chunks", "end_line", "INTEGER DEFAULT 0");
             stmt.execute(createIdxProject);
             stmt.execute(createIdxFile);
             stmt.execute(createIdxType);
@@ -81,18 +102,87 @@ public class VectorStore implements AutoCloseable {
         }
     }
 
+    private void addColumnIfMissing(Statement stmt, String table, String column, String ddl) {
+        try {
+            stmt.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + ddl);
+        } catch (SQLException ignored) {
+            // 列已存在，无需迁移
+        }
+    }
+
     /**
      * 清空指定项目的索引数据
      */
     public void clearProject() throws SQLException {
         String deleteChunks = "DELETE FROM code_chunks WHERE project_path = ?";
         String deleteRelations = "DELETE FROM code_relations WHERE project_path = ?";
+        String deleteIndexedFiles = "DELETE FROM indexed_files WHERE project_path = ?";
         try (PreparedStatement ps1 = connection.prepareStatement(deleteChunks);
-             PreparedStatement ps2 = connection.prepareStatement(deleteRelations)) {
+             PreparedStatement ps2 = connection.prepareStatement(deleteRelations);
+             PreparedStatement ps3 = connection.prepareStatement(deleteIndexedFiles)) {
             ps1.setString(1, projectPath);
             ps2.setString(1, projectPath);
+            ps3.setString(1, projectPath);
             ps1.executeUpdate();
             ps2.executeUpdate();
+            ps3.executeUpdate();
+        }
+    }
+
+    /**
+     * 读取当前项目已索引文件的 content hash（file_path → sha256）
+     */
+    public Map<String, String> getFileHashes() throws SQLException {
+        String sql = "SELECT file_path, content_hash FROM indexed_files WHERE project_path = ?";
+        Map<String, String> hashes = new HashMap<>();
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, projectPath);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    hashes.put(rs.getString(1), rs.getString(2));
+                }
+            }
+        }
+        return hashes;
+    }
+
+    /**
+     * 记录/更新单文件的内容 hash
+     */
+    public void upsertFileHash(String filePath, String contentHash) throws SQLException {
+        String sql = """
+                INSERT INTO indexed_files (project_path, file_path, content_hash, indexed_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(project_path, file_path)
+                DO UPDATE SET content_hash = excluded.content_hash, indexed_at = CURRENT_TIMESTAMP
+                """;
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, projectPath);
+            ps.setString(2, filePath);
+            ps.setString(3, contentHash);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * 删除单个文件的全部索引痕迹：代码块、以该文件为起点的关系、hash 记录
+     */
+    public void deleteFileData(String filePath) throws SQLException {
+        String deleteChunks = "DELETE FROM code_chunks WHERE project_path = ? AND file_path = ?";
+        String deleteRelations = "DELETE FROM code_relations WHERE project_path = ? AND from_file = ?";
+        String deleteIndexedFiles = "DELETE FROM indexed_files WHERE project_path = ? AND file_path = ?";
+        try (PreparedStatement ps1 = connection.prepareStatement(deleteChunks);
+             PreparedStatement ps2 = connection.prepareStatement(deleteRelations);
+             PreparedStatement ps3 = connection.prepareStatement(deleteIndexedFiles)) {
+            ps1.setString(1, projectPath);
+            ps1.setString(2, filePath);
+            ps2.setString(1, projectPath);
+            ps2.setString(2, filePath);
+            ps3.setString(1, projectPath);
+            ps3.setString(2, filePath);
+            ps1.executeUpdate();
+            ps2.executeUpdate();
+            ps3.executeUpdate();
         }
     }
 
@@ -101,8 +191,8 @@ public class VectorStore implements AutoCloseable {
      */
     public void insertChunks(List<CodeChunkEntry> entries) throws SQLException {
         String sql = """
-                INSERT INTO code_chunks (project_path, file_path, chunk_type, name, content, embedding_json)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO code_chunks (project_path, file_path, chunk_type, name, content, embedding_json, start_line, end_line)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """;
         boolean autoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
@@ -114,6 +204,8 @@ public class VectorStore implements AutoCloseable {
                 ps.setString(4, entry.chunk.name());
                 ps.setString(5, entry.chunk.content());
                 ps.setString(6, embeddingToJson(entry.embedding));
+                ps.setInt(7, entry.chunk.startLine());
+                ps.setInt(8, entry.chunk.endLine());
                 ps.addBatch();
             }
             ps.executeBatch();
@@ -160,7 +252,7 @@ public class VectorStore implements AutoCloseable {
      * 语义检索：根据查询向量返回最相似的 TopK 代码块
      */
     public List<SearchResult> search(float[] queryEmbedding, int topK) throws SQLException {
-        String sql = "SELECT file_path, chunk_type, name, content, embedding_json FROM code_chunks WHERE project_path = ?";
+        String sql = "SELECT file_path, chunk_type, name, content, embedding_json, start_line, end_line FROM code_chunks WHERE project_path = ?";
         List<SearchResult> candidates = new ArrayList<>();
 
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
@@ -178,7 +270,10 @@ public class VectorStore implements AutoCloseable {
                             rs.getString("chunk_type"),
                             rs.getString("name"),
                             rs.getString("content"),
-                            similarity
+                            similarity,
+                            rs.getInt("start_line"),
+                            rs.getInt("end_line"),
+                            false
                     ));
                 }
             }
@@ -194,7 +289,7 @@ public class VectorStore implements AutoCloseable {
      */
     public List<SearchResult> searchByKeyword(String keyword) throws SQLException {
         String sql = """
-                SELECT file_path, chunk_type, name, content FROM code_chunks
+                SELECT file_path, chunk_type, name, content, start_line, end_line FROM code_chunks
                 WHERE project_path = ? AND (name LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')
                 """;
         List<SearchResult> results = new ArrayList<>();
@@ -212,7 +307,10 @@ public class VectorStore implements AutoCloseable {
                             rs.getString("chunk_type"),
                             rs.getString("name"),
                             rs.getString("content"),
-                            0.3
+                            0.3,
+                            rs.getInt("start_line"),
+                            rs.getInt("end_line"),
+                            false
                     ));
                 }
             }
@@ -347,10 +445,21 @@ public class VectorStore implements AutoCloseable {
     public record CodeChunkEntry(CodeChunk chunk, float[] embedding) {}
 
     /**
-     * 检索结果
+     * 检索结果。startLine/endLine 是索引时的行区间（0 表示无行号），
+     * stale 表示检索时校验发现文件内容已与索引时不一致。
      */
-    public record SearchResult(String filePath, String chunkType,
-                                String name, String content, double similarity) {}
+    public record SearchResult(String filePath, String chunkType, String name, String content,
+                                double similarity, int startLine, int endLine, boolean stale) {
+        public SearchResult(String filePath, String chunkType, String name,
+                            String content, double similarity) {
+            this(filePath, chunkType, name, content, similarity, 0, 0, false);
+        }
+
+        public SearchResult(String filePath, String chunkType, String name, String content,
+                            double similarity, boolean stale) {
+            this(filePath, chunkType, name, content, similarity, 0, 0, stale);
+        }
+    }
 
     /**
      * 索引统计

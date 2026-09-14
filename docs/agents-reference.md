@@ -34,7 +34,7 @@ For the primary entry point, see `/AGENTS.md`.
 
 ### Embedding Config
 
-环境变量 > 系统属性 > 默认值：`EMBEDDING_PROVIDER`(ollama) / `EMBEDDING_MODEL`(nomic-embed-text:latest) / `EMBEDDING_BASE_URL`(http://localhost:11434)
+环境变量 > 系统属性 > 默认值：`EMBEDDING_PROVIDER`(ollama) / `EMBEDDING_MODEL`(bge-m3:latest) / `EMBEDDING_BASE_URL`(http://localhost:11434)
 
 ### Log Config
 
@@ -522,7 +522,7 @@ DEEPSEEK_API_KEY=your_deepseek_api_key_here   # 默认 provider
 # XFYUN_MAAS_BASE_URL=https://maas-api.cn-huabei-1.xf-yun.com/v2
 # XFYUN_MAAS_LORA_ID=0
 EMBEDDING_PROVIDER=ollama
-EMBEDDING_MODEL=nomic-embed-text:latest
+EMBEDDING_MODEL=bge-m3:latest
 EMBEDDING_BASE_URL=http://localhost:11434
 # EMBEDDING_API_KEY=your_api_key_here
 # PAICLI_LOG_LEVEL=INFO

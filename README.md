@@ -34,6 +34,10 @@ java -jar target/paicli-1.0-SNAPSHOT.jar bench   --suite benchmarks/paicli-smoke
 /eval
 /eval --suite benchmarks/paicli-smoke-v0.1/suite.json --runs 3 --case-timeout-seconds 900
 
+# llm_judge 类型 case 用独立裁判模型（默认 deepseek-v4-flash，与评测模型同 provider / 同 API Key，
+# 仅覆盖模型名；--judge-model none 可禁用）
+/eval --judge-model deepseek-v4-flash
+
 # 每夜定时跑（打包 + 评测 + 退出码透传）
 scripts/nightly-bench.sh
 ```
@@ -266,7 +270,7 @@ relay v9 保留 v6 引入的宿主登记的多服务目录与 server 绑定的 M
 
 2026-09-04 新一轮完整 Docker relay 运行已取得两家的真实 model / usage / 指纹证据；修复 verifier 临时副本权限后，对两家全部原始产物对称复验，均为 8/8、开发诊断分 100。原始自动 89 分因同一 verifier 故障失效，旧 JSON 保留，复验没有再次调用模型。最新 [报告](benchmarks/paicli-native-agentbench-v0.1/DEV-PILOT-REPORT-2026-09-04.md) / [机器摘要](benchmarks/paicli-native-agentbench-v0.1/dev-pilot-results-2026-09-04.json) 与 [8 月 31 日历史报告](benchmarks/paicli-native-agentbench-v0.1/DEV-PILOT-REPORT-2026-08-31.md) 分开保存；仍为 `publishable=false`，不得当作正式榜单。
 
-`/eval` 与 `bench` 子命令目前只跑确定性 suite（command / trajectory verifier），尚未把 Judge 接进 case 判定；数据集加载、批量 Runner、Judge 人工校准和真实业务指标仍需基于具体评测任务补齐。
+`/eval` 与 `bench` 支持 `llm_judge` verifier：case 声明 `judgeArtifact` / `rubrics` / `judgePassThreshold` 后，Agent 产物由独立裁判模型按 Rubric 逐维打分，Java 计算加权总分与通过判定（默认 `--judge-model deepseek-v4-flash`，与评测模型同 provider / 同 API Key）。数据集加载、批量 Runner、Judge 人工校准和真实业务指标仍需基于具体评测任务补齐。使用示例与边界见 [`docs/llm-as-a-judge.md`](docs/llm-as-a-judge.md)。
 
 ### 第十六期：TUI 产品化（v16.1 形态修正后：双形态可切换）
 
@@ -689,7 +693,7 @@ OAuth 和 `sampling/createMessage` 当前未实现；远程 server 需要鉴权�
 # 编译（默认跳过测试）
 mvn clean package
 
-# 运行（只有 search_code 语义检索需要本地 Ollama + nomic-embed-text；grep_code 会优先使用本机 ripgrep，未安装时自动回退）
+# 运行（只有 search_code 语义检索需要本地 Ollama，本仓库用 bge-m3 模型，未部署时可用隧道转发到 localhost:11434；grep_code 会优先使用本机 ripgrep，未安装时自动回退）
 java -jar target/paicli-1.0-SNAPSHOT.jar
 ```
 

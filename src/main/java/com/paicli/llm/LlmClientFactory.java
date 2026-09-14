@@ -7,7 +7,16 @@ public class LlmClientFactory {
     private LlmClientFactory() {}
 
     public static LlmClient create(String provider, PaiCliConfig config) {
+    public static LlmClient create(String provider, PaiCliConfig config) {
         return create(provider, null, config);
+    }
+
+    /**
+     * 与 {@link #create(String, String, PaiCliConfig)} 相同，但显式指定模型（非空时覆盖配置）。
+     * 用于 LLM-as-Judge：同一 provider / 同一 API Key，但用不同模型当裁判。
+     */
+    public static LlmClient createWithModel(String provider, String model, PaiCliConfig config) {
+        return create(provider, model, config);
     }
 
     /**

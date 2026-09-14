@@ -1,6 +1,7 @@
 package com.paicli.eval.benchmark;
 
 import com.paicli.agent.Agent;
+import com.paicli.eval.LlmJudge;
 import com.paicli.llm.LlmClient;
 import com.paicli.memory.LongTermMemory;
 import com.paicli.memory.MemoryManager;
@@ -15,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -62,12 +64,19 @@ public final class CaseRunner {
     }
 
     private static final int MAX_VERIFIER_OUTPUT_CHARS = 16_000;
+    private static final int MAX_JUDGE_TRACE_CHARS = 16_000;
 
     private final LlmClient baseClient;
+    private final LlmClient judgeClient;
     private final Options options;
 
     public CaseRunner(LlmClient baseClient, Options options) {
+        this(baseClient, null, options);
+    }
+
+    public CaseRunner(LlmClient baseClient, LlmClient judgeClient, Options options) {
         this.baseClient = baseClient;
+        this.judgeClient = judgeClient;
         this.options = options == null ? Options.defaults() : options;
     }
 
@@ -192,6 +201,8 @@ public final class CaseRunner {
             primary = new VerifierOutcome(true, null, "no verifier configured; auto-pass");
         } else if (caseDefinition.verifierType() == CaseDefinition.VerifierType.TRAJECTORY) {
             primary = runTrajectoryVerifier(suite, caseDefinition, rawTrace, llmCalls);
+        } else if (caseDefinition.verifierType() == CaseDefinition.VerifierType.LLM_JUDGE) {
+            primary = runLlmJudgeVerifier(caseDefinition, workspace, rawTrace);
         } else {
             primary = runCommandVerifier(suite, caseDefinition, workspace);
         }
@@ -216,6 +227,75 @@ public final class CaseRunner {
             }
         }
         return primary;
+    }
+
+    private VerifierOutcome runLlmJudgeVerifier(CaseDefinition caseDefinition,
+                                                Path workspace,
+                                                Path rawTrace) {
+        if (judgeClient == null) {
+            return new VerifierOutcome(false, null,
+                    "llm_judge verifier 未配置 judgeClient（检查 --judge-model 是否可用）");
+        }
+        Path artifact = workspace.resolve(caseDefinition.judgeArtifactOrDefault());
+        if (!Files.exists(artifact)) {
+            return new VerifierOutcome(false, null,
+                    "judge artifact missing: " + caseDefinition.judgeArtifactOrDefault());
+        }
+        final String candidate;
+        try {
+            candidate = Files.readString(artifact).trim();
+        } catch (IOException e) {
+            return new VerifierOutcome(false, null, "read judge artifact failed: " + e.getMessage());
+        }
+        if (candidate.isBlank()) {
+            return new VerifierOutcome(false, null,
+                    "judge artifact empty: " + caseDefinition.judgeArtifactOrDefault());
+        }
+
+        LlmJudge.EvaluationCase evaluationCase = new LlmJudge.EvaluationCase(
+                caseDefinition.id(),
+                caseDefinition.prompt(),
+                null,
+                candidate,
+                readTraceSnippet(rawTrace));
+        LlmJudge judge = new LlmJudge(judgeClient, caseDefinition.effectiveJudgePassThreshold());
+        try {
+            LlmJudge.EvaluationResult result = judge.evaluate(evaluationCase,
+                    caseDefinition.rubrics().orElse(List.of()));
+            StringBuilder output = new StringBuilder();
+            output.append(String.format(Locale.ROOT, "judge weighted=%.1f passed=%s",
+                    result.weightedScore(), result.passed()));
+            for (LlmJudge.DimensionScore score : result.scores()) {
+                output.append(System.lineSeparator())
+                        .append("  - ").append(score.name()).append(": ").append(score.score())
+                        .append("  ").append(score.evidence());
+            }
+            if (!result.hardFailures().isEmpty()) {
+                output.append(System.lineSeparator())
+                        .append("  hardFailures: ").append(result.hardFailures());
+            }
+            if (!result.summary().isBlank()) {
+                output.append(System.lineSeparator()).append("  summary: ").append(result.summary());
+            }
+            return new VerifierOutcome(result.passed(), result.passed() ? 0 : 1, output.toString());
+        } catch (IOException e) {
+            // judge 调用本身失败（网络 / JSON 解析）属于评测基础设施问题，按失败计入 detail
+            return new VerifierOutcome(false, null, "judge call failed: " + e.getMessage());
+        }
+    }
+
+    /** 给 judge 的轨迹快照：读 raw.jsonl 并截断到上限，避免把完整大轨迹塞进 judge 上下文。 */
+    private static String readTraceSnippet(Path rawTrace) {
+        if (rawTrace == null || !Files.exists(rawTrace)) {
+            return "";
+        }
+        try {
+            String trace = Files.readString(rawTrace);
+            return trace.length() <= MAX_JUDGE_TRACE_CHARS
+                    ? trace : trace.substring(0, MAX_JUDGE_TRACE_CHARS) + "\n...[truncated]";
+        } catch (IOException e) {
+            return "";
+        }
     }
 
     private VerifierOutcome runCommandVerifier(SuiteDefinition suite,

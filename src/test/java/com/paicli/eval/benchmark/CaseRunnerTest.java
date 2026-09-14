@@ -163,6 +163,114 @@ class CaseRunnerTest {
         assertTrue(result.passed());
     }
 
+    @Test
+    void shouldPassWhenJudgeAcceptsArtifact() throws Exception {
+        SuiteDefinition suite = suiteWithLlmJudge();
+        LlmClient agent = new ScriptedClient(
+                writeToolCall("answer.txt", "review: dividePrice 除零风险..."),
+                finalAnswer("done"));
+        LlmClient judge = new ScriptedClient(judgeResponse(4, 4, "[]"));
+
+        CaseRunner runner = new CaseRunner(agent, judge, CaseRunner.Options.defaults());
+        CaseRunner.EpisodeResult result = runCase(suite, runner);
+
+        assertFalse(result.isInfraError());
+        assertTrue(result.passed());
+        assertTrue(result.verifierOutput().contains("judge weighted=80.0"));
+    }
+
+    @Test
+    void shouldFailWhenJudgeRejectsArtifact() throws Exception {
+        SuiteDefinition suite = suiteWithLlmJudge();
+        LlmClient agent = new ScriptedClient(
+                writeToolCall("answer.txt", "shallow review"),
+                finalAnswer("done"));
+        LlmClient judge = new ScriptedClient(judgeResponse(2, 2, "[]"));
+
+        CaseRunner runner = new CaseRunner(agent, judge, CaseRunner.Options.defaults());
+        CaseRunner.EpisodeResult result = runCase(suite, runner);
+
+        assertFalse(result.isInfraError());
+        assertFalse(result.passed());
+        assertTrue(result.verifierOutput().contains("judge weighted=40.0"));
+    }
+
+    @Test
+    void shouldFailWhenJudgeArtifactMissing() throws Exception {
+        SuiteDefinition suite = suiteWithLlmJudge();
+        LlmClient agent = new ScriptedClient(finalAnswer("done"));
+        LlmClient judge = new ScriptedClient(judgeResponse(4, 4, "[]"));
+
+        CaseRunner runner = new CaseRunner(agent, judge, CaseRunner.Options.defaults());
+        CaseRunner.EpisodeResult result = runCase(suite, runner);
+
+        assertFalse(result.isInfraError());
+        assertFalse(result.passed());
+        assertTrue(result.verifierOutput().contains("judge artifact missing"));
+    }
+
+    @Test
+    void shouldFailWhenNoJudgeClientConfigured() throws Exception {
+        SuiteDefinition suite = suiteWithLlmJudge();
+        LlmClient agent = new ScriptedClient(
+                writeToolCall("answer.txt", "review"),
+                finalAnswer("done"));
+
+        CaseRunner runner = new CaseRunner(agent, null, CaseRunner.Options.defaults());
+        CaseRunner.EpisodeResult result = runCase(suite, runner);
+
+        assertFalse(result.isInfraError());
+        assertFalse(result.passed());
+        assertTrue(result.verifierOutput().contains("未配置 judgeClient"));
+    }
+
+    @Test
+    void shouldRejectLlmJudgeCaseWithoutRubrics() throws Exception {
+        Path suiteDir = tempDir.resolve("suite-judge-norubrics-" + System.nanoTime());
+        Files.createDirectories(suiteDir.resolve("fixtures/case-a"));
+        Files.writeString(suiteDir.resolve("fixtures/case-a/README.md"), "fixture");
+        Path suiteFile = suiteDir.resolve("suite.json");
+        Files.writeString(suiteFile, """
+                {"version":"1.0","name":"t","cases":[{"id":"case-a","title":"a","category":"c",
+                "level":"L1","weight":100,"mode":"react","fixturePath":"fixtures/case-a",
+                "prompt":"p","verifierType":"llm_judge","verifierCommand":[],"status":"active"}]}
+                """);
+        assertThrows(IllegalArgumentException.class, () -> SuiteDefinition.load(suiteFile));
+    }
+
+    private CaseRunner.EpisodeResult runCase(SuiteDefinition suite, CaseRunner runner) throws IOException {
+        BenchmarkArtifactStore store = openStore();
+        return runner.run(suite, suite.activeCases().get(0), 1, store);
+    }
+
+    private SuiteDefinition suiteWithLlmJudge() throws IOException {
+        Path suiteDir = tempDir.resolve("suite-judge-" + System.nanoTime());
+        Files.createDirectories(suiteDir.resolve("fixtures/case-a"));
+        Files.writeString(suiteDir.resolve("fixtures/case-a/README.md"), "fixture");
+        Path suiteFile = suiteDir.resolve("suite.json");
+        Files.writeString(suiteFile, """
+                {"version":"1.0","name":"t","cases":[{"id":"case-a","title":"a","category":"c",
+                "level":"L1","weight":100,"mode":"react","fixturePath":"fixtures/case-a",
+                "prompt":"写审查报告到 answer.txt","verifierType":"llm_judge",
+                "verifierCommand":[],"judgeArtifact":"answer.txt","judgePassThreshold":60,
+                "rubrics":[
+                  {"name":"correctness","criteria":"是否准确","weight":3,"hardGate":true},
+                  {"name":"completeness","criteria":"是否完整","weight":2,"hardGate":false}
+                ],
+                "status":"active"}]}
+                """);
+        return SuiteDefinition.load(suiteFile);
+    }
+
+    /** 构造 judge 的 JSON 响应：两个 rubric 各给 score 分。 */
+    private static LlmClient.ChatResponse judgeResponse(int correctness, int completeness, String hardFailures) {
+        String content = "{\"scores\":["
+                + "{\"name\":\"correctness\",\"score\":" + correctness + ",\"evidence\":\"e1\"},"
+                + "{\"name\":\"completeness\",\"score\":" + completeness + ",\"evidence\":\"e2\"}],"
+                + "\"hardFailures\":" + hardFailures + ",\"summary\":\"ok\"}";
+        return new LlmClient.ChatResponse("assistant", content, null, 100, 10);
+    }
+
     private BenchmarkArtifactStore openStore() throws IOException {
         return BenchmarkArtifactStore.create(tempDir.resolve("out"), "test-run-" + System.nanoTime());
     }

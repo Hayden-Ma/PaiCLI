@@ -20,17 +20,20 @@ public final class SearchResultFormatter {
 
     public static String formatForCli(String query, List<VectorStore.SearchResult> results) {
         StringBuilder sb = new StringBuilder();
-        sb.append("📋 找到 ").append(results.size()).append(" 个相关代码块:\n\n");
+        sb.append("📋 找到 ").append(results.size()).append(" 个相关代码块（索引定位，内容以 read_file 为准）:\n\n");
         sb.append(buildSummary(query, results)).append("\n\n");
 
         for (int i = 0; i < results.size(); i++) {
             VectorStore.SearchResult result = results.get(i);
-            sb.append(String.format("%d. [%s:%s] (相似度: %.3f) %s%n",
+            sb.append(String.format("%d. [%s:%s] (相似度: %.3f) → %s%n",
                     i + 1,
                     result.chunkType(),
                     result.name(),
                     result.similarity(),
-                    result.filePath()));
+                    location(result)));
+            if (result.stale()) {
+                sb.append("   ⚠️ stale: 索引后文件已变更，务必 read_file 读取当前内容\n");
+            }
             sb.append("   ").append(buildSnippet(result.content(), 120).replace("\n", "\n   "));
             sb.append("\n\n");
         }
@@ -42,20 +45,34 @@ public final class SearchResultFormatter {
         StringBuilder sb = new StringBuilder();
         sb.append("检索摘要:\n");
         sb.append(buildSummary(query, results)).append("\n\n");
-        sb.append("检索结果:\n");
+        sb.append("定位结果（以下为索引时的位置与预览，可能滞后于磁盘当前内容；");
+        sb.append("回答前必须用 read_file 读取下述行区间的当前代码，禁止把预览当作最终事实）:\n");
 
         for (int i = 0; i < results.size(); i++) {
             VectorStore.SearchResult result = results.get(i);
-            sb.append(String.format("%d. [%s:%s] (相似度: %.3f) %s\n",
+            sb.append(String.format("%d. [%s:%s] (相似度: %.3f) → %s\n",
                     i + 1,
                     result.chunkType(),
                     result.name(),
                     result.similarity(),
-                    result.filePath()));
-            sb.append("   ").append(buildSnippet(result.content(), 180).replace("\n", "\n   ")).append("\n\n");
+                    location(result)));
+            if (result.stale()) {
+                sb.append("   ⚠️ stale: 索引后文件已变更，预览不可信，以 read_file 结果为准\n");
+            }
+            sb.append("   预览: ").append(buildSnippet(result.content(), 180).replace("\n", "\n   ")).append("\n\n");
         }
 
         return sb.toString().trim();
+    }
+
+    /**
+     * 定位指针：file chunk 无行号时退化为纯路径
+     */
+    private static String location(VectorStore.SearchResult result) {
+        if (result.startLine() > 0) {
+            return result.filePath() + ":" + result.startLine() + "-" + result.endLine();
+        }
+        return result.filePath();
     }
 
     static String buildSummary(String query, List<VectorStore.SearchResult> results) {

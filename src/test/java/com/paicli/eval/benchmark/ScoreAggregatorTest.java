@@ -100,6 +100,9 @@ class ScoreAggregatorTest {
                 "prompt",
                 CaseDefinition.VerifierType.NONE,
                 List.of(),
+                null,
+                null,
+                null,
                 CaseDefinition.Status.ACTIVE);
     }
 }

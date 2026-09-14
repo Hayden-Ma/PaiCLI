@@ -728,7 +728,7 @@ public class ToolRegistry {
     private void registerRagTools() {
         tools.put("search_code", new Tool(
                 "search_code",
-                "RAG 语义辅助检索代码库，根据自然语言描述查找相关代码块；精确符号/字符串定位请优先用 grep_code/glob_files/read_file；默认 top_k=5，可显式指定（上限 30）",
+                "RAG 语义辅助检索代码库，根据自然语言描述定位相关代码块的位置指针（文件:行区间）；精确符号/字符串定位请优先用 grep_code/glob_files/read_file；默认 top_k=5，可显式指定（上限 30）。结果基于索引快照，可能滞后于磁盘，回答前必须 read_file 读取指针指向的当前内容。",
                 createParameters(
                         new Param("query", "string", "自然语言查询描述，例如'用户登录的实现'", true),
                         new Param("top_k", "integer", "返回结果数量（默认 5，上限 30）", false)
@@ -751,6 +751,7 @@ public class ToolRegistry {
                         }
 
                         List<VectorStore.SearchResult> results = retriever.hybridSearch(query, topK);
+                        results = retriever.markStale(results);
                         if (results.isEmpty()) {
                             return "未找到与查询相关的代码。";
                         }

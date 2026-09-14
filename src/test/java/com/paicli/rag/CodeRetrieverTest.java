@@ -3,11 +3,15 @@ package com.paicli.rag;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CodeRetrieverTest {
 
@@ -60,6 +64,45 @@ class CodeRetrieverTest {
 
             assertFalse(results.isEmpty());
             assertEquals("Agent.run(String userInput)", results.get(0).name());
+        }
+    }
+
+    @Test
+    void markStaleFlagsFilesWhoseContentChangedAfterIndexing(@TempDir Path tempDir) throws Exception {
+        String previous = System.setProperty("paicli.rag.dir", tempDir.resolve("rag").toString());
+        try {
+            Path project = tempDir.resolve("proj");
+            Files.createDirectories(project);
+            Path tracked = project.resolve("Tracked.java");
+            Files.writeString(tracked, "class Tracked {}\n");
+
+            try (VectorStore writer = new VectorStore(project.toString())) {
+                writer.upsertFileHash(tracked.toString(), FileHashes.sha256Hex(tracked));
+            }
+
+            try (CodeRetriever retriever = new CodeRetriever(project.toString(), new StubEmbeddingClient())) {
+                List<VectorStore.SearchResult> results = List.of(
+                        new VectorStore.SearchResult(tracked.toString(), "file", "Tracked.java",
+                                "class Tracked {}", 0.9));
+
+                List<VectorStore.SearchResult> fresh = retriever.markStale(results);
+                assertFalse(fresh.get(0).stale(), "内容未变不应标记 stale");
+
+                Files.writeString(tracked, "class Tracked { int changed = 1; }\n");
+                List<VectorStore.SearchResult> stale = retriever.markStale(results);
+                assertTrue(stale.get(0).stale(), "内容变更应标记 stale");
+
+                List<VectorStore.SearchResult> ghost = List.of(
+                        new VectorStore.SearchResult(project.resolve("Ghost.java").toString(), "file",
+                                "Ghost", "x", 0.5));
+                assertTrue(retriever.markStale(ghost).get(0).stale(), "文件不存在应视为 stale");
+            }
+        } finally {
+            if (previous != null) {
+                System.setProperty("paicli.rag.dir", previous);
+            } else {
+                System.clearProperty("paicli.rag.dir");
+            }
         }
     }
 }

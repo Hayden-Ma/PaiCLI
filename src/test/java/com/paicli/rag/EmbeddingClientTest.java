@@ -10,7 +10,7 @@ class EmbeddingClientTest {
     void testDefaultConfiguration() {
         EmbeddingClient client = new EmbeddingClient();
         assertEquals("ollama", client.getProvider());
-        assertEquals("nomic-embed-text:latest", client.getModel());
+        assertEquals("bge-m3:latest", client.getModel());
     }
 
     @Test

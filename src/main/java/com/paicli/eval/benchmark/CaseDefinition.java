@@ -3,12 +3,16 @@ package com.paicli.eval.benchmark;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonValue;
+import com.paicli.eval.LlmJudge;
 
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 /**
@@ -29,10 +33,15 @@ public record CaseDefinition(
         @JsonProperty(value = "prompt", required = true) String prompt,
         @JsonProperty(value = "verifierType", required = true) VerifierType verifierType,
         @JsonProperty(value = "verifierCommand", required = true) List<String> verifierCommand,
+        @JsonProperty(value = "judgeArtifact", required = false) Optional<String> judgeArtifact,
+        @JsonProperty(value = "judgePassThreshold", required = false) Optional<Double> judgePassThreshold,
+        @JsonProperty(value = "rubrics", required = false) Optional<List<LlmJudge.Rubric>> rubrics,
         @JsonProperty(value = "status", required = true) Status status
 ) {
     public static final String WORKSPACE_PLACEHOLDER = "{workspace}";
     public static final String EVIDENCE_PLACEHOLDER = "{evidence}";
+    private static final String DEFAULT_JUDGE_ARTIFACT = "answer.txt";
+    private static final double DEFAULT_JUDGE_PASS_THRESHOLD = 60.0;
     private static final Pattern SAFE_IDENTIFIER =
             Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,127}");
     private static final Pattern WINDOWS_ABSOLUTE =
@@ -42,6 +51,7 @@ public record CaseDefinition(
 
     public CaseDefinition {
         verifierCommand = verifierCommand == null ? null : List.copyOf(verifierCommand);
+        rubrics = rubrics == null ? null : rubrics.map(List::copyOf);
     }
 
     void validate(Path suiteDirectory) {
@@ -64,8 +74,38 @@ public record CaseDefinition(
             throw new IllegalArgumentException("non-active case weight must be 0: " + id);
         }
         requireText(prompt, "case prompt");
+        validateJudgeArtifact();
         resolveFixture(suiteDirectory);
         validateVerifierCommand();
+    }
+
+    /** LLM-judge 判定的产物文件，相对 workspace；默认 answer.txt。 */
+    public String judgeArtifactOrDefault() {
+        return judgeArtifact == null || judgeArtifact.isEmpty()
+                ? DEFAULT_JUDGE_ARTIFACT : judgeArtifact.get().trim();
+    }
+
+    /** LLM-judge 通过阈值（0-100，默认 60）。 */
+    public double effectiveJudgePassThreshold() {
+        return judgePassThreshold == null
+                ? DEFAULT_JUDGE_PASS_THRESHOLD : judgePassThreshold.get();
+    }
+
+    private void validateJudgeArtifact() {
+        if (judgeArtifact == null || judgeArtifact.isEmpty()) {
+            return;
+        }
+        String value = judgeArtifact.get().trim();
+        if (value.startsWith("/") || value.startsWith("\\") || value.startsWith("~/")
+                || WINDOWS_ABSOLUTE.matcher(value).matches()) {
+            throw new IllegalArgumentException("judgeArtifact must not be absolute: " + value);
+        }
+        if (PARENT_SEGMENT.matcher(value).find()) {
+            throw new IllegalArgumentException("judgeArtifact must not contain '..' path segments: " + value);
+        }
+        if (effectiveJudgePassThreshold() < 0 || effectiveJudgePassThreshold() > 100) {
+            throw new IllegalArgumentException("judgePassThreshold must be between 0 and 100: " + id);
+        }
     }
 
     /** Resolves the fixture relative to the suite file directory and rejects escapes. */
@@ -90,10 +130,14 @@ public record CaseDefinition(
         if (verifierCommand == null) {
             throw new IllegalArgumentException("verifierCommand must not be null: " + id);
         }
-        if (verifierType == VerifierType.NONE || verifierType == VerifierType.TRAJECTORY) {
+        if (verifierType == VerifierType.NONE || verifierType == VerifierType.TRAJECTORY
+                || verifierType == VerifierType.LLM_JUDGE) {
             if (!verifierCommand.isEmpty()) {
                 throw new IllegalArgumentException(
                         "verifierCommand must be empty when verifierType=" + verifierType.toJson() + ": " + id);
+            }
+            if (verifierType == VerifierType.LLM_JUDGE) {
+                validateRubrics();
             }
             return;
         }
@@ -102,6 +146,31 @@ public record CaseDefinition(
         }
         for (String argument : verifierCommand) {
             validateCommandArgument(argument);
+        }
+    }
+
+    private void validateRubrics() {
+        List<LlmJudge.Rubric> values = rubrics == null ? List.of() : rubrics.orElse(List.of());
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("llm_judge case requires rubrics: " + id);
+        }
+        Map<String, Boolean> names = new LinkedHashMap<>();
+        for (LlmJudge.Rubric rubric : values) {
+            if (rubric == null) {
+                throw new IllegalArgumentException("rubrics must not contain null entries: " + id);
+            }
+            if (rubric.name() == null || rubric.name().isBlank()) {
+                throw new IllegalArgumentException("rubric name must not be blank: " + id);
+            }
+            if (rubric.criteria() == null || rubric.criteria().isBlank()) {
+                throw new IllegalArgumentException("rubric criteria must not be blank: " + id);
+            }
+            if (rubric.weight() <= 0) {
+                throw new IllegalArgumentException("rubric weight must be positive: " + id);
+            }
+            if (names.put(rubric.name(), Boolean.TRUE) != null) {
+                throw new IllegalArgumentException("rubric names must be unique: " + id + " -> " + rubric.name());
+            }
         }
     }
 
@@ -280,7 +349,7 @@ public record CaseDefinition(
     }
 
     public enum VerifierType {
-        NONE, COMMAND, TRAJECTORY;
+        NONE, COMMAND, TRAJECTORY, LLM_JUDGE;
 
         @JsonCreator
         public static VerifierType fromJson(String value) {

@@ -74,7 +74,8 @@ public class CodeRetriever implements AutoCloseable {
                 default -> 0.0;
             };
             ranked.add(typeBoost == 0.0 ? r : new VectorStore.SearchResult(
-                    r.filePath(), r.chunkType(), r.name(), r.content(), r.similarity() + typeBoost));
+                    r.filePath(), r.chunkType(), r.name(), r.content(), r.similarity() + typeBoost,
+                    r.startLine(), r.endLine(), r.stale()));
         }
 
         ranked.sort(Comparator.comparingDouble(VectorStore.SearchResult::similarity).reversed());
@@ -96,7 +97,8 @@ public class CodeRetriever implements AutoCloseable {
             }
             merged.put(key, new VectorStore.SearchResult(
                     candidate.filePath(), candidate.chunkType(), candidate.name(),
-                    candidate.content(), best));
+                    candidate.content(), best, candidate.startLine(), candidate.endLine(),
+                    candidate.stale()));
         }
     }
 
@@ -123,7 +125,10 @@ public class CodeRetriever implements AutoCloseable {
                 result.chunkType(),
                 result.name(),
                 result.content(),
-                result.similarity() + bonus
+                result.similarity() + bonus,
+                result.startLine(),
+                result.endLine(),
+                result.stale()
         );
     }
 
@@ -158,6 +163,30 @@ public class CodeRetriever implements AutoCloseable {
      */
     public VectorStore.IndexStats getStats() throws SQLException {
         return vectorStore.getStats();
+    }
+
+    /**
+     * 查询时新鲜度校验：对结果涉及的文件重算内容 hash，与索引记录不一致的标记为 stale。
+     * 文件读取失败或索引无 hash 记录一律视为 stale——宁可误报过期，不可把旧内容当事实。
+     */
+    public List<VectorStore.SearchResult> markStale(List<VectorStore.SearchResult> results) throws SQLException {
+        if (results.isEmpty()) {
+            return results;
+        }
+        Map<String, String> indexedHashes = vectorStore.getFileHashes();
+        Map<String, Boolean> staleByFile = new HashMap<>();
+        List<VectorStore.SearchResult> checked = new ArrayList<>(results.size());
+        for (VectorStore.SearchResult result : results) {
+            boolean stale = staleByFile.computeIfAbsent(result.filePath(), file -> {
+                String current = FileHashes.sha256HexQuietly(Paths.get(file));
+                return current == null || !current.equals(indexedHashes.get(file));
+            });
+            checked.add(stale == result.stale() ? result : new VectorStore.SearchResult(
+                    result.filePath(), result.chunkType(), result.name(),
+                    result.content(), result.similarity(),
+                    result.startLine(), result.endLine(), stale));
+        }
+        return checked;
     }
 
     @Override

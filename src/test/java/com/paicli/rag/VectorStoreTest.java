@@ -83,4 +83,55 @@ class VectorStoreTest {
         store.clearProject();
         assertEquals(0, store.getStats().chunkCount());
     }
+
+    @Test
+    void testSearchReturnsLineRange() throws Exception {
+        CodeChunk chunk = CodeChunk.methodChunk("Demo.java", "Demo.run",
+                "void run() {}", 12, 34);
+        store.insertChunks(List.of(new VectorStore.CodeChunkEntry(chunk, new float[]{1.0f, 0.0f})));
+
+        List<VectorStore.SearchResult> results = store.searchByKeyword("Demo.run");
+        assertEquals(1, results.size());
+        assertEquals(12, results.get(0).startLine());
+        assertEquals(34, results.get(0).endLine());
+    }
+
+    @Test
+    void testFileHashLifecycle() throws Exception {
+        assertTrue(store.getFileHashes().isEmpty());
+
+        store.upsertFileHash("A.java", "hash-a1");
+        store.upsertFileHash("B.java", "hash-b1");
+        assertEquals(2, store.getFileHashes().size());
+
+        // 同文件重复 upsert 覆盖旧值
+        store.upsertFileHash("A.java", "hash-a2");
+        assertEquals("hash-a2", store.getFileHashes().get("A.java"));
+        assertEquals(2, store.getFileHashes().size());
+
+        // deleteFileData 清掉该文件的 hash 记录
+        store.deleteFileData("A.java");
+        assertFalse(store.getFileHashes().containsKey("A.java"));
+        assertTrue(store.getFileHashes().containsKey("B.java"));
+
+        // clearProject 清掉全部 hash
+        store.clearProject();
+        assertTrue(store.getFileHashes().isEmpty());
+    }
+
+    @Test
+    void testDeleteFileDataRemovesChunksAndRelations() throws Exception {
+        CodeChunk chunkA = CodeChunk.classChunk("A.java", "A", "class A {}", 1, 1);
+        CodeChunk chunkB = CodeChunk.classChunk("B.java", "B", "class B {}", 1, 1);
+        store.insertChunks(List.of(
+                new VectorStore.CodeChunkEntry(chunkA, new float[]{1.0f}),
+                new VectorStore.CodeChunkEntry(chunkB, new float[]{0.0f, 1.0f})
+        ));
+        store.insertRelations(List.of(new CodeRelation("A.java", "A", "B.java", "B", "extends")));
+
+        store.deleteFileData("A.java");
+
+        assertEquals(1, store.getStats().chunkCount());
+        assertEquals(0, store.getStats().relationCount());
+    }
 }
