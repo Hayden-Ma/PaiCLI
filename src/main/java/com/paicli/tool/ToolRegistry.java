@@ -76,11 +76,11 @@ public class ToolRegistry {
     private static final Set<String> SEARCH_EXCLUDED_DIRS = Set.of(
             ".git", ".paicli", "target", "node_modules", "dist", "build", "coverage", ".idea", ".gradle"
     );
-    // write_file 单次写入字节数上限。LLM 想塞超大内容时通常是误生成（重复粘贴 / hallucinate 大段日志），
+    // write_file / edit_file 单次写入字节数上限。LLM 想塞超大内容时通常是误生成（重复粘贴 / hallucinate 大段日志），
     // 5MB 对常规代码生成 / 文档撰写完全够用，超过即拒，避免磁盘灌满与误覆盖。
     private static final int MAX_WRITE_FILE_BYTES = 5 * 1024 * 1024;
     // 需要审计的内置工具（与 ApprovalPolicy 的 DANGEROUS_TOOLS 保持一致）；MCP 工具按前缀动态纳入审计。
-    private static final Set<String> AUDIT_TOOLS = Set.of("write_file", "execute_command", "create_project", "revert_turn");
+    private static final Set<String> AUDIT_TOOLS = Set.of("write_file", "edit_file", "execute_command", "create_project", "revert_turn");
     private final Map<String, Tool> tools = new ConcurrentHashMap<>();
     private final Map<String, McpRegisteredTool> mcpTools = new ConcurrentHashMap<>();
     private final long commandTimeoutSeconds;
@@ -260,10 +260,10 @@ public class ToolRegistry {
     }
 
     /**
-     * 注册 write_file 写入观察者：参数 (path, [before, after])，
+     * 注册 write_file / edit_file 写入观察者：参数 (path, [before, after])，
      * before == null 表示新建文件或读不出原文。
-     * 用于把 write_file 接到行内 diff 渲染等只读副作用里；
-     * 观察者抛异常不影响 write_file 主路径。
+     * 用于把文件修改接到行内 diff 渲染等只读副作用里；
+     * 观察者抛异常不影响文件修改主路径。
      */
     public void setWriteFileObserver(java.util.function.BiConsumer<String, String[]> observer) {
         this.writeFileObserver = observer == null ? (p, ba) -> {} : observer;
@@ -365,6 +365,17 @@ public class ToolRegistry {
                 }
         ));
 
+        tools.put("edit_file", new Tool(
+                "edit_file",
+                "精确替换项目内已有文件的一处文本；old_text 必须恰好匹配一次，模型无需输出整个文件",
+                createParameters(
+                        new Param("path", "string", "已有文件路径", true),
+                        new Param("old_text", "string", "要替换的原文片段，必须唯一匹配", true),
+                        new Param("new_text", "string", "替换后的文本；空字符串表示删除原文片段", true)
+                ),
+                this::editFile
+        ));
+
         // list_dir 工具
         tools.put("list_dir", new Tool(
                 "list_dir",
@@ -417,6 +428,45 @@ public class ToolRegistry {
                 ),
                 args -> grepCode(args)
         ));
+    }
+
+    private String editFile(Map<String, String> args) {
+        String path = args.get("path");
+        String oldText = args.get("old_text");
+        String newText = args.get("new_text");
+        if (oldText == null || oldText.isEmpty() || newText == null) {
+            throw new IllegalArgumentException("old_text 必须非空，new_text 必须提供");
+        }
+        Path safe = pathGuard.resolveSafe(path);
+        if (!Files.isRegularFile(safe)) {
+            throw new IllegalArgumentException("目标不是已有的普通文件: " + path);
+        }
+        try {
+            String before = Files.readString(safe, StandardCharsets.UTF_8);
+            int first = before.indexOf(oldText);
+            if (first < 0) {
+                throw new IllegalArgumentException("old_text 在文件中不存在: " + path);
+            }
+            if (before.indexOf(oldText, first + 1) >= 0) {
+                throw new IllegalArgumentException("old_text 在文件中出现多次，请提供更长的上下文: " + path);
+            }
+            String after = before.substring(0, first) + newText + before.substring(first + oldText.length());
+            int contentBytes = after.getBytes(StandardCharsets.UTF_8).length;
+            if (contentBytes > MAX_WRITE_FILE_BYTES) {
+                throw new PolicyException("编辑后文件 " + contentBytes + " 字节超过 "
+                        + (MAX_WRITE_FILE_BYTES / 1024 / 1024) + "MB 上限");
+            }
+            Files.writeString(safe, after, StandardCharsets.UTF_8);
+            try {
+                writeFileObserver.accept(path, new String[]{before, after});
+            } catch (Exception ignored) {
+                // diff 展示失败不影响已完成的文件编辑
+            }
+            runPostEditLspHook(path, safe);
+            return "文件已编辑: " + path;
+        } catch (IOException e) {
+            throw new IllegalStateException("编辑文件失败: " + e.getMessage(), e);
+        }
     }
 
     private String readFileForTool(Path file, Map<String, String> args) throws IOException {
@@ -1224,7 +1274,7 @@ public class ToolRegistry {
     /**
      * 执行工具调用
      *
-     * 危险工具（write_file / execute_command / create_project）会写一行审计：
+     * 危险工具（write_file / edit_file / execute_command / create_project）会写一行审计：
      * - 策略拦截（PathGuard / CommandGuard / 文件大小上限）→ deny
      * - 普通异常 → error
      * - 其他情况 → allow（仅表示工具调用真的发生过，工具内部的业务错误仍以返回字符串呈现给 LLM）

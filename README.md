@@ -47,7 +47,7 @@ mvn test -DskipTests=false
 - 长期记忆通过 `/save <事实>` 或用户明确说“记一下 / 记住”时的 `save_memory` 保存关键事实，默认项目级作用域，跨会话复用
 - 项目级记忆通过 `PAI.md` / `.paicli/PAI.md` 启动自动注入，适合提交到仓库的团队共享规则；`PAI.local.md` / `.paicli/PAI.local.md` 只做本地覆盖
 - 注入给模型的相关记忆只使用长期稳定事实，不把当前轮短期对话误当成“历史记忆”
-- 对话接近预算时自动做摘要压缩；可选 Session Memory 增量摘要快速路径，不可用时回退完整对话摘要
+- 对话接近预算时自动做四栏目摘要压缩；过长的旧历史分段覆盖并合并，格式不合格或未减少 Token 时保留原对话。可选 Session Memory 增量摘要快速路径，不可用时回退完整对话摘要；摘要有损，超大工具结果另有落盘读回机制
 - 新增 `/memory` 查看状态、`/memory list/search/delete/clear` 管理长期记忆、`/save` 手动保存事实；Agent 在用户明确说“记一下 / 记住”时可调用 `save_memory`
 
 ### 第四期：RAG 检索 + 代码库理解
@@ -69,8 +69,8 @@ mvn test -DskipTests=false
 
 ### 第六期：Human-in-the-Loop + 审批流
 
-- 危险操作静态规则识别：`write_file`、`execute_command`、`create_project`、`revert_turn`
-- 三级危险等级：高危（`execute_command`）、中危（`write_file` / `create_project`）
+- 危险操作静态规则识别：`write_file`、`edit_file`、`execute_command`、`create_project`、`revert_turn`
+- 三级危险等级：高危（`execute_command`）、中危（`write_file` / `edit_file` / `create_project`）
 - 审批决策：批准 / 全部放行 / 拒绝 / 跳过 / 修改参数后执行
 - HITL 默认关闭，通过 `/hitl on` 启用
 - 新增 `/hitl` CLI 命令，支持 `/hitl on`、`/hitl off`、`/hitl`（查看状态）
@@ -245,7 +245,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 
 ### 第十七期：LSP 诊断注入（MVP）
 
-- `write_file` 成功后触发 post-edit 诊断，诊断结果不会阻塞工具主流程
+- `write_file` / `edit_file` 成功后触发 post-edit 诊断，诊断结果不会阻塞工具主流程
 - 当前 MVP 对 Java 文件使用 JavaParser 做轻量语法诊断，不依赖本机安装 JDT LS
 - ReAct、Plan-and-Execute、Multi-Agent 三条路径都会在下一轮 LLM 请求前注入 pending 诊断
 - 诊断按 error / warning / info、文件、行列号、message 格式化，默认最多注入 20 条
@@ -305,7 +305,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 - 微信侧使用 iLink `getupdates` 长轮询收消息、`sendmessage` 分片回消息，不依赖 SSE；这是独立通道，不是 Skill，也不是 Runtime API
 - 运行时只接受绑定用户私聊；普通消息单并发排队，`/help`、`/status`、`/pause`、`/resume`、`/stop` 走队列外控制路径
 - 微信侧用户消息会回显到 PaiCLI 终端 transcript；PaiCLI 终端继续显示 thinking / 工具调用过程，微信侧只接收 assistant 正文。iLink 协议层仍是 `text_item.text` 文本消息，没有显式 Markdown parse mode；PaiCLI 会保留 ClawBot 稳定支持的 Markdown 子集（列表、引用、粗体、行内代码、真实代码块），把标题转成粗体标题、把表格转成移动端更稳的键值/列表，并过滤图片 Markdown / H5-H6 / 中文斜体等兼容性差的标记；非代码类 fenced block（流程说明、长中文箭头链）会解包并换行，避免微信侧出现横向滚动代码块。iLink 不提供真正 SSE 或改单条消息能力。
-- 微信通道使用非交互式默认拒绝策略：只读工具默认允许，`write_file` / `create_project` 继续受 workspace PathGuard 限制，`execute_command` 必须精确命中命令白名单，`mcp__*` 必须命中 MCP 白名单，`revert_turn` 和浏览器会话切换默认拒绝
+- 微信通道使用非交互式默认拒绝策略：只读工具默认允许，`write_file` / `edit_file` / `create_project` 继续受 workspace PathGuard 限制，`execute_command` 必须精确命中命令白名单，`mcp__*` 必须命中 MCP 白名单，`revert_turn` 和浏览器会话切换默认拒绝
 - 当前文本 MVP 会保留图片 / 文件消息的媒体元数据提示，但 CDN 下载解密、图片块输入和 `/send` 文件推送仍待后续媒体链路补齐
 
 ### 第六期 HITL 增强（路径围栏 / 命令快速拒绝 / 操作审计）
@@ -315,7 +315,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 - `PathGuard` 路径围栏：文件类工具强制限定在项目根之内，拦截绝对路径外逃 / `..` 穿越 / 符号链接逃逸
 - `CommandGuard` 命令快速拒绝：HITL 之前的 fast-fail 黑名单（`sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / `curl|sh` / `find /` / `chmod 777 /` / `shutdown`），减少 HITL 弹窗骚扰
 - `AuditLog` 结构化审计：危险工具调用按天写 JSONL 到 `~/.paicli/audit/`，含 `outcome (allow|deny|error)` 与 `approver (hitl|policy|none)`；`revert_turn` 也纳入危险工具链
-- `write_file` 单文件 5MB 上限
+- `write_file` / `edit_file` 写入后单文件 5MB 上限
 - CLI 命令：`/policy` 查看安全策略状态、`/audit [N]` 看最近 N 条审计
 
 **为什么不叫沙箱**：本地 Agent CLI（参考 Claude Code / Cursor / Aider）默认都不做容器/VM 沙箱——沙箱削弱 Agent 能力、给虚假安全感、体验更差。生产级 Agent 沙箱实际是 microVM-level（Devin / Modal / Anthropic Computer Use 用 Firecracker / gVisor）。PaiCLI 的安全模型是 **HITL + 路径校验 + 命令快速拒绝 + 审计**，不是隔离。
@@ -382,7 +382,7 @@ Tips for getting started:
 
 ### 第六期
 
-- 🔒 危险操作静态规则识别（`write_file` / `execute_command` / `create_project` / `revert_turn`）
+- 🔒 危险操作静态规则识别（`write_file` / `edit_file` / `execute_command` / `create_project` / `revert_turn`）
 - ⚠️ 三级危险等级展示（高危 / 中危 / 安全）
 - ✅ 审批决策：批准、全部放行、拒绝、跳过、修改参数后执行
 - 🔓 HITL 默认关闭，`/hitl on` 启用、`/hitl off` 关闭
@@ -438,7 +438,7 @@ Plan/FILE_ONLY 配置；题面、两份 CSV、runtime 与逐题合同由同一�
 
 - 🛡️ 路径围栏：文件类工具强制限定在项目根之内，绝对路径外逃 / `..` 穿越 / 符号链接逃逸全部拦截
 - 🧯 命令快速拒绝：HITL 之前的 fast-fail 黑名单（`sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / `curl|sh` / `find /` / `chmod 777 /` / `shutdown`），减少 HITL 弹窗骚扰
-- 📦 资源上限：`write_file` 5MB；`execute_command` 60 秒超时 + 8KB 输出截断
+- 📦 资源上限：`write_file` / `edit_file` 写入后 5MB；`execute_command` 60 秒超时 + 8KB 输出截断
 - 📋 结构化审计：危险工具调用按天写一行 JSONL 到 `~/.paicli/audit/`，可通过 `/audit [N]` 查看
 - 🧱 定位：HITL 之外的辅助层，不是沙箱、不提供进程隔离
 
@@ -736,6 +736,7 @@ I
 
 - `read_file` - 读取文件内容
 - `write_file` - 写入文件内容
+- `edit_file` - 精确替换已有文件中唯一匹配的文本片段，模型无需输出整个文件
 - `list_dir` - 列出目录内容
 - `glob_files` - 按文件名 glob 实时查找项目内文件（只读，自动跳过常见构建/依赖目录）
 - `grep_code` - 按关键字或正则实时搜索项目内代码，优先使用 ripgrep，返回文件、行号、可选上下文、partial 状态与 suggested_reads
@@ -750,7 +751,7 @@ I
 
 同一轮模型返回多个工具调用时，PaiCLI 会并行执行这些工具；如果工具之间有依赖关系，模型应分多轮调用。
 
-文件类与代码检索工具（`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `create_project`）路径强制限定在项目根之内，越界请求会被策略层拒绝；`execute_command` 通过命令黑名单拦截 `sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / `curl|sh` 等。`revert_turn` 会批量回写工作区，默认触发 HITL 和审计。所有 `mcp__` 前缀工具默认触发 HITL 和审计。详见 `/policy`。
+文件类与代码检索工具（`read_file` / `write_file` / `edit_file` / `list_dir` / `glob_files` / `grep_code` / `create_project`）路径强制限定在项目根之内，越界请求会被策略层拒绝。`edit_file` 使用 `path`、`old_text`、`new_text` 参数，原文必须在已有文件中恰好出现一次；多处匹配时请补充上下文。编辑后的文件上限为 5MB，编辑操作与整文件写入一样触发 HITL、审计、diff 展示和编辑后诊断。`execute_command` 通过命令黑名单拦截 `sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / `curl|sh` 等。`revert_turn` 会批量回写工作区，默认触发 HITL 和审计。所有 `mcp__` 前缀工具默认触发 HITL 和审计。详见 `/policy`。
 
 ## 命令
 

@@ -32,8 +32,8 @@ class ConversationHistoryCompactorTest {
         List<LlmClient.Message> history = new ArrayList<>();
         history.add(LlmClient.Message.system("SYSTEM_PROMPT"));
         for (int i = 0; i < 3; i++) {
-            history.add(LlmClient.Message.user("Q" + i));
-            history.add(LlmClient.Message.assistant("A" + i));
+            history.add(LlmClient.Message.user("Q" + i + longText(100)));
+            history.add(LlmClient.Message.assistant("A" + i + longText(100)));
         }
 
         boolean compacted = c.compactNow(history);
@@ -152,6 +152,21 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
+    void summaryThatIsLongerThanOriginalKeepsHistoryIntact() {
+        StubCompactor c = new StubCompactor(longText(10_000), 1);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("S"));
+        for (int i = 0; i < 3; i++) {
+            history.add(LlmClient.Message.user("Q" + i));
+            history.add(LlmClient.Message.assistant("A" + i));
+        }
+        List<LlmClient.Message> before = List.copyOf(history);
+
+        assertFalse(c.compactNow(history));
+        assertEquals(before, history);
+    }
+
+    @Test
     void llmFailureDoesNotCorruptHistory() {
         StubCompactor c = new StubCompactor(null, 2) {
             @Override
@@ -174,10 +189,124 @@ class ConversationHistoryCompactorTest {
         assertEquals(before, history.size());
     }
 
+    @Test
+    void longSummaryInputCoversEarlyMiddleAndRecentMessages() {
+        List<LlmClient.Message> messages = List.of(
+                LlmClient.Message.user("ORIGINAL_REQUIREMENT " + longText(60_000)),
+                LlmClient.Message.assistant("MIDDLE_DECISION " + longText(60_000)),
+                LlmClient.Message.user("LATEST_UNRESOLVED_DECISION"));
+
+        List<String> chunks = ConversationHistoryCompactor.renderSummaryChunks(messages);
+        String rendered = String.join("", chunks);
+
+        assertTrue(chunks.size() >= 3);
+        assertTrue(chunks.stream().allMatch(chunk -> chunk.length() <= 60_000));
+        assertTrue(rendered.contains("ORIGINAL_REQUIREMENT"));
+        assertTrue(rendered.contains("MIDDLE_DECISION"));
+        assertTrue(rendered.contains("LATEST_UNRESOLVED_DECISION"));
+        assertFalse(rendered.contains("中间历史过长"));
+    }
+
+    @Test
+    void exactSummaryInputLimitKeepsAllCharacters() {
+        String content = longText(59_992);
+        List<String> chunks = ConversationHistoryCompactor.renderSummaryChunks(List.of(LlmClient.Message.user(content)));
+
+        assertEquals(1, chunks.size());
+        assertEquals(60_000, chunks.get(0).length());
+        assertEquals("USER: " + content + "\n\n", chunks.get(0));
+    }
+
+    @Test
+    void longHistorySummarizesEveryChunkBeforeMerging() throws IOException {
+        RecordingClient client = new RecordingClient();
+        ConversationHistoryCompactor compactor = new ConversationHistoryCompactor(client);
+        List<LlmClient.Message> messages = List.of(
+                LlmClient.Message.user("EARLY_REQUIREMENT " + longText(60_000)),
+                LlmClient.Message.assistant("MIDDLE_DECISION " + longText(60_000)),
+                LlmClient.Message.user("RECENT_UNRESOLVED_ITEM"));
+
+        String summary = compactor.summarize(messages);
+
+        assertEquals(RecordingClient.STRUCTURED_SUMMARY.trim(), summary);
+        assertEquals(ConversationHistoryCompactor.renderSummaryChunks(messages).size() + 1,
+                client.prompts.size());
+        assertTrue(client.prompts.stream().anyMatch(prompt -> prompt.contains("EARLY_REQUIREMENT")));
+        assertTrue(client.prompts.stream().anyMatch(prompt -> prompt.contains("MIDDLE_DECISION")));
+        assertTrue(client.prompts.stream().anyMatch(prompt -> prompt.contains("RECENT_UNRESOLVED_ITEM")));
+        assertTrue(client.prompts.get(client.prompts.size() - 1).contains("PARTIAL_SUMMARY_1"));
+    }
+
+    @Test
+    void rejectsUnstructuredSummaryWithoutChangingHistory() {
+        RecordingClient client = new RecordingClient(true);
+        ConversationHistoryCompactor compactor = new ConversationHistoryCompactor(client, 1);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("SYSTEM"));
+        for (int i = 0; i < 3; i++) {
+            history.add(LlmClient.Message.user("Q" + i + longText(2_000)));
+            history.add(LlmClient.Message.assistant("A" + i));
+        }
+        List<LlmClient.Message> before = List.copyOf(history);
+
+        assertFalse(compactor.compactIfNeeded(history, 100));
+        assertEquals(before, history);
+        assertEquals(2, client.prompts.size());
+    }
+
     private static String longText(int chars) {
         StringBuilder sb = new StringBuilder(chars);
         for (int i = 0; i < chars; i++) sb.append('x');
         return sb.toString();
+    }
+
+    private static final class RecordingClient implements LlmClient {
+        private static final String STRUCTURED_SUMMARY = """
+                ## 当前目标与成功条件
+                goal
+                ## 用户要求与已确认决定
+                requirement
+                ## 已完成工作及证据
+                evidence
+                ## 未解决问题与下一步
+                next
+                """;
+        private final List<String> prompts = new ArrayList<>();
+        private final boolean invalidRepair;
+
+        private RecordingClient() {
+            this(false);
+        }
+
+        private RecordingClient(boolean invalidRepair) {
+            this.invalidRepair = invalidRepair;
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools) {
+            String prompt = messages.get(1).content();
+            prompts.add(prompt);
+            String content = prompt.contains("按时间顺序合并")
+                    ? STRUCTURED_SUMMARY
+                    : prompt.contains("请仅整理下面已有的会话摘要") && !invalidRepair
+                        ? STRUCTURED_SUMMARY : "PARTIAL_SUMMARY_" + prompts.size();
+            return new ChatResponse("assistant", content, List.of(), 0, 0);
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) {
+            return chat(messages, tools);
+        }
+
+        @Override
+        public String getModelName() {
+            return "test";
+        }
+
+        @Override
+        public String getProviderName() {
+            return "test";
+        }
     }
 
     /** 测试用 stub：summarize 返回固定字符串，避免真实 LLM 依赖。 */

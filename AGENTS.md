@@ -104,7 +104,7 @@ mvn test -DskipTests=false                  # 全量回归
 | Plan-and-Execute | `PlanExecuteAgent.java` | `/plan` |
 | Multi-Agent | `AgentOrchestrator.java` | `/team` |
 
-核心内置工具 11 个：`read_file` / `write_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn`
+核心内置工具 12 个：`read_file` / `write_file` / `edit_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn`。`edit_file` 仅精确替换已有文件中唯一匹配的 `old_text`，局部修改时模型无需输出整个文件；与 `write_file` 一样受路径限制、HITL 审批和审计约束。
 
 代码库理解默认走 Claude Code 式实时探索：`glob_files` 找候选文件、`grep_code` 精确定位符号或字符串、`read_file` 按需读取具体行段。`grep_code` 优先使用本机 `ripgrep`，不可用时回退到 Java 扫描；结果受 `max_results` / `head_limit` / `max_chars` 预算约束，返回 `partial: true` 或 `suggested_reads` 时应继续缩小搜索范围或按建议读取行段。`search_code` 是 RAG 语义辅助，适合模糊自然语言、关键词不明确、常规搜索无果、巨型/跨知识检索场景，不作为精确代码定位的首选。
 
@@ -190,7 +190,7 @@ src/main/java/com/paicli/
 - system prompt Memory Policy：记忆是线索不是事实，行动前先对照当前文件核实；不一致以文件为准并提示用户更新记忆
 - 长期记忆必须可审计和可删除：`/memory list` / `/memory search <关键词>` / `/memory delete <id>` / `/memory verify <id>` / `/memory replace <id> <事实>` / `/memory clear`
 - 当前短期上下文只有各 Agent 实际发给 LLM 的 `conversationHistory`，不要再维护 `MemoryManager.shortTermMemory` 之类的影子消息副本。
-- 自动压缩有两条路径：`PAICLI_SESSION_MEMORY_COMPACTION_ENABLED=true` 时优先使用阈值前异步生成的增量 Session Memory 摘要；摘要未就绪、失效或收益不足时回退 `ConversationHistoryCompactor` 完整摘要。两条路径最终都原地重建同一份 conversationHistory。
+- 自动压缩有两条路径：`PAICLI_SESSION_MEMORY_COMPACTION_ENABLED=true` 时优先使用阈值前异步生成的增量 Session Memory 摘要；摘要未就绪、失效或收益不足时回退 `ConversationHistoryCompactor` 完整摘要。完整摘要按目标、用户要求、已完成证据、待办四个栏目整理；超出单次摘要输入的旧历史按顺序分段摘要再分层合并，不静默丢弃中段；最终栏目不全时尝试重整一次，仍不合格则保持原始 history。若重建后的 Token 数没有下降，也保持原始 history。两条路径最终都原地重建同一份 conversationHistory。摘要仍是有损的；当前没有对旧工具结果做会话内 microcompact。
 - 自动压缩阈值按 Claude Code 风格预留摘要输出和安全缓冲：大窗口使用 `window - 20k - 13k`，例如 200k 窗口约 167k 触发、1M 窗口约 967k 触发；小窗口按比例缩小预留。
 - ReAct、Plan 单任务和 SubAgent 默认不设固定迭代上限；`paicli.react.hard.max.iterations` 仅在显式配置正整数时启用。显式轮数/Token 预算或停滞检测命中后必须禁用工具并做一次最佳努力收尾，返回“部分完成”结果，不能直接丢弃已有工作。
 

@@ -104,7 +104,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 短期上下文只有各 Agent 实际发送的 conversationHistory；`MemoryManager` 只管理长期记忆检索和 token 统计，不再复制用户、助手与工具消息。
 - `AutoCompactionManager` 统一协调两条自动压缩路径：
   1. `PAICLI_SESSION_MEMORY_COMPACTION_ENABLED=true` 时，`SessionMemoryCompactor` 在阈值前异步维护每份 history 独立的增量会话摘要，到阈值后优先使用摘要并保留最近原始消息。
-  2. 摘要未就绪、边界失效、压缩后仍超阈值或功能关闭时，回退 `ConversationHistoryCompactor` 完整摘要。
+  2. 摘要未就绪、边界失效、压缩后仍超阈值或功能关闭时，回退 `ConversationHistoryCompactor` 完整摘要。旧历史超过单次 60000 字符输入时按顺序分段，再把各段摘要分层合并；最终必须包含目标、用户要求、已完成证据、未解决事项四个栏目，格式错误会重整一次，仍失败则保持原 history。原始消息分割仍从 user 边界开始，最近轮次原样保留。
 - 两条路径都在 user message 边界切割，直接原地重建真实 conversationHistory；Plan 并行任务和 Team worker 的预计算状态互相隔离。
 - ReAct、Plan、SubAgent 都接入同一个协调器；`/compact` 始终走稳定的完整摘要路径并保留最近 1 个 user 轮次。
 - `ConversationLedger` 与可变 conversationHistory 解耦：默认 CLI 的 ReAct、Plan、Team（含 planner / worker / reviewer）共享一个 append-only JSONL。每行带 schemaVersion / sessionId / sequence / timestamp / event / mode / actor / source，并保留完整 `LlmClient.Message`；最终响应的 reasoning 也只在账本中完整保留，不改变 provider 的发送视图语义

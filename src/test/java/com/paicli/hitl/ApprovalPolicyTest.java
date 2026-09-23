@@ -11,6 +11,7 @@ class ApprovalPolicyTest {
     @Test
     void writeFileRequiresApproval() {
         assertTrue(ApprovalPolicy.requiresApproval("write_file"));
+        assertTrue(ApprovalPolicy.requiresApproval("edit_file"));
     }
 
     @Test
@@ -63,6 +64,7 @@ class ApprovalPolicyTest {
     @Test
     void writeFileIsMediumDanger() {
         assertEquals("🟡 中危", ApprovalPolicy.getDangerLevel("write_file"));
+        assertEquals("🟡 中危", ApprovalPolicy.getDangerLevel("edit_file"));
     }
 
     @Test
@@ -85,15 +87,17 @@ class ApprovalPolicyTest {
     void getDangerousToolsContainsAllThree() {
         Set<String> tools = ApprovalPolicy.getDangerousTools();
         assertTrue(tools.contains("write_file"));
+        assertTrue(tools.contains("edit_file"));
         assertTrue(tools.contains("execute_command"));
         assertTrue(tools.contains("create_project"));
         assertTrue(tools.contains("revert_turn"));
-        assertEquals(4, tools.size());
+        assertEquals(5, tools.size());
     }
 
     @Test
     void riskDescriptionNotBlankForDangerousTools() {
         assertFalse(ApprovalPolicy.getRiskDescription("write_file").isBlank());
+        assertFalse(ApprovalPolicy.getRiskDescription("edit_file").isBlank());
         assertFalse(ApprovalPolicy.getRiskDescription("execute_command").isBlank());
         assertFalse(ApprovalPolicy.getRiskDescription("create_project").isBlank());
         assertFalse(ApprovalPolicy.getRiskDescription("revert_turn").isBlank());
@@ -132,7 +136,7 @@ class ApprovalPolicyTest {
     @Test
     void mcpToolStaysOutsideOfBuiltinDangerousTools() {
         // mcp__ 前缀不应污染 DANGEROUS_TOOLS 集合本身（保证 set 含义清晰）
-        assertEquals(4, ApprovalPolicy.getDangerousTools().size());
+        assertEquals(5, ApprovalPolicy.getDangerousTools().size());
         assertFalse(ApprovalPolicy.getDangerousTools().contains("mcp__demo__tool"));
     }
 }

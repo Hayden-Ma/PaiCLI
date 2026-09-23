@@ -316,6 +316,72 @@ class ToolRegistryTest {
     }
 
     @Test
+    void editFileReplacesOnlyUniqueTextAndReportsDiff(@TempDir Path tempDir) throws Exception {
+        Path file = tempDir.resolve("Sample.java");
+        Files.writeString(file, "class Sample {\n  int value = 1;\n  int keep = 2;\n}\n");
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        List<String[]> diffs = new ArrayList<>();
+        registry.setWriteFileObserver((path, beforeAfter) -> diffs.add(beforeAfter));
+
+        ToolOutput result = registry.executeToolOutput("edit_file", MAPPER.writeValueAsString(Map.of(
+                "path", "Sample.java", "old_text", "int value = 1", "new_text", "int value = 3")));
+
+        assertTrue(result.successful(), result.text());
+        assertEquals("class Sample {\n  int value = 3;\n  int keep = 2;\n}\n", Files.readString(file));
+        assertEquals(1, diffs.size());
+        assertTrue(diffs.get(0)[0].contains("value = 1"));
+        assertTrue(diffs.get(0)[1].contains("value = 3"));
+    }
+
+    @Test
+    void editFileRejectsMissingOrRepeatedTextWithoutChangingFile(@TempDir Path tempDir) throws Exception {
+        Path file = tempDir.resolve("Sample.txt");
+        Files.writeString(file, "same\nsame\n");
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        ToolOutput missing = registry.executeToolOutput("edit_file", MAPPER.writeValueAsString(Map.of(
+                "path", "Sample.txt", "old_text", "missing", "new_text", "changed")));
+        ToolOutput repeated = registry.executeToolOutput("edit_file", MAPPER.writeValueAsString(Map.of(
+                "path", "Sample.txt", "old_text", "same", "new_text", "changed")));
+
+        assertFalse(missing.successful());
+        assertFalse(repeated.successful());
+        assertTrue(repeated.text().contains("出现多次"));
+        assertEquals("same\nsame\n", Files.readString(file));
+    }
+
+    @Test
+    void editFileRejectsPathOutsideProject(@TempDir Path tempDir) throws Exception {
+        Path workspace = Files.createDirectory(tempDir.resolve("workspace"));
+        Path outside = tempDir.resolve("outside.txt");
+        Files.writeString(outside, "secret");
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(workspace.toString());
+
+        ToolOutput result = registry.executeToolOutput("edit_file", MAPPER.writeValueAsString(Map.of(
+                "path", "../outside.txt", "old_text", "secret", "new_text", "changed")));
+
+        assertFalse(result.successful());
+        assertEquals("secret", Files.readString(outside));
+    }
+
+    @Test
+    void editFileRejectsOverlappingMatches(@TempDir Path tempDir) throws Exception {
+        Path file = tempDir.resolve("overlap.txt");
+        Files.writeString(file, "aaa");
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        ToolOutput result = registry.executeToolOutput("edit_file", MAPPER.writeValueAsString(Map.of(
+                "path", "overlap.txt", "old_text", "aa", "new_text", "x")));
+
+        assertFalse(result.successful());
+        assertEquals("aaa", Files.readString(file));
+    }
+
+    @Test
     void shouldGlobFilesInsideProject(@TempDir Path tempDir) throws Exception {
         Files.createDirectories(tempDir.resolve("src/main/java/com/example"));
         Files.writeString(tempDir.resolve("src/main/java/com/example/UserService.java"), "class UserService {}\n");
