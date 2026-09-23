@@ -155,11 +155,29 @@ public class Agent {
      * the text the user actually submitted.
      */
     public String run(String userInput, String submittedUserInput) {
+        return runInternal(userInput, submittedUserInput, false);
+    }
+
+    /**
+     * Runs an input that a trusted caller has already classified as an explicit task envelope.
+     * URL provenance and no-web rules still come from {@code submittedUserInput}; only the
+     * bare-title actionability heuristic is bypassed.
+     */
+    public String runExplicitTask(String userInput, String submittedUserInput) {
+        return runInternal(userInput, submittedUserInput, true);
+    }
+
+    private String runInternal(String userInput, String submittedUserInput, boolean explicitTaskEnvelope) {
         log.info("ReAct run started: inputLength={}", userInput == null ? 0 : userInput.length());
-        TurnToolPolicy turnToolPolicy = TurnToolPolicy.fromUserInput(
-                submittedUserInput,
-                toolRegistry.isSharedBrowserSession(),
-                toolRegistry.hasAgentOwnedCurrentBrowserPage());
+        TurnToolPolicy turnToolPolicy = explicitTaskEnvelope
+                ? TurnToolPolicy.forExplicitTask(
+                        submittedUserInput,
+                        toolRegistry.isSharedBrowserSession(),
+                        toolRegistry.hasAgentOwnedCurrentBrowserPage())
+                : TurnToolPolicy.fromUserInput(
+                        submittedUserInput,
+                        toolRegistry.isSharedBrowserSession(),
+                        toolRegistry.hasAgentOwnedCurrentBrowserPage());
         pruneHistoricalImagePayloads();
         storeExplicitBrowserMemoryHint(userInput);
 

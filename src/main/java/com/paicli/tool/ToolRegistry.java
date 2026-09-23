@@ -102,6 +102,10 @@ public class ToolRegistry {
     private SnapshotService snapshotService = SnapshotService.forProject(Path.of(projectPath));
     private boolean customSnapshotService;
     private boolean sanitizeCommandEnvironment;
+    private volatile CommandSandbox commandSandbox;
+    private volatile CommandExecutionObserver commandExecutionObserver;
+    private final java.util.concurrent.atomic.AtomicLong commandInvocationIds = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong commandObservationFailures = new java.util.concurrent.atomic.AtomicLong();
     private volatile String currentProvider = "";
     private volatile String currentModel = "";
 
@@ -156,6 +160,29 @@ public class ToolRegistry {
      */
     public void setSanitizeCommandEnvironment(boolean sanitizeCommandEnvironment) {
         this.sanitizeCommandEnvironment = sanitizeCommandEnvironment;
+    }
+
+    /** Optional diagnostics only; observer exceptions never change command policy or results. */
+    public void setCommandExecutionObserver(CommandExecutionObserver observer) {
+        this.commandExecutionObserver = observer;
+    }
+
+    public long getCommandObservationFailures() {
+        return commandObservationFailures.get();
+    }
+
+    /**
+     * Enables fail-closed macOS subprocess isolation for {@code execute_command}.
+     * The sandbox can write only below {@code workspaceRoot}, cannot use the
+     * network, and receives isolated HOME/TMPDIR directories below that root.
+     * Normal interactive behavior is unchanged until this method is called.
+     */
+    public void setCommandSandboxRoot(Path workspaceRoot) {
+        this.commandSandbox = CommandSandbox.enable(workspaceRoot);
+    }
+
+    boolean isCommandSandboxEnabled() {
+        return commandSandbox != null;
     }
 
     public void setContextProfile(ContextProfile contextProfile) {
@@ -846,6 +873,23 @@ public class ToolRegistry {
         this.searchProvider = Objects.requireNonNull(searchProvider, "searchProvider");
     }
 
+    /**
+     * Trusted embedding seam for an offline transport. Install the complete set before any Web use;
+     * normal CLI construction retains the production providers and network policy. Not a model tool.
+     */
+    protected final synchronized void installWebDependencies(SearchProvider search, WebFetcher fetcher,
+                                                              NetworkPolicy policy) {
+        Objects.requireNonNull(search, "search");
+        Objects.requireNonNull(fetcher, "fetcher");
+        Objects.requireNonNull(policy, "policy");
+        if (searchProvider != null || webFetcher != null || networkPolicy != null) {
+            throw new IllegalStateException("Web dependencies already initialized");
+        }
+        searchProvider = search;
+        webFetcher = fetcher;
+        networkPolicy = policy;
+    }
+
     private synchronized WebFetcher webFetcher() {
         if (webFetcher == null) {
             webFetcher = new WebFetcher();
@@ -1212,9 +1256,14 @@ public class ToolRegistry {
             Map<String, String> argMap = new HashMap<>();
             args.fields().forEachRemaining(entry ->
                     argMap.put(entry.getKey(), entry.getValue().asText()));
-            ToolOutput output = "web_search".equals(name)
-                    ? webSearchOutput(argMap.get("query"), parseInt(argMap.get("top_k"), 5))
-                    : classifyTextOutput(tool.executor().execute(argMap));
+            ToolOutput output;
+            if ("web_search".equals(name)) {
+                output = webSearchOutput(argMap.get("query"), parseInt(argMap.get("top_k"), 5));
+            } else if ("execute_command".equals(name)) {
+                output = executeCommandOutput(argMap.get("command"));
+            } else {
+                output = classifyTextOutput(tool.executor().execute(argMap));
+            }
             if (shouldAudit) {
                 auditLog.record(AuditLog.AuditEntry.allow(name, argumentsJson, elapsedMillis(start), auditMetadata));
             }
@@ -1289,6 +1338,15 @@ public class ToolRegistry {
 
     public AuditLog getAuditLog() {
         return auditLog;
+    }
+
+    /**
+     * Completion hook for the whole TurnToolPolicy batch, including pre-registry denials.
+     * Results are immutable and in the original invocation order; this does not execute tools.
+     * The default is a no-op. Evidence consumers must use this boundary instead of observing
+     * only executeTools(), which receives the policy-authorized subset.
+     */
+    public void onPolicyToolResults(List<ToolExecutionResult> results) {
     }
 
     /**
@@ -1403,12 +1461,23 @@ public class ToolRegistry {
     }
 
     private String executeCommand(String command) {
+        return executeCommandOutput(command).text();
+    }
+
+    private ToolOutput executeCommandOutput(String command) {
         String normalized = command == null ? "" : command.trim();
+        CommandExecutionObserver observer = commandExecutionObserver;
+        CommandObservation observation = observer == null ? null
+                : new CommandObservation(commandInvocationIds.incrementAndGet(), observer, normalized, projectPath);
         if (normalized.isEmpty()) {
-            return "执行命令失败: 命令不能为空";
+            observeCommand(observation, CommandExecutionObserver.Phase.REJECTED,
+                    CommandExecutionObserver.Outcome.EMPTY_COMMAND, null);
+            return ToolOutput.failure("执行命令失败: 命令不能为空");
         }
         String denyReason = CommandGuard.check(normalized);
         if (denyReason != null) {
+            observeCommand(observation, CommandExecutionObserver.Phase.REJECTED,
+                    CommandExecutionObserver.Outcome.POLICY_DENIED, null);
             // 抛 PolicyException 让外层 executeTool 统一写 audit 并格式化拒绝消息，
             // 命令围栏与路径围栏的拒绝路径走同一个出口。
             throw new PolicyException(denyReason);
@@ -1422,13 +1491,28 @@ public class ToolRegistry {
 
         Process process = null;
         try {
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c", normalized);
-            pb.directory(new File(projectPath));
+            CommandSandbox activeSandbox = commandSandbox;
+            CommandSandbox.Invocation sandboxInvocation = activeSandbox == null
+                    ? null
+                    : activeSandbox.prepare(Path.of(projectPath), normalized);
+            ProcessBuilder pb = sandboxInvocation == null
+                    ? new ProcessBuilder("bash", "-c", normalized)
+                    : new ProcessBuilder(sandboxInvocation.arguments());
+            pb.directory(sandboxInvocation == null
+                    ? new File(projectPath)
+                    : sandboxInvocation.workingDirectory().toFile());
             pb.redirectErrorStream(true);
-            if (sanitizeCommandEnvironment) {
+            if (sanitizeCommandEnvironment || activeSandbox != null) {
                 removeSensitiveCommandEnvironment(pb.environment());
             }
+            if (activeSandbox != null) {
+                activeSandbox.configureEnvironment(pb.environment());
+            }
+            if (observation != null) observation.arguments = List.copyOf(pb.command());
             process = pb.start();
+            if (observation != null) observation.processId = process.pid();
+            observeCommand(observation, CommandExecutionObserver.Phase.STARTED,
+                    CommandExecutionObserver.Outcome.NONE, null);
 
             Process runningProcess = process;
             Future<String> outputFuture = outputReaderExecutor.submit(() -> readProcessOutput(runningProcess));
@@ -1438,25 +1522,70 @@ public class ToolRegistry {
                 process.destroyForcibly();
                 process.waitFor(2, TimeUnit.SECONDS);
                 outputFuture.cancel(true);
-                return "命令执行超时（" + commandTimeoutSeconds + "秒），已强制终止";
+                ToolOutput result = ToolOutput.failure(
+                        "命令执行超时（" + commandTimeoutSeconds + "秒），已强制终止");
+                if (observation != null && !process.isAlive()) observation.exitCode = process.exitValue();
+                observeCommand(observation, CommandExecutionObserver.Phase.FINISHED,
+                        CommandExecutionObserver.Outcome.TIMED_OUT, result);
+                return result;
             }
 
             String output = getCommandOutput(outputFuture);
             int exitCode = process.exitValue();
-            return String.format("命令执行完成 (exit code: %d)\n%s", exitCode, output);
+            String result = String.format("命令执行完成 (exit code: %d)\n%s", exitCode, output);
+            ToolOutput toolOutput = exitCode == 0 ? ToolOutput.text(result) : ToolOutput.failure(result);
+            if (observation != null) observation.exitCode = exitCode;
+            observeCommand(observation, CommandExecutionObserver.Phase.FINISHED,
+                    CommandExecutionObserver.Outcome.EXITED, toolOutput);
+            return toolOutput;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             if (process != null) {
                 process.destroyForcibly();
             }
-            return "用户取消了此次工具调用";
+            ToolOutput result = ToolOutput.failure("用户取消了此次工具调用");
+            observeCommand(observation, CommandExecutionObserver.Phase.FINISHED,
+                    CommandExecutionObserver.Outcome.INTERRUPTED, result);
+            return result;
         } catch (Exception e) {
             if (process != null) {
                 process.destroyForcibly();
             }
-            return "执行命令失败: " + e.getMessage();
+            ToolOutput result = ToolOutput.failure("执行命令失败: " + e.getMessage());
+            observeCommand(observation, CommandExecutionObserver.Phase.FINISHED,
+                    CommandExecutionObserver.Outcome.FAILED, result);
+            return result;
         } finally {
             outputReaderExecutor.shutdownNow();
+        }
+    }
+
+    private void observeCommand(CommandObservation observation, CommandExecutionObserver.Phase phase,
+                                CommandExecutionObserver.Outcome outcome, ToolOutput output) {
+        if (observation == null) return;
+        try {
+            String hash = output == null ? "" : java.util.HexFormat.of().formatHex(
+                    java.security.MessageDigest.getInstance("SHA-256").digest(output.text().getBytes(StandardCharsets.UTF_8)));
+            observation.observer.onEvent(new CommandExecutionObserver.Event(observation.id, phase,
+                    observation.command, observation.workingDirectory, observation.arguments,
+                    observation.processId, System.currentTimeMillis(), observation.exitCode, outcome,
+                    hash, output == null ? 0 : output.text().length()));
+        } catch (Throwable failure) {
+            if (failure instanceof VirtualMachineError fatal) throw fatal;
+            if (failure instanceof ThreadDeath stopped) throw stopped;
+            commandObservationFailures.incrementAndGet();
+        }
+    }
+
+    private static final class CommandObservation {
+        final long id;
+        final CommandExecutionObserver observer;
+        final String command, workingDirectory;
+        List<String> arguments = List.of();
+        long processId;
+        Integer exitCode;
+        CommandObservation(long id, CommandExecutionObserver observer, String command, String workingDirectory) {
+            this.id = id; this.observer = observer; this.command = command; this.workingDirectory = workingDirectory;
         }
     }
 

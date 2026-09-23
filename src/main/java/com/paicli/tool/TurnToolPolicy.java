@@ -338,7 +338,9 @@ public final class TurnToolPolicy {
                 observe(result);
             }
         }
-        return List.copyOf(merged);
+        List<ToolExecutionResult> completed = List.copyOf(merged);
+        registry.onPolicyToolResults(completed);
+        return completed;
     }
 
     /** Release this branch's browser lease after its complete task lifecycle. */

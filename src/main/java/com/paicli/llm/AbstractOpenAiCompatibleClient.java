@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
 
@@ -32,6 +33,8 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
             // 重试由 LlmRetryPolicy 统一分类和限次，避免 OkHttp 隐式重放突破次数上限。
             .retryOnConnectionFailure(false)
             .build();
+
+    private final AtomicBoolean cancellationRequested = new AtomicBoolean();
 
     private static long readTimeoutSeconds(String key, long defaultValue) {
         String raw = System.getProperty(key);
@@ -63,6 +66,9 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
 
     @Override
     public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
+        if (cancellationRequested.get()) {
+            throw new IOException("LLM request cancelled");
+        }
         StreamListener streamListener = listener == null ? StreamListener.NO_OP : listener;
         RequestBody body = RequestBody.create(
                 buildRequestBody(messages, tools).toString(),
@@ -80,6 +86,9 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
         LlmRetryPolicy retryPolicy = retryPolicy();
         IOException lastFailure = null;
         for (int attempt = 1; attempt <= retryPolicy.maxAttempts(); attempt++) {
+            if (cancellationRequested.get()) {
+                throw new IOException("LLM request cancelled");
+            }
             AttemptProgress progress = new AttemptProgress(streamListener != StreamListener.NO_OP);
             try {
                 return executeAttempt(builtRequest, streamListener, progress, retryPolicy);
@@ -90,6 +99,7 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                 lastFailure = failure;
 
                 boolean canRetry = attempt < retryPolicy.maxAttempts()
+                        && !cancellationRequested.get()
                         && !progress.hasConsumableOutput()
                         && retryPolicy.isRetryableFailure(failure);
                 if (!canRetry) {
@@ -102,10 +112,28 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                                 + "attempt={}/{} delayMs={} cause={}",
                         getProviderName(), getModelName(), attempt + 1, retryPolicy.maxAttempts(),
                         delayMillis, failure.getMessage());
-                retryPolicy.sleep(delayMillis);
+                sleepBeforeRetry(retryPolicy, delayMillis);
             }
         }
         throw lastFailure != null ? lastFailure : new IOException("LLM 请求失败");
+    }
+
+    @Override
+    public void cancelInFlightCalls() {
+        cancellationRequested.set(true);
+        httpClient().dispatcher().cancelAll();
+    }
+
+    private void sleepBeforeRetry(LlmRetryPolicy retryPolicy, long delayMillis) throws IOException {
+        long remaining = Math.max(0L, delayMillis);
+        while (remaining > 0L) {
+            if (cancellationRequested.get()) {
+                throw new IOException("LLM request cancelled");
+            }
+            long slice = Math.min(100L, remaining);
+            retryPolicy.sleep(slice);
+            remaining -= slice;
+        }
     }
 
     private ChatResponse executeAttempt(Request builtRequest,
@@ -134,6 +162,9 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
             int inputTokens = 0;
             int outputTokens = 0;
             int cachedInputTokens = 0;
+            String resolvedModel = null;
+            boolean resolvedModelConflict = false;
+            boolean usagePresent = false;
             boolean streamCompleted = false;
 
             while (!source.exhausted()) {
@@ -157,6 +188,14 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                 }
 
                 JsonNode root = mapper.readTree(payload);
+                String eventModel = normalizedResolvedModel(root.path("model"));
+                if (eventModel != null) {
+                    if (resolvedModel == null) {
+                        resolvedModel = eventModel;
+                    } else if (!resolvedModel.equals(eventModel)) {
+                        resolvedModelConflict = true;
+                    }
+                }
                 JsonNode error = root.path("error");
                 if (!error.isMissingNode() && !error.isNull()) {
                     throw new LlmStreamingApiException(
@@ -165,9 +204,10 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                     );
                 }
                 JsonNode usage = root.path("usage");
-                if (!usage.isMissingNode()) {
-                    inputTokens = usage.path("prompt_tokens").asInt(inputTokens);
-                    outputTokens = usage.path("completion_tokens").asInt(outputTokens);
+                if (hasCompleteTokenUsage(usage)) {
+                    usagePresent = true;
+                    inputTokens = usage.path("prompt_tokens").intValue();
+                    outputTokens = usage.path("completion_tokens").intValue();
                     cachedInputTokens = parseCachedInputTokens(usage, cachedInputTokens);
                 }
 
@@ -227,9 +267,39 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                     toolCalls,
                     inputTokens,
                     outputTokens,
-                    cachedInputTokens
+                    cachedInputTokens,
+                    resolvedModelConflict ? null : resolvedModel,
+                    usagePresent
             );
         }
+    }
+
+    /**
+     * A usage object is evidence only when both required counters are explicit, non-negative
+     * integers that fit the public response type. Empty, partial or coercible string objects are
+     * not proof of complete provider usage.
+     */
+    static boolean hasCompleteTokenUsage(JsonNode usage) {
+        if (usage == null || !usage.isObject()) {
+            return false;
+        }
+        return isNonNegativeInt(usage.get("prompt_tokens"))
+                && isNonNegativeInt(usage.get("completion_tokens"));
+    }
+
+    private static boolean isNonNegativeInt(JsonNode value) {
+        return value != null
+                && value.isIntegralNumber()
+                && value.canConvertToInt()
+                && value.intValue() >= 0;
+    }
+
+    private static String normalizedResolvedModel(JsonNode modelNode) {
+        if (modelNode == null || !modelNode.isTextual()) {
+            return null;
+        }
+        String value = modelNode.asText().trim();
+        return value.isEmpty() || value.length() > 256 ? null : value;
     }
 
     LlmRetryPolicy retryPolicy() {

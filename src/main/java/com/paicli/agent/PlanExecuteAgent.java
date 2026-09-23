@@ -35,6 +35,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -118,6 +120,8 @@ public class PlanExecuteAgent {
     private SkillContextBuffer skillContextBuffer;
     private TurnToolPolicy turnToolPolicy = TurnToolPolicy.forExplicitTask("");
     private String submittedPolicyInput = "";
+    private volatile PlanExecutionObserver executionObserver;
+    private final AtomicLong executionObservationFailures = new AtomicLong();
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
 
     public PlanExecuteAgent(LlmClient llmClient) {
@@ -202,6 +206,49 @@ public class PlanExecuteAgent {
         return conversationLedger;
     }
 
+    /** Opt-in only; callbacks are captured per executed plan, including each replan. */
+    public void setExecutionObserver(PlanExecutionObserver observer) {
+        this.executionObserver = observer;
+    }
+
+    /** Cumulative sink failures. A benchmark caller must reject incomplete observation evidence. */
+    public long getExecutionObservationFailures() {
+        return executionObservationFailures.get();
+    }
+
+    private final class PlanObservation {
+        private final PlanExecutionObserver observer;
+        private final String executionId;
+        private final long originNanos;
+        private final AtomicBoolean failed = new AtomicBoolean();
+
+        private PlanObservation(PlanExecutionObserver observer) {
+            this.observer = observer;
+            this.executionId = observer == null ? null : UUID.randomUUID().toString();
+            this.originNanos = observer == null ? 0 : System.nanoTime();
+        }
+
+        private long now() {
+            return observer == null ? 0 : System.nanoTime() - originNanos;
+        }
+
+        private void emit(Supplier<PlanExecutionObserver.Event> event) {
+            if (observer == null || failed.get()) {
+                return;
+            }
+            try {
+                observer.onEvent(event.get());
+            } catch (RuntimeException e) {
+                if (failed.compareAndSet(false, true)) {
+                    executionObservationFailures.incrementAndGet();
+                    // Do not log exception text: an observer may include sensitive payloads in it.
+                    log.warn("Plan execution observer failed; observation is incomplete ({})",
+                            e.getClass().getName());
+                }
+            }
+        }
+    }
+
     private void maybeCompactHistory(List<LlmClient.Message> messages, PrintStream out, String actor) {
         int trigger = memoryManager.getContextProfile().compressionTriggerTokens();
         int beforeMessages = messages.size();
@@ -254,12 +301,24 @@ public class PlanExecuteAgent {
 
     /** Use submittedUserInput for policy decisions and userInput for expanded task context. */
     public String run(String userInput, String submittedUserInput) {
+        return runInternal(userInput, submittedUserInput, false);
+    }
+
+    /**
+     * Runs an input that a trusted caller has already classified as an explicit task envelope.
+     * URL provenance and no-web rules still come from {@code submittedUserInput}; only the
+     * bare-title actionability heuristic is bypassed.
+     */
+    public String runExplicitTask(String userInput, String submittedUserInput) {
+        return runInternal(userInput, submittedUserInput, true);
+    }
+
+    private String runInternal(String userInput,
+                               String submittedUserInput,
+                               boolean explicitTaskEnvelope) {
         log.info("Plan run started: inputLength={}", userInput == null ? 0 : userInput.length());
         submittedPolicyInput = submittedUserInput == null ? "" : submittedUserInput;
-        turnToolPolicy = TurnToolPolicy.fromUserInput(
-                submittedUserInput,
-                toolRegistry.isSharedBrowserSession(),
-                toolRegistry.hasAgentOwnedCurrentBrowserPage());
+        turnToolPolicy = policyFor(submittedUserInput, explicitTaskEnvelope);
         conversationLedger.appendMessage(
                 "plan", "plan-agent", "user_input", LlmClient.Message.user(userInput));
         StreamState streamState = new StreamState();
@@ -269,7 +328,7 @@ public class PlanExecuteAgent {
                         "run_cancelled", "plan", "plan-agent", "before_planning", Map.of());
                 return "⏹️ 已取消当前计划执行。";
             }
-            PlanRunOutcome outcome = runWithPlan(userInput, streamState);
+            PlanRunOutcome outcome = runWithPlan(userInput, streamState, explicitTaskEnvelope);
             if (outcome.persistAssistantMessage() && outcome.result() != null && !outcome.result().isBlank()) {
                 conversationLedger.appendMessage(
                         "plan",
@@ -296,16 +355,20 @@ public class PlanExecuteAgent {
 /**
      * 使用Plan-and-Execute模式执行
      */
-    private PlanRunOutcome runWithPlan(String goal, StreamState streamState) throws IOException {
+    private PlanRunOutcome runWithPlan(String goal,
+                                       StreamState streamState,
+                                       boolean explicitTaskEnvelope) throws IOException {
         ExecutionPlan plan = planner.createPlan(goal);
-        return reviewAndExecutePlan(plan, streamState);
+        return reviewAndExecutePlan(plan, streamState, explicitTaskEnvelope);
     }
 
-    private PlanRunOutcome reviewAndExecutePlan(ExecutionPlan plan, StreamState streamState) throws IOException {
+    private PlanRunOutcome reviewAndExecutePlan(ExecutionPlan plan,
+                                                StreamState streamState,
+                                                boolean explicitTaskEnvelope) throws IOException {
         while (true) {
             PlanReviewDecision decision = reviewHandler.review(plan.getGoal(), plan);
             if (decision == null || decision.action() == PlanReviewAction.EXECUTE) {
-                return PlanRunOutcome.executed(executePlan(plan, streamState));
+                return PlanRunOutcome.executed(executePlan(plan, streamState, explicitTaskEnvelope));
             }
 
             if (decision.action() == PlanReviewAction.CANCEL) {
@@ -314,25 +377,45 @@ public class PlanExecuteAgent {
 
             String feedback = decision.feedback() == null ? "" : decision.feedback().trim();
             if (feedback.isEmpty()) {
-                return PlanRunOutcome.executed(executePlan(plan, streamState));
+                return PlanRunOutcome.executed(executePlan(plan, streamState, explicitTaskEnvelope));
             }
 
             out.println("📝 已收到补充要求，正在重新规划...\n");
             String revisedGoal = plan.getGoal() + "\n补充要求：" + feedback;
             submittedPolicyInput = submittedPolicyInput + "\n补充要求：" + feedback;
-            turnToolPolicy = TurnToolPolicy.fromUserInput(
-                    submittedPolicyInput,
-                    toolRegistry.isSharedBrowserSession(),
-                    toolRegistry.hasAgentOwnedCurrentBrowserPage());
+            turnToolPolicy = policyFor(submittedPolicyInput, explicitTaskEnvelope);
             plan = planner.createPlan(revisedGoal);
         }
     }
 
-    private String executePlan(ExecutionPlan plan, StreamState streamState) throws IOException {
+    private TurnToolPolicy policyFor(String submittedUserInput, boolean explicitTaskEnvelope) {
+        return explicitTaskEnvelope
+                ? TurnToolPolicy.forExplicitTask(
+                        submittedUserInput,
+                        toolRegistry.isSharedBrowserSession(),
+                        toolRegistry.hasAgentOwnedCurrentBrowserPage())
+                : TurnToolPolicy.fromUserInput(
+                        submittedUserInput,
+                        toolRegistry.isSharedBrowserSession(),
+                        toolRegistry.hasAgentOwnedCurrentBrowserPage());
+    }
+
+    private String executePlan(ExecutionPlan plan,
+                               StreamState streamState,
+                               boolean explicitTaskEnvelope) throws IOException {
         log.info("Executing plan: goal='{}', taskCount={}", plan.getGoal(), plan.getAllTasks().size());
         out.println("🚀 开始执行计划...\n");
 
         plan.markStarted();
+        PlanObservation observation = new PlanObservation(executionObserver);
+        long planStart = observation.now();
+        observation.emit(() -> new PlanExecutionObserver.PlanStarted(
+                observation.executionId, planStart, plan.getId(),
+                PlanExecutionObserver.TextFingerprint.of(plan.getGoal()),
+                plan.getAllTasks().stream().map(task -> new PlanExecutionObserver.TaskNode(
+                        task.getId(), task.getType(),
+                        PlanExecutionObserver.TextFingerprint.of(task.getDescription()),
+                        task.getDependencies())).toList(), plan.getExecutionOrder()));
         StringBuilder finalResult = new StringBuilder();
         Map<String, Boolean> streamedTaskOutputs = new HashMap<>();
         Map<String, TurnToolPolicy.TrustedUrlContext> taskTrustedUrls = new HashMap<>();
@@ -347,7 +430,7 @@ public class PlanExecuteAgent {
             }
 
             List<TaskExecutionResult> batchResults = executeTaskBatch(
-                    plan, executableTasks, streamState, taskTrustedUrls);
+                    plan, executableTasks, streamState, taskTrustedUrls, observation);
             for (TaskExecutionResult batchResult : batchResults) {
                 Task task = batchResult.task();
 
@@ -374,7 +457,7 @@ public class PlanExecuteAgent {
                 if (plan.getProgress() < 0.5) {
                     out.println("🔄 尝试重新规划...\n");
                     ExecutionPlan replanned = planner.replan(plan, error.getMessage());
-                    return reviewAndExecutePlan(replanned, streamState).result();
+                    return reviewAndExecutePlan(replanned, streamState, explicitTaskEnvelope).result();
                 }
 
                 if (!finalResult.isEmpty()) {
@@ -421,7 +504,8 @@ public class PlanExecuteAgent {
 
     private List<TaskExecutionResult> executeTaskBatch(ExecutionPlan plan, List<Task> executableTasks,
                                                        StreamState streamState,
-                                                       Map<String, TurnToolPolicy.TrustedUrlContext> taskTrustedUrls) {
+                                                       Map<String, TurnToolPolicy.TrustedUrlContext> taskTrustedUrls,
+                                                       PlanObservation observation) {
         if (executableTasks.size() == 1) {
             Task task = executableTasks.get(0);
             log.info("Executing single task: {} type={}", task.getId(), task.getType());
@@ -430,7 +514,7 @@ public class PlanExecuteAgent {
 
             try {
                 return List.of(TaskExecutionResult.success(task, executeTask(
-                        plan.getGoal(), plan, task, streamState, out, taskTrustedUrls)));
+                        plan.getGoal(), plan, task, streamState, out, taskTrustedUrls, observation)));
             } catch (Exception e) {
                 return List.of(TaskExecutionResult.failure(task, e));
             }
@@ -459,7 +543,7 @@ public class PlanExecuteAgent {
                 futures.add(executor.submit(() -> {
                     try {
                         return TaskExecutionResult.success(task, executeTask(
-                                plan.getGoal(), plan, task, streamState, taskOut, taskTrustedUrls));
+                                plan.getGoal(), plan, task, streamState, taskOut, taskTrustedUrls, observation));
                     } catch (Exception e) {
                         return TaskExecutionResult.failure(task, e);
                     }
@@ -502,7 +586,32 @@ public class PlanExecuteAgent {
      */
     private TaskRunResult executeTask(String goal, ExecutionPlan plan, Task task,
                                       StreamState streamState, PrintStream out,
-                                      Map<String, TurnToolPolicy.TrustedUrlContext> taskTrustedUrls) throws IOException {
+                                      Map<String, TurnToolPolicy.TrustedUrlContext> taskTrustedUrls,
+                                      PlanObservation observation) throws IOException {
+        long entered = observation.now();
+        observation.emit(() -> new PlanExecutionObserver.TaskEntered(
+                observation.executionId, entered, task.getId(), Thread.currentThread().getId()));
+        try {
+            TaskRunResult result = executeObservedTask(
+                    goal, plan, task, streamState, out, taskTrustedUrls, observation);
+            long exited = observation.now();
+            observation.emit(() -> new PlanExecutionObserver.TaskExited(
+                    observation.executionId, exited, task.getId(), PlanExecutionObserver.ExitKind.RETURNED,
+                    PlanExecutionObserver.TextFingerprint.of(result.result()), null));
+            return result;
+        } catch (IOException | RuntimeException | Error e) {
+            long exited = observation.now();
+            observation.emit(() -> new PlanExecutionObserver.TaskExited(
+                    observation.executionId, exited, task.getId(), PlanExecutionObserver.ExitKind.THREW,
+                    PlanExecutionObserver.TextFingerprint.of(null), e.getClass().getName()));
+            throw e;
+        }
+    }
+
+    private TaskRunResult executeObservedTask(String goal, ExecutionPlan plan, Task task,
+                                              StreamState streamState, PrintStream out,
+                                              Map<String, TurnToolPolicy.TrustedUrlContext> taskTrustedUrls,
+                                              PlanObservation observation) throws IOException {
         List<TurnToolPolicy.TrustedUrlContext> dependencyUrls = task.getDependencies().stream()
                 .map(taskTrustedUrls::get)
                 .filter(Objects::nonNull)
@@ -510,7 +619,7 @@ public class PlanExecuteAgent {
         TurnToolPolicy taskToolPolicy = turnToolPolicy.forkWithTrustedUrls(dependencyUrls);
         try {
             return executeTaskWithPolicy(
-                    goal, plan, task, streamState, out, dependencyUrls, taskToolPolicy);
+                    goal, plan, task, streamState, out, dependencyUrls, taskToolPolicy, observation);
         } finally {
             taskToolPolicy.releaseBrowserLease();
         }
@@ -519,7 +628,7 @@ public class PlanExecuteAgent {
     private TaskRunResult executeTaskWithPolicy(
             String goal, ExecutionPlan plan, Task task, StreamState streamState, PrintStream out,
             List<TurnToolPolicy.TrustedUrlContext> dependencyUrls,
-            TurnToolPolicy taskToolPolicy) throws IOException {
+            TurnToolPolicy taskToolPolicy, PlanObservation observation) throws IOException {
         String prompt = promptAssembler.assemble(PromptMode.PLAN, PromptContext.builder()
                 .projectMemoryContext(buildProjectMemoryContext())
                 .variable("taskType", task.getType())
@@ -542,13 +651,20 @@ public class PlanExecuteAgent {
         String actor = "task:" + task.getId();
         List<LlmClient.Message> messages = new ArrayList<>();
         appendTaskMessage(messages, actor, "system_prompt", LlmClient.Message.system(prompt));
+        LlmClient.Message inputMessage = ImageReferenceParser.userMessage(
+                taskInput, Path.of(toolRegistry.getProjectPath()));
         appendTaskMessage(
                 messages,
                 actor,
                 "task_input",
-                ImageReferenceParser.userMessage(
-                        taskInput,
-                        Path.of(toolRegistry.getProjectPath())));
+                inputMessage);
+        long inputPrepared = observation.now();
+        observation.emit(() -> new PlanExecutionObserver.TaskInputPrepared(
+                observation.executionId, inputPrepared, task.getId(),
+                PlanExecutionObserver.TextFingerprint.of(inputMessage.content()), inputMessage.imagePartCount(),
+                task.getDependencies().stream().map(plan::getTask).filter(Objects::nonNull)
+                        .map(dep -> new PlanExecutionObserver.DependencyInput(dep.getId(), dep.getStatus(),
+                                PlanExecutionObserver.TextFingerprint.of(dep.getResult()))).toList()));
 
         StringBuilder allResults = new StringBuilder();
         TaskStreamRenderer streamRenderer = new TaskStreamRenderer(task.getId(), streamState, out);
@@ -641,7 +757,7 @@ public class PlanExecuteAgent {
             streamRenderer.resetBetweenIterations();
 
             List<ToolExecutionResult> toolResults = executeToolCalls(
-                    task.getId(), response.toolCalls(), taskToolPolicy, toolExposure);
+                    task.getId(), iteration, response.toolCalls(), taskToolPolicy, toolExposure, observation);
             for (ToolExecutionResult toolResult : toolResults) {
                 allResults.append(toolResult.result()).append("\n");
                 appendTaskMessage(
@@ -756,10 +872,11 @@ public class PlanExecuteAgent {
         return normalized.substring(0, maxLength) + "...";
     }
 
-    private List<ToolExecutionResult> executeToolCalls(String taskId,
+    private List<ToolExecutionResult> executeToolCalls(String taskId, int iteration,
                                                        List<LlmClient.ToolCall> toolCalls,
                                                        TurnToolPolicy taskToolPolicy,
-                                                       TurnToolPolicy.ToolExposure toolExposure) {
+                                                       TurnToolPolicy.ToolExposure toolExposure,
+                                                       PlanObservation observation) {
         List<ToolInvocation> invocations = new ArrayList<>();
         for (LlmClient.ToolCall toolCall : toolCalls) {
             String toolName = toolCall.function().name();
@@ -773,6 +890,19 @@ public class PlanExecuteAgent {
             log.info("Task {} executing {} tool calls in parallel", taskId, invocations.size());
         }
         List<ToolExecutionResult> results = taskToolPolicy.execute(toolRegistry, invocations, toolExposure);
+        long returned = observation.now();
+        observation.emit(() -> {
+            List<PlanExecutionObserver.ToolResult> snapshots = new ArrayList<>();
+            for (int i = 0; i < results.size(); i++) {
+                ToolExecutionResult result = results.get(i);
+                snapshots.add(new PlanExecutionObserver.ToolResult(i, result.id(), result.name(),
+                        PlanExecutionObserver.TextFingerprint.of(result.argumentsJson()),
+                        PlanExecutionObserver.TextFingerprint.of(result.result()), result.successful(),
+                        result.timedOut(), result.imageParts().size()));
+            }
+            return new PlanExecutionObserver.ToolBatchReturned(
+                    observation.executionId, returned, taskId, iteration, snapshots);
+        });
         for (ToolExecutionResult result : results) {
             log.debug("Task {} tool result preview [{}]: {}", taskId, result.name(), preview(result.result(), 300));
         }

@@ -33,6 +33,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
@@ -57,6 +58,17 @@ public class SubAgent {
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private TurnToolPolicy turnToolPolicy;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
+    private String observationActorInstanceId;
+    private long observationHistoryGeneration;
+
+    String observationActorInstanceId() {
+        if (observationActorInstanceId == null) observationActorInstanceId = UUID.randomUUID().toString();
+        return observationActorInstanceId;
+    }
+
+    long observationHistoryGeneration() { return observationHistoryGeneration; }
+
+    AgentRole observationRole() { return role; }
 
     public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry) {
         this.name = name;
@@ -121,14 +133,19 @@ public class SubAgent {
         };
     }
 
-    private void maybeCompactHistory(PrintStream out) {
+    private void maybeCompactHistory(PrintStream out, int iteration,
+                                     AgentOrchestrator.ActivationObservation observation) {
         ContextProfile profile = toolRegistry == null ? null : toolRegistry.getContextProfile();
         if (profile == null) return;
         int beforeMessages = conversationHistory.size();
         try {
+            if (observation != null) observation.compactionScope(iteration, conversationHistory,
+                    profile.compressionTriggerTokens(), autoCompactionManager.isSessionMemoryEnabled());
             AutoCompactionManager.Result result = autoCompactionManager.compactIfNeeded(
                     conversationHistory, profile.compressionTriggerTokens());
             if (result.compacted()) {
+                if (observation != null) observation.compacted(
+                        iteration, beforeMessages, conversationHistory.size());
                 conversationLedger.appendEvent(
                         "compaction",
                         "team",
@@ -209,6 +226,11 @@ public class SubAgent {
      * 避免多个 Agent 同时写入 System.out 造成输出交错。
      */
     public AgentMessage execute(AgentMessage task, PrintStream out) {
+        return execute(task, out, null);
+    }
+
+    AgentMessage execute(AgentMessage task, PrintStream out,
+                          AgentOrchestrator.ActivationObservation observation) {
         TurnToolPolicy activeToolPolicy = turnToolPolicy == null
                 ? TurnToolPolicy.forExplicitTask(
                         task.content(),
@@ -216,7 +238,7 @@ public class SubAgent {
                         toolRegistry.hasAgentOwnedCurrentBrowserPage())
                 : turnToolPolicy.fork();
         try {
-            return executeWithPolicy(task, out, activeToolPolicy);
+            return executeWithPolicy(task, out, activeToolPolicy, observation);
         } finally {
             activeToolPolicy.releaseBrowserLease();
         }
@@ -225,6 +247,29 @@ public class SubAgent {
     /** Caller-owned branch policy; the same instance may span reviewer retries. */
     AgentMessage executeWithPolicy(AgentMessage task, PrintStream out,
                                    TurnToolPolicy activeToolPolicy) {
+        return executeWithPolicy(task, out, activeToolPolicy, null);
+    }
+
+    private AgentMessage executeWithPolicy(AgentMessage task, PrintStream out,
+                                           TurnToolPolicy activeToolPolicy,
+                                           AgentOrchestrator.ActivationObservation observation) {
+        if (observation != null) observation.entered(conversationHistory.size());
+        AgentMessage result = null;
+        Throwable failure = null;
+        try {
+            result = executeObserved(task, out, activeToolPolicy, observation);
+            return result;
+        } catch (RuntimeException | Error e) {
+            failure = e;
+            throw e;
+        } finally {
+            if (observation != null) observation.exited(result, failure);
+        }
+    }
+
+    private AgentMessage executeObserved(AgentMessage task, PrintStream out,
+                                          TurnToolPolicy activeToolPolicy,
+                                          AgentOrchestrator.ActivationObservation observation) {
         log.info("[{}] executing task from {}: type={}", name, task.fromAgent(), task.type());
         Objects.requireNonNull(activeToolPolicy, "activeToolPolicy");
         pruneHistoricalImagePayloads();
@@ -235,6 +280,8 @@ public class SubAgent {
         appendConversationMessage(ImageReferenceParser.userMessage(
                 taskContent,
                 Path.of(toolRegistry.getProjectPath())), "task_input");
+        if (observation != null) observation.inputPrepared(
+                conversationHistory.size() - 1, conversationHistory.get(conversationHistory.size() - 1));
 
         SubAgentStreamRenderer streamRenderer = new SubAgentStreamRenderer(name, role, out);
 
@@ -244,6 +291,7 @@ public class SubAgent {
         while (true) {
             AgentBudget.ExitReason exitReason = budget.check();
             if (exitReason != AgentBudget.ExitReason.WITHIN_BUDGET) {
+                if (observation != null) observation.partial(budget.iteration(), exitReason.name());
                 return finalizePartialResult(exitReason, budget, streamRenderer, out);
             }
 
@@ -251,7 +299,7 @@ public class SubAgent {
 
             // 调 LLM 前评估 conversationHistory 是否接近 window 上限；超阈值压缩早期消息为摘要。
             injectPendingLspDiagnostics(out);
-            maybeCompactHistory(out);
+            maybeCompactHistory(out, budget.iteration(), observation);
 
             try {
                 List<LlmClient.Tool> toolDefinitions = shouldUseTools() && llmClient.supportsTools()
@@ -286,6 +334,7 @@ public class SubAgent {
 
                     List<ToolExecutionResult> toolResults = executeToolCalls(
                             response.toolCalls(), activeToolPolicy, toolExposure);
+                    if (observation != null) observation.tools(budget.iteration(), toolResults);
                     for (ToolExecutionResult toolResult : toolResults) {
                         appendConversationMessage(
                                 LlmClient.Message.tool(toolResult.id(), toolResult.result()),
@@ -387,13 +436,19 @@ public class SubAgent {
 
     AgentMessage executeWithContext(AgentMessage task, String context, PrintStream out,
                                     TurnToolPolicy activeToolPolicy) {
+        return executeWithContext(task, context, out, activeToolPolicy, null);
+    }
+
+    AgentMessage executeWithContext(AgentMessage task, String context, PrintStream out,
+                                    TurnToolPolicy activeToolPolicy,
+                                    AgentOrchestrator.ActivationObservation observation) {
         String enrichedContent = task.content();
         if (context != null && !context.isEmpty()) {
             enrichedContent = context + "\n\n当前任务：" + task.content();
         }
         AgentMessage enrichedTask = new AgentMessage(task.fromAgent(), task.fromRole(),
                 enrichedContent, task.type());
-        return executeWithPolicy(enrichedTask, out, activeToolPolicy);
+        return executeWithPolicy(enrichedTask, out, activeToolPolicy, observation);
     }
 
     /**
@@ -404,9 +459,14 @@ public class SubAgent {
     }
 
     public AgentMessage review(String originalTask, String executionResult, PrintStream out) {
+        return review(originalTask, executionResult, out, null);
+    }
+
+    AgentMessage review(String originalTask, String executionResult, PrintStream out,
+                         AgentOrchestrator.ActivationObservation observation) {
         String reviewInput = "原始任务：" + originalTask + "\n\n执行结果：\n" + executionResult;
         AgentMessage reviewTask = AgentMessage.task("orchestrator", reviewInput);
-        return execute(reviewTask, out);
+        return execute(reviewTask, out, observation);
     }
 
     /**
@@ -423,6 +483,7 @@ public class SubAgent {
                 Map.of("discardedViewMessages", Math.max(0, conversationHistory.size() - 1)));
         conversationHistory.clear();
         conversationHistory.add(systemMsg);
+        observationHistoryGeneration++;
     }
 
     private void pruneHistoricalImagePayloads() {

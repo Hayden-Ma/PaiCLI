@@ -7,22 +7,41 @@ public class GLMClient extends AbstractOpenAiCompatibleClient {
     private static final String CODING_API_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
     private static final String MULTIMODAL_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
     private static final String DEFAULT_MODEL = "glm-5.1";
+    private static final int MAX_BENCHMARK_OUTPUT_TOKENS = 16_384;
     private final String apiKey;
     private final String model;
     private final String apiUrl;
+    private final Integer benchmarkMaxOutputTokens;
 
     public GLMClient(String apiKey) {
-        this(apiKey, DEFAULT_MODEL);
+        this(apiKey, DEFAULT_MODEL, null, null);
     }
 
     public GLMClient(String apiKey, String model) {
-        this(apiKey, model, null);
+        this(apiKey, model, null, null);
+    }
+
+    /** Creates an immutable provider instance for a frozen benchmark output limit. */
+    public GLMClient(String apiKey, String model, int benchmarkMaxOutputTokens) {
+        this(apiKey, model, null,
+                Integer.valueOf(requireBenchmarkMaxOutputTokens(benchmarkMaxOutputTokens)));
     }
 
     GLMClient(String apiKey, String model, String apiUrl) {
+        this(apiKey, model, apiUrl, null);
+    }
+
+    GLMClient(String apiKey, String model, String apiUrl, int benchmarkMaxOutputTokens) {
+        this(apiKey, model, apiUrl,
+                Integer.valueOf(requireBenchmarkMaxOutputTokens(benchmarkMaxOutputTokens)));
+    }
+
+    private GLMClient(String apiKey, String model, String apiUrl,
+                      Integer benchmarkMaxOutputTokens) {
         this.apiKey = apiKey;
         this.model = model != null && !model.isBlank() ? model : DEFAULT_MODEL;
         this.apiUrl = apiUrl != null && !apiUrl.isBlank() ? apiUrl : selectApiUrl(this.model);
+        this.benchmarkMaxOutputTokens = benchmarkMaxOutputTokens;
     }
 
     @Override
@@ -47,6 +66,9 @@ public class GLMClient extends AbstractOpenAiCompatibleClient {
 
     @Override
     protected void customizeRequestBody(ObjectNode requestBody) {
+        if (benchmarkMaxOutputTokens != null) {
+            requestBody.put("max_tokens", benchmarkMaxOutputTokens);
+        }
         if (!isGlm53()) {
             return;
         }
@@ -112,5 +134,13 @@ public class GLMClient extends AbstractOpenAiCompatibleClient {
 
     private boolean isGlm53() {
         return model != null && model.trim().toLowerCase().startsWith("glm-5.3");
+    }
+
+    private static int requireBenchmarkMaxOutputTokens(int value) {
+        if (value <= 0 || value > MAX_BENCHMARK_OUTPUT_TOKENS) {
+            throw new IllegalArgumentException(
+                    "benchmarkMaxOutputTokens must be between 1 and 16384");
+        }
+        return value;
     }
 }

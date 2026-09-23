@@ -138,6 +138,30 @@
                         </manifest>
                     </archive>
                 </configuration>
+                <executions>
+                    <execution>
+                        <id>agentbench-trusted-runner</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                        <configuration>
+                            <classifier>agentbench-runner</classifier>
+                            <includes>
+                                <include>com/paicli/eval/benchmark/BenchmarkRelayWorkerMain*.class</include>
+                                <include>com/paicli/eval/benchmark/BenchmarkToolRegistry*.class</include>
+                                <include>com/paicli/eval/benchmark/BenchmarkToolProfile*.class</include>
+                                <include>com/paicli/eval/benchmark/relay/**</include>
+                            </includes>
+                            <archive>
+                                <addMavenDescriptor>false</addMavenDescriptor>
+                                <manifest>
+                                    <mainClass>com.paicli.eval.benchmark.BenchmarkRelayWorkerMain</mainClass>
+                                </manifest>
+                            </archive>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

@@ -6,9 +6,12 @@ import com.paicli.browser.BrowserConnector;
 import com.paicli.mcp.protocol.McpToolDescriptor;
 import com.paicli.web.SearchProvider;
 import com.paicli.web.SearchResult;
+import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.File;
+import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -21,7 +24,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class ToolRegistryTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -74,6 +79,212 @@ class ToolRegistryTest {
         String result = registry.executeTool("execute_command", "{\"command\":\"pwd\"}");
 
         assertTrue(result.contains(tempDir.toString()));
+    }
+
+    @Test
+    void commandExitCodeControlsTypedToolSuccess(@TempDir Path tempDir) {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        ToolOutput passed = registry.executeToolOutput(
+                "execute_command", "{\"command\":\"printf ok\"}");
+        ToolOutput failed = registry.executeToolOutput(
+                "execute_command", "{\"command\":\"printf problem; exit 7\"}");
+        ToolRegistry.ToolExecutionResult observed = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation(
+                        "call-exit-7", "execute_command",
+                        "{\"command\":\"printf problem; exit 7\"}"))).get(0);
+
+        assertTrue(passed.successful());
+        assertTrue(passed.text().contains("exit code: 0"));
+        assertFalse(failed.successful());
+        assertTrue(failed.text().contains("exit code: 7"));
+        assertFalse(observed.successful());
+        assertTrue(observed.result().contains("exit code: 7"));
+    }
+
+    @Test
+    void commandSandboxIsDisabledByDefault() {
+        ToolRegistry registry = new ToolRegistry();
+
+        assertFalse(registry.isCommandSandboxEnabled());
+    }
+
+    @Test
+    void commandSandboxBuildsEscapedSeatbeltProfileAndDirectArgv(@TempDir Path tempDir) throws Exception {
+        Path workspace = Files.createDirectory(tempDir.resolve("workspace-quote\"-slash\\"));
+        CommandSandbox sandbox = new CommandSandbox(
+                workspace,
+                Path.of("/usr/bin/sandbox-exec"),
+                Map.of("PATH", "/usr/bin"),
+                Path.of(System.getProperty("java.home")));
+
+        String profile = sandbox.profile();
+        String escapedWorkspace = workspace.toRealPath().toString()
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"");
+
+        assertTrue(profile.contains("(deny default)"));
+        assertTrue(profile.contains("(deny network*)"));
+        assertTrue(profile.contains("(allow file-read*"));
+        assertTrue(profile.contains("(allow file-write*"));
+        assertTrue(profile.contains("(subpath \"" + escapedWorkspace + "\")"));
+        assertTrue(profile.contains("(literal \"/dev/null\")"));
+        String readSection = profile.substring(
+                profile.indexOf("(allow file-read*"),
+                profile.indexOf("(allow file-write*"));
+        assertFalse(readSection.contains("(subpath \"/Library\")"));
+        assertFalse(readSection.contains("(subpath \"/opt/homebrew\")"));
+        assertFalse(readSection.contains("(subpath \"/usr/local\")"));
+        assertFalse(readSection.contains("/private/var/db"));
+        String writeSection = profile.substring(profile.indexOf("(allow file-write*"));
+        assertFalse(writeSection.contains("(subpath \"/dev\")"),
+                "write profile must not grant the whole /dev tree");
+
+        List<String> arguments = sandbox.arguments("printf ok");
+        assertEquals("/usr/bin/sandbox-exec", arguments.get(0));
+        assertEquals("-p", arguments.get(1));
+        assertEquals(profile, arguments.get(2));
+        assertEquals("/bin/bash", arguments.get(3));
+        assertEquals("-c", arguments.get(4));
+        assertEquals("printf ok", arguments.get(5));
+    }
+
+    @Test
+    void commandSandboxFailsClosedWhenExecutableIsUnavailable(@TempDir Path tempDir) {
+        CommandSandbox sandbox = new CommandSandbox(
+                tempDir,
+                tempDir.resolve("missing-sandbox-exec"),
+                Map.of("PATH", "/usr/bin"),
+                Path.of(System.getProperty("java.home")));
+
+        Exception error = assertThrows(java.io.IOException.class,
+                () -> sandbox.prepare(tempDir, "printf should-not-run"));
+
+        assertTrue(error.getMessage().contains("命令沙箱不可用"));
+    }
+
+    @Test
+    void commandSandboxEnableFailsClosedWhenExecutableProbeFails(@TempDir Path tempDir) {
+        Path falseExecutable = Path.of("/usr/bin/false");
+        assumeTrue(Files.isExecutable(falseExecutable), "/usr/bin/false is unavailable");
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> CommandSandbox.enable(
+                        tempDir,
+                        falseExecutable,
+                        Map.of("PATH", "/usr/bin"),
+                        Path.of(System.getProperty("java.home"))));
+
+        assertTrue(error.getMessage().contains("Seatbelt probe exit code="), error.getMessage());
+    }
+
+    @Test
+    void macSandboxAllowsWorkspaceReadWriteAndIsolatesHomeAndTmp(@TempDir Path tempDir) throws Exception {
+        assumeMacSandboxAvailable();
+        Path workspace = Files.createDirectory(tempDir.resolve("workspace"));
+        Files.writeString(workspace.resolve("input.txt"), "inside-data\n");
+        ToolRegistry registry = sandboxedRegistry(workspace);
+
+        String result = executeCommand(registry,
+                "cat input.txt && printf 'inside-ok' > output.txt && "
+                        + "printf '\\nHOME=%s\\nTMPDIR=%s\\n' \"$HOME\" \"$TMPDIR\"");
+
+        assertTrue(result.contains("exit code: 0"), result);
+        assertTrue(result.contains("inside-data"), result);
+        assertEquals("inside-ok", Files.readString(workspace.resolve("output.txt")));
+        Path sandboxState = workspace.toRealPath().resolve(".paicli-command-sandbox");
+        assertTrue(result.contains("HOME=" + sandboxState.resolve("home")), result);
+        assertTrue(result.contains("TMPDIR=" + sandboxState.resolve("tmp")), result);
+    }
+
+    @Test
+    void macSandboxRejectsOutsideReadWriteParentEscapeAndSymlinkEscape(@TempDir Path tempDir) throws Exception {
+        assumeMacSandboxAvailable();
+        Path workspace = Files.createDirectory(tempDir.resolve("workspace"));
+        Path outside = Files.createDirectory(tempDir.resolve("outside"));
+        Path outsideSecret = outside.resolve("secret.txt");
+        Path outsideCanary = outside.resolve("canary.txt");
+        Files.writeString(outsideSecret, "outside-secret");
+        Files.writeString(outsideCanary, "unchanged");
+        Files.writeString(workspace.resolve("source.txt"), "source");
+        Files.createSymbolicLink(workspace.resolve("outside-link"), outside);
+        ToolRegistry registry = sandboxedRegistry(workspace);
+
+        String readResult = executeCommand(registry, "cat " + shellQuote(outsideSecret));
+        String absoluteWriteResult = executeCommand(
+                registry, "printf changed > " + shellQuote(outside.resolve("written.txt")));
+        String parentEscapeResult = executeCommand(registry, "cp source.txt ../escape-copy.txt");
+        String symlinkReadResult = executeCommand(registry, "cat outside-link/secret.txt");
+        String symlinkEscapeResult = executeCommand(
+                registry, "printf changed > outside-link/canary.txt");
+
+        assertFalse(readResult.contains("exit code: 0"), readResult);
+        assertFalse(readResult.contains("outside-secret"), readResult);
+        assertFalse(absoluteWriteResult.contains("exit code: 0"), absoluteWriteResult);
+        assertFalse(parentEscapeResult.contains("exit code: 0"), parentEscapeResult);
+        assertFalse(symlinkReadResult.contains("exit code: 0"), symlinkReadResult);
+        assertFalse(symlinkReadResult.contains("outside-secret"), symlinkReadResult);
+        assertFalse(symlinkEscapeResult.contains("exit code: 0"), symlinkEscapeResult);
+        assertFalse(Files.exists(outside.resolve("written.txt")));
+        assertFalse(Files.exists(tempDir.resolve("escape-copy.txt")));
+        assertEquals("unchanged", Files.readString(outsideCanary));
+    }
+
+    @Test
+    void macSandboxRejectsLoopbackAndPublicNetwork(@TempDir Path tempDir) throws Exception {
+        assumeMacSandboxAvailable();
+        Path workspace = Files.createDirectory(tempDir.resolve("workspace"));
+        ToolRegistry registry = sandboxedRegistry(workspace);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            byte[] body = "loopback-ok".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            try (var output = exchange.getResponseBody()) {
+                output.write(body);
+            }
+        });
+        server.start();
+        try {
+            int port = server.getAddress().getPort();
+            String loopback = executeCommand(registry,
+                    "/usr/bin/curl --max-time 2 --silent --show-error http://127.0.0.1:" + port + "/");
+            String publicNetwork = executeCommand(registry,
+                    "/usr/bin/curl --max-time 2 --silent --show-error https://example.com/");
+
+            assertFalse(loopback.contains("exit code: 0"), loopback);
+            assertFalse(loopback.contains("loopback-ok"), loopback);
+            assertFalse(publicNetwork.contains("exit code: 0"), publicNetwork);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void macSandboxAllowsDevelopmentRuntimesAndDevNull(@TempDir Path tempDir) throws Exception {
+        assumeMacSandboxAvailable();
+        Path workspace = Files.createDirectory(tempDir.resolve("workspace"));
+        ToolRegistry registry = sandboxedRegistry(workspace);
+
+        List<String> runtimeCommands = new ArrayList<>();
+        runtimeCommands.add("java -version");
+        runtimeCommands.add("javac -version");
+        if (commandAvailable("python3")) {
+            runtimeCommands.add("python3 --version");
+        }
+        if (commandAvailable("node")) {
+            runtimeCommands.add("node --version");
+        }
+        for (String command : runtimeCommands) {
+            String result = executeCommand(registry, command);
+            assertTrue(result.contains("exit code: 0"), command + "\n" + result);
+        }
+
+        String redirected = executeCommand(
+                registry, "printf hidden >/dev/null 2>&1; printf visible");
+        assertTrue(redirected.contains("exit code: 0"), redirected);
+        assertTrue(redirected.contains("visible"), redirected);
+        assertFalse(redirected.contains("hidden"), redirected);
     }
 
     @Test
@@ -482,6 +693,55 @@ class ToolRegistryTest {
 
         assertEquals(List.of("global:默认用中文回答"), saved);
         assertTrue(result.contains("长期记忆(global)"));
+    }
+
+    private static ToolRegistry sandboxedRegistry(Path workspace) {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(workspace.toString());
+        registry.setCommandSandboxRoot(workspace);
+        return registry;
+    }
+
+    private static String executeCommand(ToolRegistry registry, String command) throws Exception {
+        return registry.executeTool(
+                "execute_command",
+                MAPPER.writeValueAsString(Map.of("command", command)));
+    }
+
+    private static String shellQuote(Path path) {
+        return "'" + path.toString().replace("'", "'\"'\"'") + "'";
+    }
+
+    private static void assumeMacSandboxAvailable() throws Exception {
+        String osName = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
+        assumeTrue(osName.contains("mac") && Files.isExecutable(CommandSandbox.DEFAULT_EXECUTABLE),
+                "macOS sandbox-exec is unavailable");
+        Process process = new ProcessBuilder(
+                CommandSandbox.DEFAULT_EXECUTABLE.toString(),
+                "-p",
+                "(version 1)\n(allow default)\n",
+                "/usr/bin/true")
+                .redirectErrorStream(true)
+                .start();
+        boolean finished = process.waitFor(3, TimeUnit.SECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+        }
+        assumeTrue(finished && process.exitValue() == 0,
+                "sandbox-exec cannot run inside the current host sandbox");
+    }
+
+    private static boolean commandAvailable(String command) {
+        String path = System.getenv("PATH");
+        if (path == null || path.isBlank()) {
+            return false;
+        }
+        for (String entry : path.split(java.util.regex.Pattern.quote(File.pathSeparator))) {
+            if (!entry.isBlank() && Files.isExecutable(Path.of(entry).resolve(command))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void restoreSystemProperty(String key, String previous) {

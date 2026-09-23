@@ -1,8 +1,10 @@
 package com.paicli.eval.benchmark;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -54,6 +56,25 @@ class BenchmarkArtifactStoreTest {
                 () -> store.episode("case", "provider/model", 1));
         assertThrows(IllegalArgumentException.class,
                 () -> store.episode("case", "model", 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> store.episode("case", "model", 1, 0));
+    }
+
+    @Test
+    void formalAttemptsAreAppendOnlyAndDoNotChangeLegacyLayout(@TempDir Path tempDir)
+            throws Exception {
+        BenchmarkArtifactStore store = BenchmarkArtifactStore.create(tempDir, "run-attempts");
+
+        Path legacy = store.episode("case", "model", 1).directory();
+        Path first = store.episode("case", "model", 2, 1).directory();
+        Path second = store.episode("case", "model", 2, 2).directory();
+
+        assertEquals("repeat-001", legacy.getFileName().toString());
+        assertEquals("attempt-001", first.getFileName().toString());
+        assertEquals("attempt-002", second.getFileName().toString());
+        assertEquals(first.getParent(), second.getParent());
+        assertThrows(FileAlreadyExistsException.class,
+                () -> store.episode("case", "model", 2, 1));
     }
 
     @Test
@@ -62,5 +83,30 @@ class BenchmarkArtifactStoreTest {
 
         assertThrows(FileAlreadyExistsException.class,
                 () -> BenchmarkArtifactStore.create(tempDir, "same-run"));
+    }
+
+    @Test
+    void purgeDeletesEpisodeContentsWithoutFollowingChildSymlinks(@TempDir Path tempDir)
+            throws Exception {
+        BenchmarkArtifactStore store = BenchmarkArtifactStore.create(tempDir, "run-purge");
+        BenchmarkArtifactStore.EpisodeArtifacts episode =
+                store.episode("case-purge", "model-purge", 1);
+        episode.writeAnswer("remove me");
+        Path nested = episode.createPrivateDirectory("workspace");
+        Files.writeString(nested.resolve("nested.txt"), "remove me too");
+
+        Path outside = Files.createDirectory(tempDir.resolve("outside-purge"));
+        Path sentinel = Files.writeString(outside.resolve("keep.txt"), "must survive");
+        try {
+            Files.createSymbolicLink(episode.directory().resolve("outside-link"), outside);
+        } catch (UnsupportedOperationException | IOException | SecurityException e) {
+            Assumptions.abort("symbolic links unavailable on this test host");
+        }
+        episode.purgeContentsForSecurityFailure();
+
+        try (var remaining = Files.list(episode.directory())) {
+            assertTrue(remaining.findAny().isEmpty());
+        }
+        assertTrue(Files.exists(sentinel));
     }
 }

@@ -11,7 +11,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.function.Function;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class PaiCliConfig {
@@ -158,49 +161,35 @@ public class PaiCliConfig {
     }
 
     private static String loadApiKeyFromEnv(String provider) {
-        String envKey = switch (provider.toLowerCase()) {
-            case "glm" -> "GLM_API_KEY";
-            case "deepseek" -> "DEEPSEEK_API_KEY";
-            case "hunyuan" -> "HUNYUAN_API_KEY";
-            case "step" -> "STEP_API_KEY";
-            case "kimi" -> "KIMI_API_KEY";
-            case "freellmapi" -> "FREELLMAPI_API_KEY";
-            case "xfyun" -> "XFYUN_MAAS_API_KEY";
-            default -> provider.toUpperCase() + "_API_KEY";
+        return loadApiKeyFromSources(provider, System::getenv, PaiCliConfig::readFromDotEnv);
+    }
+
+    static String loadApiKeyFromSources(String provider,
+                                        Function<String, String> processEnvironment,
+                                        Function<String, String> dotEnv) {
+        String normalizedProvider = provider.toLowerCase(Locale.ROOT);
+        List<String> keys = switch (normalizedProvider) {
+            case "glm" -> List.of("GLM_API_KEY");
+            case "deepseek" -> List.of("DEEPSEEK_API_KEY");
+            case "hunyuan" -> List.of(
+                    "HUNYUAN_API_KEY", "TOKENHUB_API_KEY", "TENCENTMAAS_API_KEY");
+            case "step" -> List.of("STEP_API_KEY");
+            case "kimi" -> List.of("KIMI_API_KEY", "MOONSHOT_API_KEY");
+            case "freellmapi" -> List.of("FREELLMAPI_API_KEY");
+            case "xfyun" -> List.of("XFYUN_MAAS_API_KEY", "XFYUN_API_KEY");
+            default -> List.of(provider.toUpperCase() + "_API_KEY");
         };
 
-        String envValue = System.getenv(envKey);
-        if (envValue != null && !envValue.isBlank()) {
-            return envValue.trim();
-        }
-
-        String dotEnvValue = readFromDotEnv(envKey);
-        if (dotEnvValue != null && !dotEnvValue.isBlank()) {
-            return dotEnvValue.trim();
-        }
-
-        if ("kimi".equalsIgnoreCase(provider)) {
-            String moonshotValue = System.getenv("MOONSHOT_API_KEY");
-            if (moonshotValue != null && !moonshotValue.isBlank()) {
-                return moonshotValue.trim();
+        for (String key : keys) {
+            String processValue = processEnvironment.apply(key);
+            if (processValue != null && !processValue.isBlank()) {
+                return processValue.trim();
             }
-            String moonshotDotEnvValue = readFromDotEnv("MOONSHOT_API_KEY");
-            if (moonshotDotEnvValue != null && !moonshotDotEnvValue.isBlank()) {
-                return moonshotDotEnvValue.trim();
+            String dotEnvValue = dotEnv.apply(key);
+            if (dotEnvValue != null && !dotEnvValue.isBlank()) {
+                return dotEnvValue.trim();
             }
         }
-
-        if ("xfyun".equalsIgnoreCase(provider)) {
-            String xfyunValue = System.getenv("XFYUN_API_KEY");
-            if (xfyunValue != null && !xfyunValue.isBlank()) {
-                return xfyunValue.trim();
-            }
-            String xfyunDotEnvValue = readFromDotEnv("XFYUN_API_KEY");
-            if (xfyunDotEnvValue != null && !xfyunDotEnvValue.isBlank()) {
-                return xfyunDotEnvValue.trim();
-            }
-        }
-
         return null;
     }
 
