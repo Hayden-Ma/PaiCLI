@@ -21,6 +21,8 @@ final class CliCommandParser {
         MEMORY_DELETE,
         MEMORY_SEARCH,
         MEMORY_SAVE,
+        MEMORY_VERIFY,
+        MEMORY_REPLACE,
         INDEX_CODE,
         SEARCH_CODE,
         GRAPH_QUERY,
@@ -153,6 +155,16 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/mem delete ", 0, 12)) {
             return new ParsedCommand(CommandType.MEMORY_DELETE, trimmed.substring(12).trim());
+        }
+
+        if (trimmed.regionMatches(true, 0, "/memory verify", 0, 14)
+                && (trimmed.length() == 14 || Character.isWhitespace(trimmed.charAt(14)))) {
+            return new ParsedCommand(CommandType.MEMORY_VERIFY, trimmed.substring(14).trim());
+        }
+
+        if (trimmed.regionMatches(true, 0, "/memory replace", 0, 15)
+                && (trimmed.length() == 15 || Character.isWhitespace(trimmed.charAt(15)))) {
+            return new ParsedCommand(CommandType.MEMORY_REPLACE, trimmed.substring(15).trim());
         }
 
         if (trimmed.regionMatches(true, 0, "/memory search ", 0, 15)) {

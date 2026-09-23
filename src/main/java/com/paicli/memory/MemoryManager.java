@@ -4,8 +4,10 @@ import com.paicli.llm.LlmClient;
 import com.paicli.context.ContextProfile;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -65,11 +67,21 @@ public class MemoryManager {
     /**
      * 存储关键事实到长期记忆
      */
-    public void storeFact(String fact) {
-        storeFact(fact, "project");
+    public MemoryWriteResult storeFact(String fact) {
+        return storeFact(fact, "project");
     }
 
-    public void storeFact(String fact, String scope) {
+    public MemoryWriteResult storeFact(String fact, String scope) {
+        return storeFact(fact, scope, null, false);
+    }
+
+    /**
+     * 显式保存记忆：等价条目只刷新核实时间，高度相似但不一致的条目不写入并返回冲突说明。
+     *
+     * @param replaceId     用户选择用新内容替换的旧条目 id，可为 null
+     * @param allowConflict 用户明确要求新旧两条都保留
+     */
+    public MemoryWriteResult storeFact(String fact, String scope, String replaceId, boolean allowConflict) {
         String normalizedScope = normalizeScope(scope);
         Map<String, String> metadata = "global".equals(normalizedScope)
                 ? Map.of("source", "fact", "scope", "global")
@@ -81,7 +93,25 @@ public class MemoryManager {
                 metadata,
                 MemoryEntry.estimateTokens(fact)
         );
-        longTermMemory.store(entry);
+        return longTermMemory.write(entry, replaceId, allowConflict, currentProject);
+    }
+
+    /** 用户选择用新内容替换某条旧记忆；新条目沿用旧条目的作用域。 */
+    public MemoryWriteResult replaceFact(String id, String fact) {
+        String scope = longTermMemory.retrieve(id == null ? "" : id.trim())
+                .map(LongTermMemory::scopeOf)
+                .orElse("project");
+        return storeFact(fact, scope, id, false);
+    }
+
+    /** 超过配置天数未核实的记忆，/memory list 和检索注入都会标注“可能已过时”。 */
+    public boolean isStale(MemoryEntry entry) {
+        return retriever.isStale(entry);
+    }
+
+    /** 用户确认记忆仍然成立时刷新最后核实时间。 */
+    public Optional<MemoryEntry> verifyLongTerm(String id) {
+        return longTermMemory.markVerified(id, Instant.now());
     }
 
     /**

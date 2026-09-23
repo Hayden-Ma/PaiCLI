@@ -1,5 +1,6 @@
 package com.paicli.agent;
 
+import com.paicli.tool.ToolResultBoundary;
 import com.paicli.llm.LlmClient;
 import com.paicli.tool.ToolRegistry;
 import org.junit.jupiter.api.Test;
@@ -160,8 +161,8 @@ class AgentWebSearchDecisionTest {
         assertTrue(llm.messageSnapshots.get(1).stream()
                         .filter(message -> "tool".equals(message.role()))
                         .map(LlmClient.Message::content)
-                        .anyMatch(registry.stubWebSearchResult::equals),
-                "允许的搜索结果应正常回灌给下一轮模型");
+                        .anyMatch(ToolResultBoundary.wrap("web_search", registry.stubWebSearchResult)::equals),
+                "允许的搜索结果应包在不可信数据边界中回灌给下一轮模型");
     }
 
     private static LlmClient.ToolCall toolCall(String id, String name, String arguments) {

@@ -31,12 +31,18 @@ public class LongTermMemory implements Memory {
     private final AtomicInteger tokenCounter;
     private final ObjectMapper mapper;
     private final File storageFile;
+    private final MemoryConflictDetector conflictDetector;
 
     public LongTermMemory() {
         this(resolveStorageDir());
     }
 
     public LongTermMemory(File storageDir) {
+        this(storageDir, MemoryConflictDetector.fromConfiguration());
+    }
+
+    LongTermMemory(File storageDir, MemoryConflictDetector conflictDetector) {
+        this.conflictDetector = conflictDetector;
         this.entries = new ConcurrentHashMap<>();
         this.tokenCounter = new AtomicInteger(0);
         this.mapper = new ObjectMapper();
@@ -68,6 +74,91 @@ public class LongTermMemory implements Memory {
         }
         tokenCounter.addAndGet(entry.getTokenCount());
         saveToDisk();
+    }
+
+    /**
+     * 用户/模型显式保存记忆时的写入入口：去重 → 冲突检测 → 写入或替换，整体原子执行。
+     *
+     * <p>{@link #store(MemoryEntry)} 仍是底层存储语义（只做去重）；这里额外负责：
+     * 等价条目只刷新核实时间；高度相似但不一致的条目不写入，交给用户决定；
+     * {@code replaceId} 表示用户已选择用新内容替换某条旧记忆。</p>
+     *
+     * @param replaceId  用户选择替换的旧条目 id，可为 null
+     * @param allowConflict 用户明确要求两条都保留时为 true
+     * @param projectKey 当前项目，用于限制 replaceId 只能指向当前可见的条目
+     */
+    public synchronized MemoryWriteResult write(MemoryEntry entry, String replaceId,
+                                                boolean allowConflict, String projectKey) {
+        String scope = scopeOf(entry);
+        MemoryEntry target = null;
+        if (replaceId != null && !replaceId.isBlank()) {
+            target = entries.get(replaceId.trim());
+            if (target == null || !isVisibleInProject(target, projectKey)) {
+                return MemoryWriteResult.replaceTargetNotFound(entry, replaceId.trim(), scope);
+            }
+        }
+        String excludedId = target == null ? null : target.getId();
+
+        Optional<MemoryEntry> duplicate = entries.values().stream()
+                .filter(existing -> !existing.getId().equals(excludedId))
+                .filter(existing -> MemoryDeduplicator.isDuplicate(existing, entry))
+                .findFirst();
+        if (duplicate.isPresent()) {
+            MemoryEntry verified = duplicate.get().withLastVerifiedAt(entry.getLastVerifiedAt());
+            entries.put(verified.getId(), verified);
+            if (target != null) {
+                removeEntry(target.getId());
+            }
+            saveToDisk();
+            return MemoryWriteResult.duplicate(verified, scope);
+        }
+
+        if (!allowConflict) {
+            List<MemoryEntry> conflicts = entries.values().stream()
+                    .filter(existing -> !existing.getId().equals(excludedId))
+                    .filter(existing -> conflictDetector.isConflict(existing, entry))
+                    .sorted(Comparator.comparing(MemoryEntry::getTimestamp))
+                    .toList();
+            if (!conflicts.isEmpty()) {
+                return MemoryWriteResult.conflict(entry, conflicts, scope);
+            }
+        }
+
+        if (target != null) {
+            removeEntry(target.getId());
+        }
+        putEntry(entry);
+        saveToDisk();
+        return target == null
+                ? MemoryWriteResult.stored(entry, scope)
+                : MemoryWriteResult.replaced(entry, target, scope);
+    }
+
+    /** 用户确认某条记忆仍然成立：刷新最后核实时间。 */
+    public synchronized Optional<MemoryEntry> markVerified(String id, Instant verifiedAt) {
+        MemoryEntry existing = id == null ? null : entries.get(id.trim());
+        if (existing == null) {
+            return Optional.empty();
+        }
+        MemoryEntry verified = existing.withLastVerifiedAt(verifiedAt);
+        entries.put(verified.getId(), verified);
+        saveToDisk();
+        return Optional.of(verified);
+    }
+
+    private void putEntry(MemoryEntry entry) {
+        MemoryEntry previous = entries.put(entry.getId(), entry);
+        if (previous != null) {
+            tokenCounter.addAndGet(-previous.getTokenCount());
+        }
+        tokenCounter.addAndGet(entry.getTokenCount());
+    }
+
+    private void removeEntry(String id) {
+        MemoryEntry removed = entries.remove(id);
+        if (removed != null) {
+            tokenCounter.addAndGet(-removed.getTokenCount());
+        }
     }
 
     @Override
@@ -214,6 +305,7 @@ public class LongTermMemory implements Memory {
         map.put("content", entry.getContent());
         map.put("type", entry.getType().name());
         map.put("timestamp", entry.getTimestamp().toString());
+        map.put("lastVerifiedAt", entry.getLastVerifiedAt().toString());
         map.put("metadata", entry.getMetadata());
         map.put("tokenCount", entry.getTokenCount());
         return map;
@@ -230,13 +322,17 @@ public class LongTermMemory implements Memory {
             if (timestampObj instanceof String timestampValue && !timestampValue.isBlank()) {
                 timestamp = Instant.parse(timestampValue);
             }
+            Instant lastVerifiedAt = null;
+            if (map.get("lastVerifiedAt") instanceof String verifiedValue && !verifiedValue.isBlank()) {
+                lastVerifiedAt = Instant.parse(verifiedValue);
+            }
             Map<String, String> metadata = new HashMap<>();
             Object metaObj = map.get("metadata");
             if (metaObj instanceof Map) {
                 ((Map<String, Object>) metaObj).forEach((k, v) -> metadata.put(k, String.valueOf(v)));
             }
             int tokenCount = map.get("tokenCount") instanceof Number n ? n.intValue() : MemoryEntry.estimateTokens(content);
-            return new MemoryEntry(id, content, type, timestamp, metadata, tokenCount);
+            return new MemoryEntry(id, content, type, timestamp, lastVerifiedAt, metadata, tokenCount);
         } catch (Exception e) {
             return null;
         }

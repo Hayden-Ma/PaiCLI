@@ -21,7 +21,10 @@ import com.paicli.harness.BetterHarnessRunner;
 import com.paicli.llm.LlmClient;
 import com.paicli.llm.LlmClientFactory;
 import com.paicli.memory.LongTermMemory;
+import com.paicli.memory.MemoryCommandArgs;
 import com.paicli.memory.MemoryEntry;
+import com.paicli.memory.MemoryManager;
+import com.paicli.memory.MemoryWriteResult;
 import com.paicli.render.Renderer;
 import com.paicli.render.RendererFactory;
 import com.paicli.render.StatusInfo;
@@ -509,14 +512,17 @@ public class Main {
                         ui.println("   /memory list - 查看长期记忆");
                         ui.println("   /memory search <关键词> - 搜索当前项目可见长期记忆");
                         ui.println("   /memory delete <id> - 删除单条长期记忆");
+                        ui.println("   /memory verify <id> - 确认记忆仍然成立，刷新最后核实时间");
+                        ui.println("   /memory replace <id> <新事实> - 用新内容替换冲突/过时的记忆");
                         ui.println("   /memory clear - 清空长期记忆");
                         ui.println("   /save <事实> - 保存项目级长期记忆；/save --global <事实> 保存全局记忆");
+                        ui.println("   /save --force <事实> - 与已有记忆冲突时仍保留两条");
                         ui.println();
                         continue;
                     }
                     case MEMORY_LIST -> {
                         List<MemoryEntry> entries = reactAgent.getMemoryManager().listLongTerm();
-                        ui.println(formatMemoryEntries("📋 长期记忆列表", entries));
+                        ui.println(formatMemoryEntries("📋 长期记忆列表", entries, reactAgent.getMemoryManager()));
                         ui.println();
                         continue;
                     }
@@ -526,7 +532,8 @@ public class Main {
                             ui.println("❌ 请提供搜索关键词，例如 /memory search Chrome 登录态\n");
                         } else {
                             List<MemoryEntry> entries = reactAgent.getMemoryManager().searchLongTerm(query, 20);
-                            ui.println(formatMemoryEntries("🔎 长期记忆搜索: " + query, entries));
+                            ui.println(formatMemoryEntries("🔎 长期记忆搜索: " + query, entries,
+                                    reactAgent.getMemoryManager()));
                             ui.println();
                         }
                         continue;
@@ -549,12 +556,34 @@ public class Main {
                         continue;
                     }
                     case MEMORY_SAVE -> {
-                        MemorySaveRequest saveRequest = parseMemorySave(command.payload());
+                        MemoryCommandArgs.SaveRequest saveRequest = MemoryCommandArgs.parseSave(command.payload());
                         if (saveRequest.fact().isEmpty()) {
                             ui.println("❌ 请提供要保存的内容，例如 /save 这个项目使用Java 17，或 /save --global 默认用中文回答\n");
                         } else {
-                            reactAgent.getMemoryManager().storeFact(saveRequest.fact(), saveRequest.scope());
-                            ui.println("💾 已保存到长期记忆(" + saveRequest.scope() + "): " + saveRequest.fact() + "\n");
+                            MemoryWriteResult result = reactAgent.getMemoryManager().storeFact(
+                                    saveRequest.fact(), saveRequest.scope(), null, saveRequest.force());
+                            ui.println(result.describe() + "\n");
+                        }
+                        continue;
+                    }
+                    case MEMORY_VERIFY -> {
+                        String id = command.payload();
+                        if (id == null || id.isBlank()) {
+                            ui.println("❌ 请提供要核实的记忆 id，例如 /memory verify fact-abcd1234\n");
+                        } else {
+                            ui.println(reactAgent.getMemoryManager().verifyLongTerm(id)
+                                    .map(entry -> "✅ 已刷新核实时间: " + entry.getId() + " " + entry.getContent())
+                                    .orElse("📭 未找到长期记忆: " + id) + "\n");
+                        }
+                        continue;
+                    }
+                    case MEMORY_REPLACE -> {
+                        MemoryCommandArgs.ReplaceRequest replaceRequest = MemoryCommandArgs.parseReplace(command.payload());
+                        if (!replaceRequest.valid()) {
+                            ui.println("❌ 用法: /memory replace <旧记忆 id> <新事实>，例如 /memory replace fact-abcd1234 项目使用 Java 21\n");
+                        } else {
+                            ui.println(reactAgent.getMemoryManager()
+                                    .replaceFact(replaceRequest.id(), replaceRequest.fact()).describe() + "\n");
                         }
                         continue;
                     }
@@ -1712,8 +1741,10 @@ public class Main {
                 new SlashCommandHint("/memory list", "/memory list", "查看长期记忆列表"),
                 new SlashCommandHint("/memory search ", "/memory search <关键词>", "搜索当前项目可见长期记忆"),
                 new SlashCommandHint("/memory delete ", "/memory delete <id>", "删除单条长期记忆"),
+                new SlashCommandHint("/memory verify ", "/memory verify <id>", "确认记忆仍然成立，刷新核实时间"),
+                new SlashCommandHint("/memory replace ", "/memory replace <id> <新事实>", "用新内容替换冲突或过时的记忆"),
                 new SlashCommandHint("/memory clear", "/memory clear", "清空长期记忆"),
-                new SlashCommandHint("/save ", "/save [--global] <事实内容>", "手动保存项目级或全局长期记忆"),
+                new SlashCommandHint("/save ", "/save [--global] [--force] <事实内容>", "手动保存项目级或全局长期记忆"),
                 new SlashCommandHint("/skill", "/skill", "查看 skill 列表"),
                 new SlashCommandHint("/skill list", "/skill list", "查看 skill 列表"),
                 new SlashCommandHint("/skill show ", "/skill show <name>", "查看 SKILL.md 全文"),
@@ -3003,24 +3034,7 @@ public class Main {
         return new McpConfigBootstrapResult(false, "");
     }
 
-    private static MemorySaveRequest parseMemorySave(String raw) {
-        String value = raw == null ? "" : raw.trim();
-        if (value.regionMatches(true, 0, "--global ", 0, 9)) {
-            return new MemorySaveRequest(value.substring(9).trim(), "global");
-        }
-        if (value.equalsIgnoreCase("--global")) {
-            return new MemorySaveRequest("", "global");
-        }
-        if (value.regionMatches(true, 0, "--project ", 0, 10)) {
-            return new MemorySaveRequest(value.substring(10).trim(), "project");
-        }
-        if (value.equalsIgnoreCase("--project")) {
-            return new MemorySaveRequest("", "project");
-        }
-        return new MemorySaveRequest(value, "project");
-    }
-
-    private static String formatMemoryEntries(String title, List<MemoryEntry> entries) {
+    private static String formatMemoryEntries(String title, List<MemoryEntry> entries, MemoryManager memoryManager) {
         StringBuilder sb = new StringBuilder(title).append("：\n");
         if (entries == null || entries.isEmpty()) {
             return sb.append("📭 没有匹配的长期记忆。").toString();
@@ -3034,8 +3048,12 @@ public class Main {
             if ("project".equals(scope) && project != null && !project.isBlank()) {
                 sb.append(" ").append(shortenPath(project));
             }
-            sb.append(" · ").append(entry.getTimestamp()).append("\n")
-                    .append("  ").append(entry.getContent()).append("\n");
+            sb.append(" · 写入 ").append(entry.getTimestamp())
+                    .append(" · 最后核实 ").append(entry.getLastVerifiedAt());
+            if (memoryManager.isStale(entry)) {
+                sb.append(" · ⚠️ 可能已过时");
+            }
+            sb.append("\n").append("  ").append(entry.getContent()).append("\n");
         }
         return sb.toString().trim();
     }
@@ -3069,6 +3087,4 @@ public class Main {
         }
     }
 
-    private record MemorySaveRequest(String fact, String scope) {
-    }
 }

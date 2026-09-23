@@ -394,6 +394,27 @@ class TurnToolPolicyTest {
     }
 
     @Test
+    void policyObservesRawBrowserResultBeforeOversizedOutputIsOffloaded(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tempDir) {
+        TurnToolPolicy policy = TurnToolPolicy.fromUserInput("打开 https://example.com/private");
+        RecordingRegistry registry = new RecordingRegistry();
+        registry.setProjectPath(tempDir.toString());
+        registry.setToolResultOffloader(new ToolResultOffloader(tempDir, true, 5_000));
+        policy.execute(registry, List.of(invocation(
+                "navigate", "mcp__chrome-devtools__navigate_page",
+                "{\"type\":\"url\",\"url\":\"https://example.com/private\"}")),
+                policy.expose(definitions()));
+
+        registry.browserResult = "该页面需要登录后才能访问\n" + "uid=1 generic \"占位节点\"\n".repeat(1_000);
+        ToolExecutionResult snapshot = policy.execute(registry, List.of(invocation(
+                "snapshot", "mcp__chrome-devtools__take_snapshot", "{}")),
+                policy.expose(definitions())).get(0);
+
+        assertTrue(snapshot.result().startsWith("[工具输出过大"), "回灌上下文的是卸载摘要");
+        assertTrue(policy.expose(definitions()).advertisedNames().contains("browser_connect"),
+                "登录态识别必须基于卸载前的原始结果");
+    }
+
+    @Test
     void ordinaryPageTextMentioningAfterLoginDoesNotEnableBrowserConnect() {
         TurnToolPolicy policy = TurnToolPolicy.fromUserInput("打开 https://example.com/help");
         RecordingRegistry registry = new RecordingRegistry();
