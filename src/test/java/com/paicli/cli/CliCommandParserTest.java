@@ -491,4 +491,28 @@ class CliCommandParserTest {
         assertEquals(CliCommandParser.CommandType.SKILL_OFF, off.type());
         assertEquals("verbose-debug", off.payload());
     }
+
+    @Test
+    void parsesMemoryVerifyAndReplaceCommands() {
+        CliCommandParser.ParsedCommand verify = CliCommandParser.parse("/memory verify fact-abcd1234");
+        CliCommandParser.ParsedCommand replace = CliCommandParser.parse("/memory replace fact-abcd1234 项目使用 Java 21");
+        CliCommandParser.ParsedCommand bareVerify = CliCommandParser.parse("/memory verify");
+
+        assertEquals(CliCommandParser.CommandType.MEMORY_VERIFY, verify.type());
+        assertEquals("fact-abcd1234", verify.payload());
+        assertEquals(CliCommandParser.CommandType.MEMORY_REPLACE, replace.type());
+        assertEquals("fact-abcd1234 项目使用 Java 21", replace.payload());
+        assertEquals(CliCommandParser.CommandType.MEMORY_VERIFY, bareVerify.type());
+        assertEquals("", bareVerify.payload());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND,
+                CliCommandParser.parse("/memory verifyall").type());
+    }
+
+    @Test
+    void saveForceFlagStaysInPayload() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/save --force 项目使用 Java 21");
+
+        assertEquals(CliCommandParser.CommandType.MEMORY_SAVE, command.type());
+        assertEquals("--force 项目使用 Java 21", command.payload());
+    }
 }

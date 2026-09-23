@@ -484,6 +484,27 @@ class ToolRegistryTest {
         assertTrue(result.contains("长期记忆(global)"));
     }
 
+    @Test
+    void saveMemoryToolReturnsWriterFeedbackAndPassesUserChoice() {
+        ToolRegistry registry = new ToolRegistry();
+        List<String> calls = new ArrayList<>();
+        registry.setMemoryWriter((fact, scope, replaceId, keepBoth) -> {
+            calls.add(scope + ":" + fact + ":" + replaceId + ":" + keepBoth);
+            return "⚠️ 未写入：新内容与已有长期记忆高度相似但不一致";
+        });
+
+        String conflict = registry.executeTool("save_memory", "{\"fact\":\"项目使用 Java 21\"}");
+        registry.executeTool("save_memory",
+                "{\"fact\":\"项目使用 Java 21\",\"replace_id\":\"fact-1\",\"keep_both\":false}");
+        registry.executeTool("save_memory", "{\"fact\":\"项目使用 Java 21\",\"keep_both\":true}");
+
+        assertTrue(conflict.contains("未写入"));
+        assertEquals(List.of(
+                "project:项目使用 Java 21:null:false",
+                "project:项目使用 Java 21:fact-1:false",
+                "project:项目使用 Java 21:null:true"), calls);
+    }
+
     private static void restoreSystemProperty(String key, String previous) {
         if (previous == null) {
             System.clearProperty(key);

@@ -62,6 +62,8 @@ public class ToolRegistry {
     private static final int DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS = 90;
     private static final int MAX_PARALLEL_TOOLS = 4;
     private static final int MAX_COMMAND_OUTPUT_CHARS = 8_000;
+    // 开启工具输出卸载时，命令输出先完整捕获到这个上限，超过 MAX_COMMAND_OUTPUT_CHARS 的部分写入会话文件而不是丢弃。
+    private static final int MAX_COMMAND_CAPTURE_CHARS = 2_000_000;
     private static final int MAX_READ_FILE_LINES = 2_000;
     private static final int MAX_GREP_RESULTS = 200;
     private static final int MAX_GREP_CONTEXT_LINES = 5;
@@ -94,13 +96,14 @@ public class ToolRegistry {
     private ContextProfile contextProfile = ContextProfile.from(null);
     private BrowserGuard browserGuard;
     private BrowserConnector browserConnector;
-    private BiConsumer<String, String> memorySaver;
+    private MemoryWriter memoryWriter;
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private java.util.function.BiConsumer<String, String[]> writeFileObserver = (p, ba) -> {};
     private LspManager lspManager = new LspManager(projectPath);
     private SnapshotService snapshotService = SnapshotService.forProject(Path.of(projectPath));
     private boolean customSnapshotService;
+    private ToolResultOffloader toolResultOffloader = ToolResultOffloader.fromConfiguration(Path.of(projectPath));
     private boolean sanitizeCommandEnvironment;
     private volatile String currentProvider = "";
     private volatile String currentModel = "";
@@ -135,6 +138,7 @@ public class ToolRegistry {
         this.projectPath = projectPath;
         this.pathGuard = new PathGuard(projectPath);
         this.lspManager.setProjectPath(projectPath);
+        this.toolResultOffloader.setProjectRoot(Path.of(projectPath));
         if (!customSnapshotService) {
             this.snapshotService.close();
             this.snapshotService = SnapshotService.forProject(Path.of(projectPath));
@@ -194,11 +198,22 @@ public class ToolRegistry {
     }
 
     public void setMemorySaver(Consumer<String> memorySaver) {
-        this.memorySaver = memorySaver == null ? null : (fact, scope) -> memorySaver.accept(fact);
+        this.memoryWriter = memorySaver == null ? null : (fact, scope, replaceId, keepBoth) -> {
+            memorySaver.accept(fact);
+            return null;
+        };
     }
 
     public void setScopedMemorySaver(BiConsumer<String, String> memorySaver) {
-        this.memorySaver = memorySaver;
+        this.memoryWriter = memorySaver == null ? null : (fact, scope, replaceId, keepBoth) -> {
+            memorySaver.accept(fact, scope);
+            return null;
+        };
+    }
+
+    /** 注入带冲突反馈的记忆写入器；返回值会作为 save_memory 的工具结果回给模型。 */
+    public void setMemoryWriter(MemoryWriter memoryWriter) {
+        this.memoryWriter = memoryWriter;
     }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
@@ -225,6 +240,17 @@ public class ToolRegistry {
      */
     public void setWriteFileObserver(java.util.function.BiConsumer<String, String[]> observer) {
         this.writeFileObserver = observer == null ? (p, ba) -> {} : observer;
+    }
+
+    public void setToolResultOffloader(ToolResultOffloader toolResultOffloader) {
+        if (toolResultOffloader != null) {
+            toolResultOffloader.setProjectRoot(Path.of(projectPath));
+            this.toolResultOffloader = toolResultOffloader;
+        }
+    }
+
+    public ToolResultOffloader getToolResultOffloader() {
+        return toolResultOffloader;
     }
 
     public void setLspManager(LspManager lspManager) {
@@ -726,23 +752,31 @@ public class ToolRegistry {
     private void registerMemoryTools() {
         tools.put("save_memory", new Tool(
                 "save_memory",
-                "当且仅当用户明确说“记一下”“记住”“以后记得”或要求保存长期偏好/稳定事实时调用，把精炼事实写入长期记忆；scope 默认 project，跨项目偏好才用 global；不要保存一次性任务请求、临时文件名或模型猜测。",
+                "当且仅当用户明确说“记一下”“记住”“以后记得”或要求保存长期偏好/稳定事实时调用，把精炼事实写入长期记忆；scope 默认 project，跨项目偏好才用 global；不要保存一次性任务请求、临时文件名或模型猜测。"
+                        + "如果结果提示与已有记忆冲突，把两条都告诉用户并等待用户选择；只有用户明确选择后才可传 replace_id 或 keep_both 重新调用。",
                 createParameters(
                         new Param("fact", "string", "要长期保存的稳定事实或用户偏好，必须精炼、可跨会话复用", true),
-                        new Param("scope", "string", "记忆作用域：project 或 global。默认 project；跨项目长期偏好才用 global", false)
+                        new Param("scope", "string", "记忆作用域：project 或 global。默认 project；跨项目长期偏好才用 global", false),
+                        new Param("replace_id", "string", "仅当用户明确选择用新内容替换某条冲突记忆时，传该旧记忆 id", false),
+                        new Param("keep_both", "boolean", "仅当用户明确要求冲突的新旧两条都保留时传 true", false)
                 ),
                 args -> {
                     String fact = args.get("fact");
                     if (fact == null || fact.isBlank()) {
                         return "保存长期记忆失败: fact 不能为空";
                     }
-                    if (memorySaver == null) {
+                    if (memoryWriter == null) {
                         return "保存长期记忆失败: 记忆保存器未初始化";
                     }
                     String normalized = fact.trim();
                     String scope = "global".equalsIgnoreCase(args.get("scope")) ? "global" : "project";
-                    memorySaver.accept(normalized, scope);
-                    return "💾 已保存到长期记忆(" + scope + "): " + normalized;
+                    String replaceId = args.get("replace_id");
+                    boolean keepBoth = parseBoolean(args.get("keep_both"), false);
+                    String message = memoryWriter.write(normalized, scope,
+                            replaceId == null || replaceId.isBlank() ? null : replaceId.trim(), keepBoth);
+                    return message == null || message.isBlank()
+                            ? "💾 已保存到长期记忆(" + scope + "): " + normalized
+                            : message;
                 }
         ));
     }
@@ -1383,6 +1417,25 @@ public class ToolRegistry {
         }
     }
 
+    /**
+     * 把超大结果换成“会话文件路径 + 首尾预览”的上下文视图。
+     *
+     * <p>由 {@link TurnToolPolicy#execute} 在策略观察完原始结果之后调用，保证登录态识别等
+     * 基于原始文本的策略判断不受卸载影响；图片、成功标记和结构化 URL 凭据原样保留。</p>
+     */
+    public ToolExecutionResult offloadForContext(ToolExecutionResult result) {
+        if (result == null || result.result() == null) {
+            return result;
+        }
+        String text = toolResultOffloader.offloadIfOversized(result.name(), result.argumentsJson(), result.result());
+        if (text == null || text.equals(result.result())) {
+            return result;
+        }
+        return new ToolExecutionResult(result.id(), result.name(), result.argumentsJson(), text,
+                result.elapsedMillis(), result.timedOut(), result.imageParts(), result.successful(),
+                result.discoveredUrls());
+    }
+
     private long elapsedMillis(long startedAtNanos) {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
     }
@@ -1486,25 +1539,37 @@ public class ToolRegistry {
     }
 
     private String readProcessOutput(Process process) throws Exception {
+        boolean offload = toolResultOffloader.isEnabled();
+        int captureLimit = offload ? MAX_COMMAND_CAPTURE_CHARS : MAX_COMMAND_OUTPUT_CHARS;
         StringBuilder output = new StringBuilder();
+        boolean overflow = false;
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                if (output.length() < MAX_COMMAND_OUTPUT_CHARS) {
-                    int remaining = MAX_COMMAND_OUTPUT_CHARS - output.length();
+                if (output.length() < captureLimit) {
+                    int remaining = captureLimit - output.length();
                     if (line.length() > remaining) {
                         output.append(line, 0, remaining);
+                        overflow = true;
                     } else {
                         output.append(line);
                     }
                     output.append("\n");
+                } else {
+                    overflow = true;
                 }
             }
         }
-        if (output.length() >= MAX_COMMAND_OUTPUT_CHARS) {
-            return output.substring(0, MAX_COMMAND_OUTPUT_CHARS) + "\n...(输出已截断)";
+        if (output.length() <= MAX_COMMAND_OUTPUT_CHARS) {
+            return output.toString();
         }
-        return output.toString();
+        if (offload) {
+            String full = overflow
+                    ? output + "...(超过 " + MAX_COMMAND_CAPTURE_CHARS + " 字符的部分未保存)\n"
+                    : output.toString();
+            return toolResultOffloader.offload("execute_command", full, MAX_COMMAND_OUTPUT_CHARS);
+        }
+        return output.substring(0, MAX_COMMAND_OUTPUT_CHARS) + "\n...(输出已截断)";
     }
 
     private String getCommandOutput(Future<String> outputFuture) throws Exception {
@@ -1586,5 +1651,11 @@ public class ToolRegistry {
 
     public interface ToolExecutor {
         String execute(Map<String, String> args);
+    }
+
+    /** save_memory 的写入回调；返回给模型的说明文本，返回 null 使用默认成功文案。 */
+    @FunctionalInterface
+    public interface MemoryWriter {
+        String write(String fact, String scope, String replaceId, boolean keepBoth);
     }
 }

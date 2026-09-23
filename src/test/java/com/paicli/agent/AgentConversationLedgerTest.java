@@ -1,5 +1,6 @@
 package com.paicli.agent;
 
+import com.paicli.tool.ToolResultBoundary;
 import com.paicli.history.ConversationLedger;
 import com.paicli.llm.LlmClient;
 import com.paicli.memory.MemoryManager;
@@ -62,7 +63,7 @@ class AgentConversationLedgerTest {
         assertEquals("tool reasoning", callEntry.message().reasoningContent());
         assertEquals("call-1", callEntry.message().toolCalls().get(0).id());
         assertEquals("call-1", resultEntry.message().toolCallId());
-        assertEquals("raw tool result", resultEntry.message().content());
+        assertEquals(ToolResultBoundary.wrap("read_file", "raw tool result"), resultEntry.message().content());
         assertEquals("final reasoning", finalEntry.message().reasoningContent());
         assertEquals("react", finalEntry.mode());
         assertEquals("agent", finalEntry.actor());

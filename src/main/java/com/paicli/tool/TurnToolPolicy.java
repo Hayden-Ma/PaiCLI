@@ -334,8 +334,9 @@ public final class TurnToolPolicy {
                 ToolExecutionResult result = i < resultCount
                         ? executed.get(i)
                         : missingResult(allowed.get(i));
-                merged.set(allowedIndexes.get(i), result);
+                // 先让策略观察原始结果，再换成可能已卸载的上下文视图。
                 observe(result);
+                merged.set(allowedIndexes.get(i), registry.offloadForContext(result));
             }
         }
         return List.copyOf(merged);

@@ -1,5 +1,9 @@
 package com.paicli.memory;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -10,12 +14,31 @@ import java.util.stream.Collectors;
  * 1. 关键词匹配：直接匹配内容中的关键词
  * 2. 类型优先：不同场景优先检索不同类型的记忆
  * 3. 时间衰减：越近的记忆权重越高
+ *
+ * 注入 system prompt 时每条记忆都带写入时间和最后核实时间；超过
+ * {@code paicli.memory.stale.days}（默认 30 天）未核实的条目会标注“可能已过时”。
  */
 public class MemoryRetriever {
+    static final String STALE_DAYS_PROPERTY = "paicli.memory.stale.days";
+    static final String STALE_DAYS_ENV = "PAICLI_MEMORY_STALE_DAYS";
+    static final int DEFAULT_STALE_DAYS = 30;
+    static final String STALE_LABEL = "可能已过时";
+
     private final LongTermMemory longTermMemory;
+    private final Duration staleAfter;
+    private final Clock clock;
 
     public MemoryRetriever(LongTermMemory longTermMemory) {
+        this(longTermMemory, configuredStaleAfter(), Clock.systemDefaultZone());
+    }
+
+    /**
+     * @param staleAfter 超过多久未核实视为可能过时；null 或非正数表示不标注
+     */
+    MemoryRetriever(LongTermMemory longTermMemory, Duration staleAfter, Clock clock) {
         this.longTermMemory = longTermMemory;
+        this.staleAfter = staleAfter;
+        this.clock = clock;
     }
 
     /**
@@ -63,18 +86,59 @@ public class MemoryRetriever {
 
         StringBuilder context = new StringBuilder();
         context.append("## 相关长期记忆\n\n");
+        context.append("以下记忆是线索而不是事实；涉及版本、配置、路径等可能变化的信息，行动前先对照当前文件核实。\n\n");
 
         int usedTokens = 0;
         for (MemoryEntry entry : relevant) {
             if (usedTokens + entry.getTokenCount() > maxTokens) break;
 
-            context.append("- [").append(entry.getType()).append("] ")
-                    .append(entry.getContent()).append("\n");
+            context.append(formatEntry(entry)).append("\n");
             usedTokens += entry.getTokenCount();
         }
 
         context.append("\n");
         return context.toString();
+    }
+
+    public boolean isStale(MemoryEntry entry) {
+        if (staleAfter == null || staleAfter.isZero() || staleAfter.isNegative()) {
+            return false;
+        }
+        return entry.getLastVerifiedAt().plus(staleAfter).isBefore(clock.instant());
+    }
+
+    private String formatEntry(MemoryEntry entry) {
+        StringBuilder line = new StringBuilder("- [").append(entry.getType()).append("]");
+        boolean stale = isStale(entry);
+        if (stale) {
+            line.append("[").append(STALE_LABEL).append("]");
+        }
+        line.append(" ").append(entry.getContent())
+                .append("（写入 ").append(date(entry.getTimestamp()))
+                .append("，最后核实 ").append(date(entry.getLastVerifiedAt()));
+        if (stale) {
+            line.append("，已超过 ").append(staleAfter.toDays()).append(" 天未核实，使用前必须先核实");
+        }
+        return line.append("）").toString();
+    }
+
+    private LocalDate date(Instant instant) {
+        return LocalDate.ofInstant(instant, clock.getZone());
+    }
+
+    private static Duration configuredStaleAfter() {
+        String raw = System.getProperty(STALE_DAYS_PROPERTY);
+        if (raw == null || raw.isBlank()) {
+            raw = System.getenv(STALE_DAYS_ENV);
+        }
+        if (raw == null || raw.isBlank()) {
+            return Duration.ofDays(DEFAULT_STALE_DAYS);
+        }
+        try {
+            return Duration.ofDays(Long.parseLong(raw.trim()));
+        } catch (NumberFormatException e) {
+            return Duration.ofDays(DEFAULT_STALE_DAYS);
+        }
     }
 
     /**

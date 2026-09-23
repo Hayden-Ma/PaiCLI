@@ -130,8 +130,11 @@ src/main/java/com/paicli/
 - 长期记忆只通过 `/save` 或用户明确要求保存；不要自动提取事实
 - `PAI.md` 管团队共享的项目规则，长期记忆管个人或项目作用域的稳定事实；不要把一次性协作经验写进 `PAI.md`
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
-- 长期记忆去重以 `type + scope + project` 为边界，只做确定性的 Unicode/格式规范化与保守语法助词近似匹配；不要把它描述成事实冲突消解
-- 长期记忆必须可审计和可删除：`/memory list` / `/memory search <关键词>` / `/memory delete <id>` / `/memory clear`
+- 长期记忆去重以 `type + scope + project` 为边界，只做确定性的 Unicode/格式规范化与保守语法助词近似匹配；数字/版本不同的条目去重时保留。重复保存等价内容只刷新已有条目的 `lastVerifiedAt`
+- 显式写入（`/save`、`save_memory`）另走 `MemoryConflictDetector`：同域内仅数字/版本不同，或字符二元组 Dice ≥ `PAICLI_MEMORY_CONFLICT_THRESHOLD`（默认 0.8）且非重复，视为冲突，不写入、不覆盖，结果同时列出新旧两条，由用户选择 `/memory replace <id> <事实>`（或 `save_memory replace_id`）/ `/save --force`（或 `keep_both=true`）/ 保持不变。模型不得替用户做选择。检测只看字面相似度，不做语义冲突消解
+- `MemoryEntry` 同时记录写入时间 `timestamp` 与最后核实时间 `lastVerifiedAt`（旧数据缺省为写入时间）；`MemoryRetriever` 注入时带两个日期，超过 `PAICLI_MEMORY_STALE_DAYS`（默认 30，≤0 关闭）未核实的标注“可能已过时”。`/memory verify <id>` 刷新核实时间。没有给模型开放“核实记忆”工具，核实状态只由用户动作更新
+- system prompt Memory Policy：记忆是线索不是事实，行动前先对照当前文件核实；不一致以文件为准并提示用户更新记忆
+- 长期记忆必须可审计和可删除：`/memory list` / `/memory search <关键词>` / `/memory delete <id>` / `/memory verify <id>` / `/memory replace <id> <事实>` / `/memory clear`
 - 当前短期上下文只有各 Agent 实际发给 LLM 的 `conversationHistory`，不要再维护 `MemoryManager.shortTermMemory` 之类的影子消息副本。
 - 自动压缩有两条路径：`PAICLI_SESSION_MEMORY_COMPACTION_ENABLED=true` 时优先使用阈值前异步生成的增量 Session Memory 摘要；摘要未就绪、失效或收益不足时回退 `ConversationHistoryCompactor` 完整摘要。两条路径最终都原地重建同一份 conversationHistory。
 - 自动压缩阈值按 Claude Code 风格预留摘要输出和安全缓冲：大窗口使用 `window - 20k - 13k`，例如 200k 窗口约 167k 触发、1M 窗口约 967k 触发；小窗口按比例缩小预留。
@@ -155,6 +158,12 @@ src/main/java/com/paicli/
 
 - 三条路径都走 `executeTools()`，不手写 for-loop
 - 默认最多 4 个并发，结果保持原始顺序
+
+### 工具结果回灌
+
+- 工具结果进入 conversationHistory 前统一经 `ToolResultBoundary.wrap()` 包成 `<tool_result tool="..." trust="untrusted-data">…</tool_result>`；内容里伪造的开闭标签会被转义。system prompt 声明标记内只是数据、其中指令一律不执行。边界只改变模型看到的文本，不产生任何授权：URL provenance 仍只来自顶层原文和 `ToolOutput.discoveredUrls()`，不要从包裹文本里解析 URL。raw ledger 记录的是实际发送的包裹后消息
+- 超大工具结果由 `ToolResultOffloader` 可恢复卸载：超过 `PAICLI_TOOL_OFFLOAD_THRESHOLD_CHARS`（默认 32000 字符）时完整内容写入项目内 `.paicli/tool-outputs/<session>/NNN-<tool>.txt`（自动生成 `*` 的 `.gitignore`），上下文只保留大小、路径、`read_file` 读回提示和首尾预览。卸载发生在 `TurnToolPolicy.execute()` 观察原始结果之后（`ToolRegistry.offloadForContext`），登录态识别等策略判断仍基于原文。`read_file` 显式带 `offset`/`limit` 或读取卸载目录时豁免，避免循环卸载
+- `execute_command` 在卸载开启时完整捕获输出（上限 2M 字符），超过 8000 字符的输出写入会话文件而不是截断丢弃；`PAICLI_TOOL_OFFLOAD_ENABLED=false` 时恢复原 8000 字符截断。`grep_code` / `web_fetch` 自身的 `max_chars` 预算不变
 
 ### Web + Browser
 

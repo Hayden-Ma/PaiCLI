@@ -7,7 +7,9 @@ import com.paicli.config.PaiCliConfig;
 import com.paicli.hitl.HitlHandler;
 import com.paicli.llm.LlmClient;
 import com.paicli.memory.LongTermMemory;
+import com.paicli.memory.MemoryCommandArgs;
 import com.paicli.memory.MemoryEntry;
+import com.paicli.memory.MemoryManager;
 import com.paicli.runtime.CancellationContext;
 import com.paicli.runtime.CancellationToken;
 import com.paicli.snapshot.RestoreResult;
@@ -128,19 +130,24 @@ public final class TuiSessionController implements AutoCloseable {
                     + "\n/memory list - 查看长期记忆"
                     + "\n/memory search <关键词> - 搜索当前项目可见长期记忆"
                     + "\n/memory delete <id> - 删除单条长期记忆"
+                    + "\n/memory verify <id> - 确认记忆仍然成立，刷新核实时间"
+                    + "\n/memory replace <id> <新事实> - 用新内容替换冲突/过时的记忆"
                     + "\n/memory clear - 清空长期记忆"
                     + "\n/save <事实> - 保存项目级长期记忆"
-                    + "\n/save --global <事实> - 保存全局长期记忆");
+                    + "\n/save --global <事实> - 保存全局长期记忆"
+                    + "\n/save --force <事实> - 与已有记忆冲突时仍保留两条");
             return true;
         }
         if ("/memory list".equals(lower) || "/mem list".equals(lower)) {
-            appendSystem(formatMemoryEntries(reactAgent.getMemoryManager().listLongTerm()));
+            appendSystem(formatMemoryEntries(reactAgent.getMemoryManager().listLongTerm(),
+                    reactAgent.getMemoryManager()));
             return true;
         }
         if (lower.startsWith("/memory search ") || lower.startsWith("/mem search ")) {
             int prefixLength = lower.startsWith("/mem search ") ? 12 : 15;
             String query = input.substring(prefixLength).trim();
-            appendSystem(formatMemoryEntries(reactAgent.getMemoryManager().searchLongTerm(query, 20)));
+            appendSystem(formatMemoryEntries(reactAgent.getMemoryManager().searchLongTerm(query, 20),
+                    reactAgent.getMemoryManager()));
             return true;
         }
         if (lower.startsWith("/memory delete ") || lower.startsWith("/mem delete ")) {
@@ -156,20 +163,28 @@ public final class TuiSessionController implements AutoCloseable {
             appendSystem("长期记忆已清空。");
             return true;
         }
+        if (lower.startsWith("/memory verify ")) {
+            String id = input.substring(15).trim();
+            appendSystem(reactAgent.getMemoryManager().verifyLongTerm(id)
+                    .map(entry -> "已刷新核实时间: " + entry.getId() + " " + entry.getContent())
+                    .orElse("未找到长期记忆: " + id));
+            return true;
+        }
+        if (lower.startsWith("/memory replace ")) {
+            MemoryCommandArgs.ReplaceRequest request = MemoryCommandArgs.parseReplace(input.substring(16));
+            appendSystem(request.valid()
+                    ? reactAgent.getMemoryManager().replaceFact(request.id(), request.fact()).describe()
+                    : "用法: /memory replace <旧记忆 id> <新事实>");
+            return true;
+        }
         if (lower.startsWith("/save ")) {
-            String fact = input.substring(6).trim();
-            String scope = "project";
-            if (fact.regionMatches(true, 0, "--global ", 0, 9)) {
-                scope = "global";
-                fact = fact.substring(9).trim();
-            } else if (fact.regionMatches(true, 0, "--project ", 0, 10)) {
-                fact = fact.substring(10).trim();
-            }
-            if (fact.isEmpty()) {
+            MemoryCommandArgs.SaveRequest request = MemoryCommandArgs.parseSave(input.substring(6));
+            if (request.fact().isEmpty()) {
                 appendSystem("请提供要保存的内容，例如 /save 这个项目使用 Java 17");
             } else {
-                reactAgent.getMemoryManager().storeFact(fact, scope);
-                appendSystem("已保存到长期记忆(" + scope + "): " + fact);
+                appendSystem(reactAgent.getMemoryManager()
+                        .storeFact(request.fact(), request.scope(), null, request.force())
+                        .describe());
             }
             return true;
         }
@@ -405,7 +420,7 @@ public final class TuiSessionController implements AutoCloseable {
         return output.replaceAll("\\u001B\\[[;\\d]*m", "").trim();
     }
 
-    private static String formatMemoryEntries(List<MemoryEntry> entries) {
+    private static String formatMemoryEntries(List<MemoryEntry> entries, MemoryManager memoryManager) {
         if (entries == null || entries.isEmpty()) {
             return "没有匹配的长期记忆。";
         }
@@ -414,7 +429,9 @@ public final class TuiSessionController implements AutoCloseable {
             sb.append("- ")
                     .append(entry.getId())
                     .append(" [").append(LongTermMemory.scopeOf(entry)).append("] ")
+                    .append(memoryManager.isStale(entry) ? "[可能已过时] " : "")
                     .append(entry.getContent())
+                    .append(" (最后核实 ").append(entry.getLastVerifiedAt()).append(")")
                     .append("\n");
         }
         return sb.toString().trim();

@@ -414,7 +414,9 @@ export AGNES_BASE_URL=https://apihub.agnes-ai.com/v1
 
 长期记忆默认保存在用户目录下的 `~/.paicli/memory/long_term_memory.json`。
 长期记忆只保存显式保存意图下的稳定事实：`/save <事实>`，或用户在自然语言里明确说“记一下 / 记住 / 以后记得”时由 Agent 调用 `save_memory`。默认保存为当前项目作用域；跨项目通用偏好可用 `/save --global <事实>` 或 `save_memory(scope=global)`。它不应包含一次性任务请求或临时文件名/目录名。
-重复记忆只会在相同 `type + scope + project` 域内合并：先规范化 Unicode 宽窄、大小写、空白和普通标点，再保守识别少量中文语法助词差异。数字、代码符号或实质内容不同的事实不会被自动覆盖；当前仍不提供事实冲突消解，冲突条目可通过 `/memory list` 审计后显式删除。
+重复记忆只会在相同 `type + scope + project` 域内合并：先规范化 Unicode 宽窄、大小写、空白和普通标点，再保守识别少量中文语法助词差异；重复保存等价内容只刷新已有条目的核实时间。数字、代码符号或实质内容不同的事实不会被去重合并。
+写入时另有冲突检测：同域内“只有数字/版本号不同”或字符二元组相似度 ≥ `PAICLI_MEMORY_CONFLICT_THRESHOLD`（默认 0.8）但又不是重复的条目，视为同一事实的新旧版本，新内容不会写入，`/save` 或 `save_memory` 的结果会同时列出两条，由用户选择：保留旧的（无需操作）、`/memory replace <id> <新事实>` 改用新的，或 `/save --force <事实>` 两条都保留。冲突检测基于字面相似度，不理解同义改写或语义矛盾。
+每条记忆记录写入时间和最后核实时间；超过 `PAICLI_MEMORY_STALE_DAYS`（默认 30 天）未核实的记忆在检索注入和 `/memory list` 中标注“可能已过时”。`/memory verify <id>` 表示用户确认仍然成立并刷新核实时间。system prompt 要求模型把记忆当线索：行动前用当前文件核实，不一致时以文件为准并提示用户更新记忆。
 可用 `/memory list` 查看长期记忆，`/memory search <关键词>` 搜索当前项目可见记忆，`/memory delete <id>` 删除单条记忆。
 
 项目级记忆使用 Markdown 文件维护，和 `/save` 的长期记忆分工不同：
@@ -708,8 +710,10 @@ I
 - `/memory list` - 查看长期记忆列表
 - `/memory search <关键词>` - 搜索当前项目可见长期记忆
 - `/memory delete <id>` - 删除单条长期记忆
+- `/memory verify <id>` - 确认记忆仍然成立，刷新最后核实时间
+- `/memory replace <id> <新事实>` - 用新内容替换冲突或过时的记忆（新条目沿用旧条目作用域）
 - `/memory clear` - 清空长期记忆
-- `/save <事实>` - 手动保存项目级关键事实到长期记忆；`/save --global <事实>` 保存跨项目通用偏好
+- `/save <事实>` - 手动保存项目级关键事实到长期记忆；`/save --global <事实>` 保存跨项目通用偏好；`/save --force <事实>` 与已有记忆冲突时两条都保留
 - `save_memory` - Agent 内置工具，仅在用户明确要求保存长期偏好或稳定事实时调用；默认 `scope=project`，跨项目通用偏好才用 `scope=global`
 - `/init` - 生成精简项目级记忆 `PAI.md`；已存在时不覆盖，`/init --force` 可重写
 - `/export` - 导出当前 ReAct 会话对话记录为 Markdown（包含完整 system prompt），写入 `~/.paicli/exports/session-*.md`

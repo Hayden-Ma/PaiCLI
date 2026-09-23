@@ -38,7 +38,7 @@ final class MemoryDeduplicator {
         return hasEquivalentContent(existing.getContent(), incoming.getContent());
     }
 
-    private static boolean sameDomain(MemoryEntry left, MemoryEntry right) {
+    static boolean sameDomain(MemoryEntry left, MemoryEntry right) {
         if (left.getType() != right.getType()) {
             return false;
         }
@@ -72,7 +72,7 @@ final class MemoryDeduplicator {
         return isGrammaticalVariant(first, second);
     }
 
-    private static String canonicalize(String content) {
+    static String canonicalize(String content) {
         String normalized = Normalizer.normalize(
                 content == null ? "" : content,
                 Normalizer.Form.NFKC
