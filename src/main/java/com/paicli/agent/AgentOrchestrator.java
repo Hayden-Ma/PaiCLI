@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.history.ConversationLedger;
 import com.paicli.llm.LlmClient;
 import com.paicli.memory.MemoryManager;
+import com.paicli.memory.TokenBudget;
 import com.paicli.runtime.CancellationContext;
 import com.paicli.tool.ToolRegistry;
 import com.paicli.tool.TurnToolPolicy;
@@ -17,8 +18,12 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+
+import static com.paicli.agent.TeamExecutionObserver.*;
 
 /**
  * Agent 编排器 - Multi-Agent 系统的"主"
@@ -56,6 +61,16 @@ public class AgentOrchestrator {
     private final PrintStream out;
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private Supplier<String> externalContextSupplier = () -> "";
+    private volatile TeamExecutionObserver executionObserver;
+    private final AtomicLong executionObservationFailures = new AtomicLong();
+
+    /** Optional, process-local diagnostics only; callbacks may run concurrently. */
+    public void setExecutionObserver(TeamExecutionObserver observer) { this.executionObserver = observer; }
+
+    public TeamExecutionObserver getExecutionObserver() { return executionObserver; }
+
+    /** Number of runs whose observer failed; not a product execution failure count. */
+    public long getExecutionObservationFailures() { return executionObservationFailures.get(); }
 
     // 执行步骤的数据结构（package-private 供测试访问）
     record ExecutionStep(String id, String description, String type,
@@ -155,11 +170,50 @@ public class AgentOrchestrator {
 
     /** Use submittedUserInput for policy decisions and userInput for expanded task context. */
     public String run(String userInput, String submittedUserInput) {
+        return runInternal(userInput, submittedUserInput, false);
+    }
+
+    /**
+     * Runs an input that a trusted caller has already classified as an explicit task envelope.
+     * URL provenance and no-web rules still come from {@code submittedUserInput}; only the
+     * bare-title actionability heuristic is bypassed.
+     */
+    public String runExplicitTask(String userInput, String submittedUserInput) {
+        return runInternal(userInput, submittedUserInput, true);
+    }
+
+    private String runInternal(String userInput,
+                               String submittedUserInput,
+                               boolean explicitTaskEnvelope) {
+        TeamObservation observation = new TeamObservation(executionObserver);
+        observation.emit(() -> new RunStarted(observation.runId, observation.now(),
+                TextFingerprint.of(userInput), TextFingerprint.of(submittedUserInput),
+                explicitTaskEnvelope, workers.size(), MAX_RETRIES_PER_STEP));
+        String result = null;
+        Throwable failure = null;
+        try {
+            result = runObserved(userInput, submittedUserInput, explicitTaskEnvelope, observation);
+            return result;
+        } catch (RuntimeException | Error e) {
+            failure = e;
+            throw e;
+        } finally {
+            observation.finish(result, failure);
+        }
+    }
+
+    private String runObserved(String userInput, String submittedUserInput,
+                               boolean explicitTaskEnvelope, TeamObservation observation) {
         log.info("Multi-Agent run started: inputLength={}", userInput == null ? 0 : userInput.length());
-        TurnToolPolicy turnToolPolicy = TurnToolPolicy.fromUserInput(
-                submittedUserInput,
-                toolRegistry.isSharedBrowserSession(),
-                toolRegistry.hasAgentOwnedCurrentBrowserPage());
+        TurnToolPolicy turnToolPolicy = explicitTaskEnvelope
+                ? TurnToolPolicy.forExplicitTask(
+                        submittedUserInput,
+                        toolRegistry.isSharedBrowserSession(),
+                        toolRegistry.hasAgentOwnedCurrentBrowserPage())
+                : TurnToolPolicy.fromUserInput(
+                        submittedUserInput,
+                        toolRegistry.isSharedBrowserSession(),
+                        toolRegistry.hasAgentOwnedCurrentBrowserPage());
         planner.setTurnToolPolicy(turnToolPolicy);
         workers.forEach(worker -> worker.setTurnToolPolicy(turnToolPolicy));
         reviewer.setTurnToolPolicy(turnToolPolicy);
@@ -169,6 +223,7 @@ public class AgentOrchestrator {
                 "user_input",
                 LlmClient.Message.user(userInput));
         if (CancellationContext.isCancelled()) {
+            observation.runExitReason = RunExitReason.CANCELLED;
             conversationLedger.appendEvent(
                     "run_cancelled", "team", "orchestrator", "before_planning", Map.of());
             return "⏹️ 已取消当前多 Agent 任务。";
@@ -180,22 +235,32 @@ public class AgentOrchestrator {
 
         AgentMessage planMessage = AgentMessage.task("orchestrator",
                 "请为以下任务制定执行计划：\n" + userInput);
-        AgentMessage planResult = planner.execute(planMessage, out);
+        ActivationObservation planActivation = observation.activation(planner, null, 1);
+        AgentMessage planResult = planner.execute(planMessage, out, planActivation);
         planner.clearHistory();
         if (CancellationContext.isCancelled()) {
+            observation.runExitReason = RunExitReason.CANCELLED;
             return "⏹️ 已取消当前多 Agent 任务。";
         }
 
         if (planResult.type() == AgentMessage.Type.ERROR) {
+            observation.runExitReason = RunExitReason.PLAN_ERROR;
             return "❌ 规划阶段失败，规划者 LLM 调用出错：" + planResult.content();
         }
         if (planResult.content() == null || planResult.content().isBlank()) {
+            observation.runExitReason = RunExitReason.PLAN_EMPTY;
             return "❌ 规划失败：规划者未能生成有效计划";
         }
 
         // 2. 解析计划
         List<ExecutionStep> steps = parsePlan(planResult.content());
+        observation.emit(() -> new PlanPrepared(observation.runId, observation.now(),
+                ActivationObservation.id(planActivation), TextFingerprint.of(planResult.content()),
+                steps.stream().map(step -> new StepNode(step.id(), TextFingerprint.of(step.description()),
+                        TextFingerprint.of(step.type()), step.dependencies().stream()
+                                .map(TextFingerprint::of).toList())).toList()));
         if (steps.isEmpty()) {
+            observation.runExitReason = RunExitReason.PLAN_INVALID;
             return "❌ 规划失败：无法解析执行计划\n原始输出:\n" + planResult.content();
         }
 
@@ -211,6 +276,7 @@ public class AgentOrchestrator {
 
         while (true) {
             if (CancellationContext.isCancelled()) {
+                observation.runExitReason = RunExitReason.CANCELLED;
                 return "⏹️ 已取消当前多 Agent 任务。";
             }
             List<ExecutionStep> executable = getExecutableSteps(steps);
@@ -228,26 +294,38 @@ public class AgentOrchestrator {
                         step, stepTrustedUrls);
                 TurnToolPolicy stepPolicy = turnToolPolicy.forkWithTrustedUrls(dependencyUrls);
                 String context = buildStepContext(steps, step, dependencyUrls);
-                runStep(step, steps, retryCount, worker, reviewer, context, out,
-                        stepPolicy, stepTrustedUrls);
+                StepObservation stepObservation = observation.step(step, steps, context, batchIndex);
+                try {
+                    runStep(step, steps, retryCount, worker, reviewer, context, out,
+                            stepPolicy, stepTrustedUrls, stepObservation);
+                } catch (RuntimeException | Error e) {
+                    if (stepObservation != null) stepObservation.threw(e);
+                    throw e;
+                } finally {
+                    if (stepObservation != null) stepObservation.exited(steps);
+                }
                 worker.clearHistory();
             } else {
                 // 多步批次：真正并行执行，每步用独立的 PrintStream 缓冲，完成后按 step_id 顺序 flush
                 out.println("⚡ 批次 #" + batchIndex + "：" + executable.size()
                         + " 个独立步骤并行执行（最多 " + workers.size() + " 个并发 Worker）\n");
-                runBatchParallel(executable, steps, retryCount, turnToolPolicy, stepTrustedUrls);
+                runBatchParallel(executable, steps, retryCount, turnToolPolicy, stepTrustedUrls,
+                        observation, batchIndex);
             }
         }
 
         // 5. 处理因前置失败而无法执行的残留步骤（显式提示用户）
         for (ExecutionStep step : steps) {
             if (step.status() == StepStatus.PENDING) {
+                observation.blocked(step);
                 out.println("⏭️ 步骤 [" + step.id() + "] 因前置步骤失败被跳过: " + step.description());
             }
         }
 
         // 6. 汇总结果
         String finalResult = buildFinalResult(steps);
+        observation.runExitReason = steps.stream().allMatch(step -> step.status() == StepStatus.COMPLETED)
+                ? RunExitReason.COMPLETED : RunExitReason.INCOMPLETE;
         conversationLedger.appendMessage(
                 "team",
                 "orchestrator",
@@ -451,7 +529,8 @@ public class AgentOrchestrator {
     private void runBatchParallel(List<ExecutionStep> batch, List<ExecutionStep> steps,
                                   Map<String, Integer> retryCount,
                                   TurnToolPolicy turnToolPolicy,
-                                  Map<String, TurnToolPolicy.TrustedUrlContext> stepTrustedUrls) {
+                                  Map<String, TurnToolPolicy.TrustedUrlContext> stepTrustedUrls,
+                                  TeamObservation observation, int batchOrdinal) {
         int parallelism = Math.min(batch.size(), workers.size());
         ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
             Thread t = new Thread(r, "paicli-multi-agent");
@@ -472,30 +551,40 @@ public class AgentOrchestrator {
             String context = buildStepContext(steps, step, dependencyUrls);
 
             futures.add(executor.submit(() -> {
-                SubAgent worker = null;
-                SubAgent localReviewer = new SubAgent(
-                        "reviewer-" + step.id(), AgentRole.REVIEWER, llmClient, toolRegistry);
-                localReviewer.setConversationLedger(conversationLedger);
+                StepObservation stepObservation = observation.step(step, steps, context, batchOrdinal);
                 try {
-                    worker = workerPool.take();
-                    runStep(step, steps, retryCount, worker, localReviewer, context, stepOut,
-                            stepPolicy, stepTrustedUrls);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    updateStep(steps, step.id(), step.withFailed("并行执行被中断"));
-                    stepOut.println("❌ 步骤 [" + step.id() + "] 被中断\n");
-                } catch (RuntimeException e) {
-                    log.error("Parallel step {} failed unexpectedly", step.id(), e);
-                    updateStep(steps, step.id(), step.withFailed("并行执行异常: " + e.getMessage()));
-                    stepOut.println("❌ 步骤 [" + step.id() + "] 并行执行异常：" + e.getMessage() + "\n");
-                } finally {
-                    if (worker != null) {
-                        worker.clearHistory();
-                        workerPool.offer(worker);
+                    SubAgent worker = null;
+                    SubAgent localReviewer = new SubAgent(
+                            "reviewer-" + step.id(), AgentRole.REVIEWER, llmClient, toolRegistry);
+                    localReviewer.setConversationLedger(conversationLedger);
+                    try {
+                        worker = workerPool.take();
+                        runStep(step, steps, retryCount, worker, localReviewer, context, stepOut,
+                                stepPolicy, stepTrustedUrls, stepObservation);
+                    } catch (InterruptedException e) {
+                        if (stepObservation != null) stepObservation.cancelled(e);
+                        Thread.currentThread().interrupt();
+                        updateStep(steps, step.id(), step.withFailed("并行执行被中断"));
+                        stepOut.println("❌ 步骤 [" + step.id() + "] 被中断\n");
+                    } catch (RuntimeException e) {
+                        if (stepObservation != null) stepObservation.threw(e);
+                        log.error("Parallel step {} failed unexpectedly", step.id(), e);
+                        updateStep(steps, step.id(), step.withFailed("并行执行异常: " + e.getMessage()));
+                        stepOut.println("❌ 步骤 [" + step.id() + "] 并行执行异常：" + e.getMessage() + "\n");
+                    } finally {
+                        if (worker != null) {
+                            worker.clearHistory();
+                            workerPool.offer(worker);
+                        }
+                        stepOut.flush();
                     }
-                    stepOut.flush();
+                    return null;
+                } catch (RuntimeException | Error e) {
+                    if (stepObservation != null) stepObservation.threw(e);
+                    throw e;
+                } finally {
+                    if (stepObservation != null) stepObservation.exited(steps);
                 }
-                return null;
             }));
         }
 
@@ -530,10 +619,11 @@ public class AgentOrchestrator {
                          Map<String, Integer> retryCount,
                          SubAgent worker, SubAgent reviewer, String context,
                          PrintStream out, TurnToolPolicy stepPolicy,
-                         Map<String, TurnToolPolicy.TrustedUrlContext> stepTrustedUrls) {
+                         Map<String, TurnToolPolicy.TrustedUrlContext> stepTrustedUrls,
+                         StepObservation observation) {
         try {
             runStepWithPolicy(step, steps, retryCount, worker, reviewer, context, out,
-                    stepPolicy, stepTrustedUrls);
+                    stepPolicy, stepTrustedUrls, observation);
         } finally {
             stepPolicy.releaseBrowserLease();
         }
@@ -543,38 +633,48 @@ public class AgentOrchestrator {
                                    Map<String, Integer> retryCount,
                                    SubAgent worker, SubAgent reviewer, String context,
                                    PrintStream out, TurnToolPolicy stepPolicy,
-                                   Map<String, TurnToolPolicy.TrustedUrlContext> stepTrustedUrls) {
+                                   Map<String, TurnToolPolicy.TrustedUrlContext> stepTrustedUrls,
+                                   StepObservation observation) {
         out.println("🛠️ " + worker.getName() + " 执行步骤 [" + step.id() + "]: " + step.description());
         if (CancellationContext.isCancelled()) {
+            if (observation != null) observation.reason = StepExitReason.CANCELLED;
             updateStep(steps, step.id(), step.withFailed("用户取消"));
             out.println("⏹️ 步骤 [" + step.id() + "] 已取消\n");
             return;
         }
 
         AgentMessage taskMsg = AgentMessage.task("orchestrator", step.description());
-        AgentMessage result = worker.executeWithContext(taskMsg, context, out, stepPolicy);
+        ActivationObservation workerActivation = observation == null ? null : observation.worker(worker, 1);
+        AgentMessage result = worker.executeWithContext(taskMsg, context, out, stepPolicy, workerActivation);
         if (CancellationContext.isCancelled()) {
+            if (observation != null) observation.reason = StepExitReason.CANCELLED;
             updateStep(steps, step.id(), step.withFailed("用户取消"));
             out.println("⏹️ 步骤 [" + step.id() + "] 已取消\n");
             return;
         }
 
         if (result.type() == AgentMessage.Type.ERROR) {
+            if (observation != null) observation.reason = StepExitReason.WORKER_ERROR;
             updateStep(steps, step.id(), step.withFailed(result.content()));
             out.println("❌ 步骤 [" + step.id() + "] 执行失败：" + result.content() + "\n");
             return;
         }
         if (result.content() == null || result.content().isBlank()) {
+            if (observation != null) observation.reason = StepExitReason.EMPTY_RESULT;
             updateStep(steps, step.id(), step.withFailed("执行结果为空"));
             out.println("❌ 步骤 [" + step.id() + "] 执行失败：结果为空\n");
             return;
         }
 
         out.println("🔍 " + reviewer.getName() + " 正在审查步骤 [" + step.id() + "] 的结果...");
-        AgentMessage reviewResult = reviewer.review(step.description(), result.content(), out);
+        if (observation != null) observation.accepted(workerActivation);
+        ActivationObservation reviewerActivation = observation == null ? null : observation.reviewer(reviewer, 1);
+        AgentMessage reviewResult = reviewer.review(step.description(), result.content(), out, reviewerActivation);
         reviewer.clearHistory();
 
         if (reviewResult.type() == AgentMessage.Type.ERROR) {
+            if (observation != null) observation.reviewed(1, workerActivation, reviewerActivation,
+                    ReviewDecision.ERROR, reviewResult.content(), null);
             log.warn("Reviewer failed for step {}: {}", step.id(), reviewResult.content());
             out.println("⚠️ 步骤 [" + step.id() + "] 审查阶段 LLM 调用失败，保留当前执行结果\n");
             markStepCompleted(steps, step, result.content(), stepPolicy, stepTrustedUrls);
@@ -585,6 +685,8 @@ public class AgentOrchestrator {
         String acceptedResult = result.content();
 
         if (approved) {
+            if (observation != null) observation.reviewed(1, workerActivation, reviewerActivation,
+                    ReviewDecision.APPROVED, reviewResult.content(), null);
             markStepCompleted(steps, step, acceptedResult, stepPolicy, stepTrustedUrls);
             out.println("✅ 步骤 [" + step.id() + "] 审查通过\n");
             return;
@@ -592,6 +694,8 @@ public class AgentOrchestrator {
 
         int retries = retryCount.getOrDefault(step.id(), 0);
         String issues = parseReviewIssues(reviewResult.content());
+        if (observation != null) observation.reviewed(1, workerActivation, reviewerActivation,
+                ReviewDecision.REJECTED, reviewResult.content(), issues);
         log.info("Step {} rejected (retry {}/{}): {}", step.id(), retries, MAX_RETRIES_PER_STEP, issues);
 
         while (!approved && retries < MAX_RETRIES_PER_STEP) {
@@ -601,8 +705,9 @@ public class AgentOrchestrator {
             out.println("   反馈: " + issues + "\n");
 
             String feedbackContext = context + "\n\n之前的执行结果被审查拒绝，原因：\n" + issues;
+            workerActivation = observation == null ? null : observation.worker(worker, retries + 1);
             AgentMessage retryResult = worker.executeWithContext(
-                    taskMsg, feedbackContext, out, stepPolicy);
+                    taskMsg, feedbackContext, out, stepPolicy, workerActivation);
             if (retryResult.type() == AgentMessage.Type.ERROR) {
                 log.warn("Step {} retry {} failed at LLM layer: {}", step.id(), retries, retryResult.content());
                 issues = "重试时 LLM 调用失败：" + retryResult.content();
@@ -610,6 +715,7 @@ public class AgentOrchestrator {
                 continue;
             }
             if (retryResult.content() == null || retryResult.content().isBlank()) {
+                if (observation != null) observation.accepted(workerActivation);
                 acceptedResult = "执行结果为空";
                 approved = false;
                 issues = "执行结果为空";
@@ -618,10 +724,14 @@ public class AgentOrchestrator {
             }
 
             acceptedResult = retryResult.content();
-            AgentMessage retryReview = reviewer.review(step.description(), acceptedResult, out);
+            if (observation != null) observation.accepted(workerActivation);
+            reviewerActivation = observation == null ? null : observation.reviewer(reviewer, retries + 1);
+            AgentMessage retryReview = reviewer.review(step.description(), acceptedResult, out, reviewerActivation);
             reviewer.clearHistory();
 
             if (retryReview.type() == AgentMessage.Type.ERROR) {
+                if (observation != null) observation.reviewed(retries + 1, workerActivation,
+                        reviewerActivation, ReviewDecision.ERROR, retryReview.content(), null);
                 log.warn("Reviewer failed for step {} retry {}: {}", step.id(), retries, retryReview.content());
                 approved = true;
                 issues = "";
@@ -630,6 +740,9 @@ public class AgentOrchestrator {
 
             approved = parseReviewApproval(retryReview.content());
             issues = parseReviewIssues(retryReview.content());
+            if (observation != null) observation.reviewed(retries + 1, workerActivation,
+                    reviewerActivation, approved ? ReviewDecision.APPROVED : ReviewDecision.REJECTED,
+                    retryReview.content(), issues);
         }
 
         markStepCompleted(steps, step, acceptedResult, stepPolicy, stepTrustedUrls);
@@ -741,5 +854,204 @@ public class AgentOrchestrator {
         }
 
         return result.toString();
+    }
+
+    /** Captured per run. Observation failures never enter the product control flow. */
+    private final class TeamObservation {
+        private final TeamExecutionObserver observer;
+        private final String runId;
+        private final long origin;
+        private final AtomicBoolean failed = new AtomicBoolean();
+        private final Set<String> enteredSteps;
+        private RunExitReason runExitReason = RunExitReason.THREW;
+
+        private TeamObservation(TeamExecutionObserver observer) {
+            this.observer = observer;
+            this.runId = observer == null ? null : UUID.randomUUID().toString();
+            this.origin = observer == null ? 0 : System.nanoTime();
+            this.enteredSteps = observer == null ? Set.of() : ConcurrentHashMap.newKeySet();
+        }
+
+        private long now() { return observer == null ? 0 : Math.max(0, System.nanoTime() - origin); }
+
+        private boolean enabled() { return observer != null && !failed.get(); }
+
+        private void emit(Supplier<Event> event) {
+            if (!enabled()) return;
+            try {
+                Event value = event.get();
+                if (value != null) observer.onEvent(value);
+            } catch (RuntimeException | AssertionError e) {
+                if (failed.compareAndSet(false, true)) {
+                    executionObservationFailures.incrementAndGet();
+                    log.warn("Team execution observer failed: {}", e.getClass().getName());
+                }
+            }
+        }
+
+        private ActivationObservation activation(SubAgent actor, String stepId, int attempt) {
+            if (!enabled()) return null;
+            return new ActivationObservation(this, new ActivationIdentity(runId, stepId, attempt,
+                    actor.observationRole(), UUID.randomUUID().toString(),
+                    actor.observationActorInstanceId(), actor.observationHistoryGeneration()));
+        }
+
+        private StepObservation step(ExecutionStep step, List<ExecutionStep> steps,
+                                     String context, int batchOrdinal) {
+            if (!enabled()) return null;
+            StepObservation observation = new StepObservation(this, step.id());
+            enteredSteps.add(step.id());
+            emit(() -> new StepEntered(runId, now(), step.id(), batchOrdinal,
+                    Thread.currentThread().getId(), TextFingerprint.of(context), steps.stream()
+                    .filter(dependency -> dependency.status() == StepStatus.COMPLETED
+                            && step.dependencies().contains(dependency.id()))
+                    .map(dependency -> {
+                        String result = dependency.result();
+                        boolean truncated = result != null && !result.isBlank() && result.length() > 500;
+                        String injected = result == null || result.isBlank() ? null
+                                : truncated ? result.substring(0, 500) + "..." : result;
+                        return new DependencyInput(dependency.id(), ProductStatus.COMPLETED,
+                                TextFingerprint.of(result), TextFingerprint.of(injected), truncated);
+                    }).toList()));
+            return observation;
+        }
+
+        private void blocked(ExecutionStep step) {
+            // Native status remains PENDING inside a running step. After an interrupted
+            // Future wait, do not invent a second exit for a still-running descendant.
+            emit(() -> enteredSteps.contains(step.id()) ? null
+                    : new StepExited(runId, now(), step.id(), ProductStatus.PENDING,
+                            StepExitReason.BLOCKED_DEPENDENCY, null, null,
+                            TextFingerprint.of(step.result()), null));
+        }
+
+        private void finish(String result, Throwable failure) {
+            emit(() -> new RunExited(runId, now(), failure == null ? runExitReason : RunExitReason.THREW,
+                    TextFingerprint.of(result), failure == null ? null : failure.getClass().getName()));
+        }
+    }
+
+    /** Passed explicitly per invocation: no mutable shared actor/request scope. */
+    static final class ActivationObservation {
+        private final TeamObservation run;
+        private final ActivationIdentity identity;
+        private boolean partial;
+
+        private ActivationObservation(TeamObservation run, ActivationIdentity identity) {
+            this.run = run;
+            this.identity = identity;
+        }
+
+        private static String id(ActivationObservation observation) {
+            return observation == null ? null : observation.identity.activationId();
+        }
+
+        void entered(int historyMessagesBefore) {
+            run.emit(() -> new ActivationEntered(identity, run.now(), Thread.currentThread().getId(),
+                    historyMessagesBefore));
+        }
+
+        void inputPrepared(int index, LlmClient.Message message) {
+            run.emit(() -> new ActivationInputPrepared(identity, run.now(), index,
+                    TextFingerprint.of(message.content()), message.imagePartCount()));
+        }
+
+        void compacted(int iteration, int before, int after) {
+            run.emit(() -> new HistoryCompacted(identity, run.now(), iteration, before, after, false));
+        }
+
+        void compactionScope(int iteration, List<LlmClient.Message> history, int triggerTokens,
+                              boolean sessionMemoryEnabled) {
+            // Evaluate only inside the enabled, failure-isolated observer path. The native
+            // manager still makes its own unchanged estimate and compaction decision.
+            run.emit(() -> {
+                if (triggerTokens <= 0) return null;
+                boolean thresholdReached = TokenBudget.estimateMessagesTokens(history) >= triggerTokens;
+                return sessionMemoryEnabled || thresholdReached
+                        ? new CompactionScopeUnsupported(identity, run.now(), iteration,
+                                sessionMemoryEnabled, thresholdReached) : null;
+            });
+        }
+
+        void partial(int iteration, String reason) {
+            partial = true;
+            run.emit(() -> new BudgetFinalization(identity, run.now(), iteration, reason));
+        }
+
+        void tools(int iteration, List<ToolRegistry.ToolExecutionResult> results) {
+            run.emit(() -> {
+                List<ToolResult> summaries = new ArrayList<>();
+                for (int i = 0; i < results.size(); i++) {
+                    ToolRegistry.ToolExecutionResult result = results.get(i);
+                    summaries.add(new ToolResult(i, result.id(), result.name(),
+                            TextFingerprint.of(result.argumentsJson()), TextFingerprint.of(result.result()),
+                            result.successful(), result.timedOut(), result.imageParts().size()));
+                }
+                return new ToolBatchReturned(identity, run.now(), iteration, summaries);
+            });
+        }
+
+        void exited(AgentMessage result, Throwable failure) {
+            run.emit(() -> new ActivationExited(identity, run.now(), failure != null ? ExitKind.THREW
+                    : partial ? ExitKind.PARTIAL : result != null && result.type() == AgentMessage.Type.ERROR
+                    ? ExitKind.ERROR : ExitKind.NORMAL,
+                    TextFingerprint.of(result == null ? null : result.content()),
+                    failure == null ? null : failure.getClass().getName()));
+        }
+    }
+
+    private static final class StepObservation {
+        private final TeamObservation run;
+        private final String stepId;
+        private StepExitReason reason = StepExitReason.THREW;
+        private String acceptedWorkerActivationId;
+        private String lastReviewerActivationId;
+        private Throwable failure;
+
+        private StepObservation(TeamObservation run, String stepId) {
+            this.run = run;
+            this.stepId = stepId;
+        }
+
+        private ActivationObservation worker(SubAgent worker, int attempt) {
+            return run.activation(worker, stepId, attempt);
+        }
+
+        private ActivationObservation reviewer(SubAgent reviewer, int attempt) {
+            ActivationObservation observation = run.activation(reviewer, stepId, attempt);
+            lastReviewerActivationId = ActivationObservation.id(observation);
+            return observation;
+        }
+
+        private void accepted(ActivationObservation worker) {
+            acceptedWorkerActivationId = ActivationObservation.id(worker);
+        }
+
+        private void reviewed(int attempt, ActivationObservation worker, ActivationObservation reviewer,
+                              ReviewDecision decision, String result, String issues) {
+            reason = switch (decision) {
+                case APPROVED -> StepExitReason.APPROVED;
+                case REJECTED -> StepExitReason.RETRIES_EXHAUSTED_RETAINED;
+                case ERROR -> StepExitReason.REVIEW_ERROR_RETAINED;
+            };
+            run.emit(() -> new ReviewEvaluated(run.runId, run.now(), stepId, attempt,
+                    ActivationObservation.id(worker), ActivationObservation.id(reviewer), decision,
+                    TextFingerprint.of(result), TextFingerprint.of(issues)));
+        }
+
+        private void threw(Throwable error) { reason = StepExitReason.THREW; failure = error; }
+
+        private void cancelled(Throwable error) { reason = StepExitReason.CANCELLED; failure = error; }
+
+        private void exited(List<ExecutionStep> steps) {
+            run.emit(() -> {
+                ExecutionStep terminal = steps.stream().filter(step -> step.id().equals(stepId))
+                        .findFirst().orElseThrow();
+                return new StepExited(run.runId, run.now(), stepId,
+                        ProductStatus.valueOf(terminal.status().name()), reason,
+                        acceptedWorkerActivationId, lastReviewerActivationId,
+                        TextFingerprint.of(terminal.result()), failure == null ? null : failure.getClass().getName());
+            });
+        }
     }
 }

@@ -31,9 +31,9 @@ class SuiteDefinitionTest {
         assertEquals(List.of("mvn", "-q", "test"), verifier.arguments());
 
         CaseDefinition.VerifierInvocation withWorkspace = new CaseDefinition.VerifierInvocation(
-                tempDir, List.of("validators/check.sh", "--workspace={workspace}"))
+                tempDir, List.of("validators/check.sh", "{workspace}"))
                 .forWorkspace(tempDir.resolve("run-workspace"));
-        assertEquals("--workspace=" + tempDir.resolve("run-workspace").toAbsolutePath().normalize(),
+        assertEquals(tempDir.resolve("run-workspace").toAbsolutePath().normalize().toString(),
                 withWorkspace.arguments().get(1));
     }
 
@@ -95,6 +95,20 @@ class SuiteDefinitionTest {
                 () -> SuiteDefinition.load(writeSuite(tempDir, traversal)));
         assertThrows(IllegalArgumentException.class,
                 () -> SuiteDefinition.load(writeSuite(tempDir, absolute)));
+    }
+
+    @Test
+    void placeholdersMustOccupyOneCompleteArgvItem(@TempDir Path tempDir) throws Exception {
+        for (String escaped : List.of(
+                "--workspace={workspace}", "prefix-{evidence}", "{evidence}/x", " {evidence} ")) {
+            String json = """
+                    {"version":"1", "name":"placeholder", "cases":[%s]}
+                    """.formatted(caseJson("placeholder", "L1", 100, "fixtures/a",
+                    "command", "[\"bash\",\"" + escaped + "\"]", "active"));
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                    () -> SuiteDefinition.load(writeSuite(tempDir, json)));
+            assertTrue(error.getMessage().contains("complete argv item"));
+        }
     }
 
     @Test

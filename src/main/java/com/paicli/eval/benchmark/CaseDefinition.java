@@ -32,6 +32,7 @@ public record CaseDefinition(
         @JsonProperty(value = "status", required = true) Status status
 ) {
     public static final String WORKSPACE_PLACEHOLDER = "{workspace}";
+    public static final String EVIDENCE_PLACEHOLDER = "{evidence}";
     private static final Pattern SAFE_IDENTIFIER =
             Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,127}");
     private static final Pattern WINDOWS_ABSOLUTE =
@@ -111,12 +112,21 @@ public record CaseDefinition(
             throw new IllegalArgumentException("verifierCommand arguments must not contain control characters");
         }
         String value = argument.trim();
+        requireWholeArgumentPlaceholder(argument, WORKSPACE_PLACEHOLDER);
+        requireWholeArgumentPlaceholder(argument, EVIDENCE_PLACEHOLDER);
         if (value.startsWith("/") || value.startsWith("\\") || value.startsWith("~/")
                 || WINDOWS_ABSOLUTE.matcher(value).matches()) {
             throw new IllegalArgumentException("verifierCommand must not contain absolute paths: " + argument);
         }
         if (PARENT_SEGMENT.matcher(value).find()) {
             throw new IllegalArgumentException("verifierCommand must not contain '..' path segments: " + argument);
+        }
+    }
+
+    private static void requireWholeArgumentPlaceholder(String argument, String placeholder) {
+        if (argument.contains(placeholder) && !argument.equals(placeholder)) {
+            throw new IllegalArgumentException(
+                    "verifierCommand placeholder must be one complete argv item: " + placeholder);
         }
     }
 
@@ -184,6 +194,13 @@ public record CaseDefinition(
         public VerifierInvocation {
             workingDirectory = workingDirectory.toAbsolutePath().normalize();
             arguments = List.copyOf(arguments);
+            for (String argument : arguments) {
+                if (argument == null) {
+                    throw new IllegalArgumentException("verifier argument must not be null");
+                }
+                requireWholeArgumentPlaceholder(argument, WORKSPACE_PLACEHOLDER);
+                requireWholeArgumentPlaceholder(argument, EVIDENCE_PLACEHOLDER);
+            }
         }
 
         /** Materializes only the runner-owned workspace token; no shell expansion is performed. */
@@ -193,9 +210,43 @@ public record CaseDefinition(
             }
             String safeWorkspace = workspace.toAbsolutePath().normalize().toString();
             List<String> materialized = arguments.stream()
-                    .map(argument -> argument.replace(WORKSPACE_PLACEHOLDER, safeWorkspace))
+                    .map(argument -> argument.equals(WORKSPACE_PLACEHOLDER) ? safeWorkspace : argument)
                     .toList();
             return new VerifierInvocation(workingDirectory, materialized);
+        }
+
+        /**
+         * Materializes the two explicit runner-owned path tokens as whole argv items.
+         * Evidence is mandatory only for commands that declare {@code {evidence}}.
+         */
+        public VerifierInvocation materialize(Path workspace, Path evidence) {
+            if (workspace == null) {
+                throw new IllegalArgumentException("workspace must not be null");
+            }
+            if (requiresEvidence() && evidence == null) {
+                throw new IllegalArgumentException(
+                        "verifier evidence is required by the {evidence} argv placeholder");
+            }
+            String safeWorkspace = workspace.toAbsolutePath().normalize().toString();
+            String safeEvidence = evidence == null
+                    ? null
+                    : evidence.toAbsolutePath().normalize().toString();
+            List<String> materialized = arguments.stream()
+                    .map(argument -> {
+                        if (argument.equals(WORKSPACE_PLACEHOLDER)) {
+                            return safeWorkspace;
+                        }
+                        if (argument.equals(EVIDENCE_PLACEHOLDER)) {
+                            return safeEvidence;
+                        }
+                        return argument;
+                    })
+                    .toList();
+            return new VerifierInvocation(workingDirectory, materialized);
+        }
+
+        public boolean requiresEvidence() {
+            return arguments.stream().anyMatch(EVIDENCE_PLACEHOLDER::equals);
         }
     }
 

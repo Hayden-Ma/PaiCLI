@@ -39,6 +39,26 @@ class AgentWebSearchDecisionTest {
     }
 
     @Test
+    void explicitTaskEnvelopeExposesLocalToolsWithoutChangingUrlAuthority(@TempDir Path tempDir) {
+        RecordingClient llm = new RecordingClient(List.of(
+                new LlmClient.ChatResponse("assistant", "已完成。", null, 20, 5)
+        ));
+        RecordingToolRegistry registry = new RecordingToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        Agent agent = new Agent(llm, registry);
+        String task = "ClosedRange 表示包含首尾端点的闭区间，但当前边界行为不符合约定。修复 contains 和 overlaps。";
+
+        agent.runExplicitTask(task, task);
+
+        assertTrue(llm.toolSnapshots.get(0).stream()
+                        .anyMatch(tool -> "read_file".equals(tool.name())),
+                "trusted task envelopes must expose local tools even when prose does not start with an action verb");
+        assertTrue(llm.toolSnapshots.get(0).stream()
+                        .noneMatch(tool -> "web_fetch".equals(tool.name())),
+                "forcing actionability must not grant ungrounded URL access");
+    }
+
+    @Test
     void blocksHallucinatedWebFetchWhenUserOnlyProvidesBareTitle(@TempDir Path tempDir) {
         LlmClient.ToolCall hallucinatedFetch = toolCall(
                 "call_fetch",

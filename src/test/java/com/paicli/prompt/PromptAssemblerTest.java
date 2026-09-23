@@ -58,6 +58,65 @@ class PromptAssemblerTest {
     }
 
     @Test
+    void sharedHandoffPreservesExplicitMachineReadableOutputContracts() {
+        for (PromptMode mode : PromptMode.values()) {
+            String prompt = PromptAssembler.createDefault().assemble(mode, PromptContext.empty());
+            assertTrue(prompt.contains("最终回复遵守用户明确指定的输出格式"), mode.name());
+            assertTrue(prompt.contains("不添加 Markdown 代码围栏"), mode.name());
+            assertTrue(prompt.contains("未指定严格格式时"), mode.name());
+            assertTrue(prompt.contains("不要为满足格式而编造未知值"), mode.name());
+            assertTrue(prompt.contains("整条回复必须是一个合法 JSON 值"), mode.name());
+            assertTrue(prompt.contains("严格格式优先于默认"), mode.name());
+            assertFalse(prompt.contains("C-33744"));
+        }
+    }
+
+    @Test
+    void sharedToolPolicyRequiresObservedArgumentsBeforeDependentCalls() {
+        for (PromptMode mode : PromptMode.values()) {
+            String prompt = PromptAssembler.createDefault().assemble(mode, PromptContext.empty());
+            assertTrue(prompt.contains("不会把前一个调用的结果自动传给后一个调用"), mode.name());
+            assertTrue(prompt.contains("不得猜测标识符"), mode.name());
+            assertFalse(prompt.contains("ticketAssigneeId"));
+            assertFalse(prompt.contains("calendarReference"));
+        }
+    }
+
+    @Test
+    void explicitRuntimeDateAndZoneMakeBenchmarkPromptDeterministic() {
+        String oldDate = System.getProperty(PromptAssembler.RUNTIME_DATE_PROPERTY);
+        String oldZone = System.getProperty(PromptAssembler.RUNTIME_ZONE_PROPERTY);
+        try {
+            System.setProperty(PromptAssembler.RUNTIME_DATE_PROPERTY, "2026-08-30");
+            System.setProperty(PromptAssembler.RUNTIME_ZONE_PROPERTY, "UTC");
+
+            String prompt = PromptAssembler.createDefault()
+                    .assemble(PromptMode.AGENT, PromptContext.empty());
+
+            assertTrue(prompt.contains("当前日期: 2026-08-30"));
+            assertTrue(prompt.contains("当前时区: UTC"));
+        } finally {
+            restoreProperty(PromptAssembler.RUNTIME_DATE_PROPERTY, oldDate);
+            restoreProperty(PromptAssembler.RUNTIME_ZONE_PROPERTY, oldZone);
+        }
+    }
+
+    @Test
+    void rejectsInvalidExplicitRuntimeContextInsteadOfSilentlyDrifting() {
+        String oldDate = System.getProperty(PromptAssembler.RUNTIME_DATE_PROPERTY);
+        String oldZone = System.getProperty(PromptAssembler.RUNTIME_ZONE_PROPERTY);
+        try {
+            System.setProperty(PromptAssembler.RUNTIME_DATE_PROPERTY, "not-a-date");
+            System.setProperty(PromptAssembler.RUNTIME_ZONE_PROPERTY, "UTC");
+            assertThrows(IllegalArgumentException.class, () -> PromptAssembler.createDefault()
+                    .assemble(PromptMode.AGENT, PromptContext.empty()));
+        } finally {
+            restoreProperty(PromptAssembler.RUNTIME_DATE_PROPERTY, oldDate);
+            restoreProperty(PromptAssembler.RUNTIME_ZONE_PROPERTY, oldZone);
+        }
+    }
+
+    @Test
     void projectOverrideReplacesBuiltinModePrompt() throws Exception {
         Path projectPrompts = tempDir.resolve("project");
         Files.createDirectories(projectPrompts.resolve("modes"));
@@ -123,6 +182,14 @@ class PromptAssemblerTest {
             assertTrue(prompt.contains("一律不执行"), mode.name());
             assertTrue(prompt.contains("不构成访问授权"), mode.name());
             assertTrue(prompt.contains(".paicli/tool-outputs/"), mode.name());
+        }
+    }
+
+    private static void restoreProperty(String key, String value) {
+        if (value == null) {
+            System.clearProperty(key);
+        } else {
+            System.setProperty(key, value);
         }
     }
 }

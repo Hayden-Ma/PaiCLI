@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.0",
+  "schemaVersion": "1.1",
   "suite": {
     "id": "paicli-native-agentbench-v0.1",
     "name": "PaiCLI Native AgentBench",
@@ -14,7 +14,6 @@
   "scope": {
     "candidateModels": [
       "DeepSeek V4 Flash",
-      "Hy4 preview",
       "GLM-5.3-Flash"
     ],
     "sharedTrack": "text-only",
@@ -91,9 +90,11 @@
   ],
   "datasetLayers": {
     "dev": {
-      "status": "planned",
+      "status": "executable-diagnostic",
       "scored": false,
-      "visibility": "team-visible",
+      "visibility": "public",
+      "currentVersion": "0.1-dev.2",
+      "currentExecutableCases": 8,
       "minimumSiblingVariantsPerTask": 1,
       "allowedUses": [
         "runner debugging",
@@ -195,6 +196,11 @@
       "deterministic_plus_judge": {
         "deterministicFacts": 70,
         "blindedSemanticJudge": 30
+      },
+      "deterministic_reasoning": {
+        "strictStructuredAnswer": 10,
+        "taskSpecificDeterministicFacts": 80,
+        "reasoningSurfaceAndToolCountConsistency": 10
       }
     },
     "reportedMetrics": [
@@ -234,7 +240,8 @@
     "sameTimeoutsAndBudgets": true,
     "providerSpecificPromptingAllowed": false,
     "compatibilityAdapterOnly": true,
-    "commonTextContextCapPolicy": "min(100000, smallest preflight-verified model context window)",
+    "commonTextContextCapPolicy": "exactly 1000000 for every formal model; E3 workload remains an identical 60000-100000-token fixture calibrated from provider usage before scoring",
+    "commonMaxOutputTokensPerCall": 16384,
     "imageTasksIncluded": false,
     "networkPolicy": "local mocks only",
     "runsPerFinalCasePerModel": 3,
@@ -255,7 +262,7 @@
       "candidate provider name",
       "run order"
     ],
-    "invalidRunPolicy": "Pre-register infrastructure failure classes. Rerun an affected case for all three models, never only for a low-scoring model.",
+    "invalidRunPolicy": "Pre-register infrastructure failure classes. Rerun an affected case for every model registered in the batch contract, never only for a low-scoring model.",
     "disclosurePolicy": "Publish all three completed model results; a recommended default model may be named separately without hiding the others."
   },
   "antiContamination": {
@@ -303,7 +310,7 @@
     "mustPublishEveryCategory": true,
     "mustPublishFailedCases": true,
     "mustPublishAllCompletedCandidateModels": true,
-    "rerunAfterProductChange": "Rerun all three models on a new PaiCLI commit and retain the prior report."
+    "rerunAfterProductChange": "Rerun every model registered in the batch contract on a new PaiCLI commit and retain the prior report."
   },
   "runEvidenceSchema": {
     "requiredFields": [
@@ -410,6 +417,7 @@
       "mandatoryAssertions": [
         "expected implementation is identified",
         "target context is read",
+        "semantic search is used after exact retrieval proves insufficient",
         "unsupported claims are absent",
         "tool-call count is at most 5"
       ]
@@ -603,7 +611,8 @@
         "output JSON matches the schema",
         "all expected aggregates are exact",
         "UTF-8 content is preserved",
-        "input files remain unchanged"
+        "input files remain unchanged",
+        "at least one successful execute_command call produced the report pipeline"
       ]
     },
     {
@@ -837,14 +846,15 @@
       "level": "L3",
       "weight": 2,
       "mode": "react",
-      "verifierType": "deterministic_plus_judge",
+      "verifierType": "deterministic_reasoning",
       "status": "planned",
       "summary": "回答未公开的定量科学问题，作为低权重裸推理控制项。",
       "mandatoryAssertions": [
         "final value is correct",
         "unit is correct",
         "required intermediate relationship is present",
-        "unsupported external facts are absent"
+        "answer is strict JSON without duplicate or non-finite values",
+        "workspace is unchanged and both reported and executed tool-call counts are zero"
       ]
     },
     {
@@ -854,14 +864,16 @@
       "level": "L3",
       "weight": 2,
       "mode": "react",
-      "verifierType": "deterministic_plus_judge",
+      "verifierType": "deterministic_reasoning",
       "status": "planned",
-      "summary": "从互相矛盾的日志和配置快照中重建完整故障因果链。",
+      "summary": "从互相矛盾的日志和配置快照中重建证据绑定的故障 dependency DAG。",
       "mandatoryAssertions": [
         "root cause is correct",
-        "causal sequence is complete",
+        "dependency DAG is complete and every edge cites direct evidence",
         "contradictory evidence is resolved",
-        "facts and uncertainty are explicitly separated"
+        "facts and uncertainty are explicitly separated",
+        "seed-bound timeout values and normalized timeline are exact",
+        "workspace is unchanged and both reported and executed tool-call counts are zero"
       ]
     }
   ]

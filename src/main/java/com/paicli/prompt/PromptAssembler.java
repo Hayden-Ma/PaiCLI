@@ -2,11 +2,14 @@ package com.paicli.prompt;
 
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.time.DateTimeException;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
 public class PromptAssembler {
+    public static final String RUNTIME_DATE_PROPERTY = "paicli.prompt.runtime.date";
+    public static final String RUNTIME_ZONE_PROPERTY = "paicli.prompt.runtime.zone";
     private final PromptRepository repository;
 
     public PromptAssembler(PromptRepository repository) {
@@ -60,10 +63,37 @@ public class PromptAssembler {
     }
 
     private static String runtimeContext() {
-        ZoneId zone = ZoneId.systemDefault();
+        ZoneId zone = configuredRuntimeZone();
+        LocalDate date = configuredRuntimeDate(zone);
         return "## Runtime Context\n\n"
-                + "- 当前日期: " + LocalDate.now(zone) + "\n"
+                + "- 当前日期: " + date + "\n"
                 + "- 当前时区: " + zone;
+    }
+
+    private static ZoneId configuredRuntimeZone() {
+        String configured = System.getProperty(RUNTIME_ZONE_PROPERTY);
+        if (configured == null || configured.isBlank()) {
+            return ZoneId.systemDefault();
+        }
+        try {
+            return ZoneId.of(configured.trim());
+        } catch (DateTimeException error) {
+            throw new IllegalArgumentException(
+                    "invalid " + RUNTIME_ZONE_PROPERTY + ": " + configured, error);
+        }
+    }
+
+    private static LocalDate configuredRuntimeDate(ZoneId zone) {
+        String configured = System.getProperty(RUNTIME_DATE_PROPERTY);
+        if (configured == null || configured.isBlank()) {
+            return LocalDate.now(zone);
+        }
+        try {
+            return LocalDate.parse(configured.trim());
+        } catch (DateTimeException error) {
+            throw new IllegalArgumentException(
+                    "invalid " + RUNTIME_DATE_PROPERTY + ": " + configured, error);
+        }
     }
 
     private static String applyVariables(String template, PromptContext context) {
