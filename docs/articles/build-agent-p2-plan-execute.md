@@ -564,7 +564,7 @@ ExecutorService executor = Executors.newFixedThreadPool(Math.min(executableTasks
 
 输出交错的处理最直接。每个并行任务的输出先写进自己的缓冲区，整轮结束后按任务顺序一次性打印。代价是并行任务执行期间，终端看不到它们的流式输出。
 
-【截图：并行任务的缓冲输出；风格：swimlane；截图目标：展示并行执行时各任务输出先缓冲、整轮结束后按顺序打印；关键词：paicli-plan-executor、缓冲区、按序输出】
+![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924183208-2fe0d6d3.png)
 
 写入冲突分两层看。计划层面，两个并行任务写同一个文件目前没有专门的锁，要靠规划时把它们设计成有依赖关系。工具层面，9 月 24 日修了一个更常见的问题，同一轮模型返回多个 `edit_file`，旧代码会并行执行，它们各自读文件、改一处、整文件写回，后写的会把先写的改动盖掉。代码审查时实测过同一个文件的并发编辑，50 轮里有 49 轮丢了改动，工具却都报告成功。现在只有读文件、搜索这类只读工具才并行，写文件、执行命令、MCP 调用一律按模型给出的顺序串行。
 
@@ -609,7 +609,7 @@ ExecutorService executor = Executors.newFixedThreadPool(Math.min(executableTasks
 任务 task_5 已跳过: 依赖的任务 task_3 失败
 ```
 
-【截图：失败时的部分完成汇总；风格：checklist-card；截图目标：展示已完成结果、失败原因和跳过说明同时出现；关键词：部分完成、SKIPPED、失败汇总】
+![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924183403-4e7044a4.png)
 
 已经流式显示过的任务结果不会重复打印。到达重规划上限的情况，汇总里会多一行“已达到重新规划上限（2 次），停止执行剩余任务”。
 
