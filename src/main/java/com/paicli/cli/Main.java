@@ -23,6 +23,7 @@ import com.paicli.llm.LlmClientFactory;
 import com.paicli.memory.LongTermMemory;
 import com.paicli.memory.MemoryCommandArgs;
 import com.paicli.memory.MemoryEntry;
+import com.paicli.memory.ExternalContextTracker;
 import com.paicli.memory.MemoryManager;
 import com.paicli.memory.MemoryWriteResult;
 import com.paicli.render.Renderer;
@@ -331,6 +332,12 @@ public class Main {
                         startupNote,
                         "原始会话账本初始化失败: " + e.getMessage());
             }
+
+            // execute_command 沙箱：默认 OFF 与旧行为一致；auto/required 时探测 Seatbelt / bubblewrap 并提示结果。
+            com.paicli.tool.CommandSandboxStatus sandboxStatus = hitlToolRegistry.configureCommandSandbox(
+                    com.paicli.tool.CommandSandboxMode.fromConfiguration(),
+                    Path.of(hitlToolRegistry.getProjectPath()));
+            startupNote = appendStartupNote(startupNote, sandboxStatus.message());
 
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
             reactAgent.setConversationLedger(conversationLedger);
@@ -1033,6 +1040,12 @@ public class Main {
     private static String runHeadlessTask(String prompt, LlmClient llmClient) {
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(Path.of(".").toAbsolutePath().normalize().toString());
+        com.paicli.tool.CommandSandboxStatus sandboxStatus = registry.configureCommandSandbox(
+                com.paicli.tool.CommandSandboxMode.fromConfiguration(),
+                Path.of(registry.getProjectPath()));
+        if (!sandboxStatus.message().isBlank()) {
+            System.err.println(sandboxStatus.message());
+        }
         Agent agent = new Agent(llmClient, registry);
         try {
             agent.setConversationLedger(ConversationLedger.openDefault(
@@ -3052,6 +3065,11 @@ public class Main {
                     .append(" · 最后核实 ").append(entry.getLastVerifiedAt());
             if (memoryManager.isStale(entry)) {
                 sb.append(" · ⚠️ 可能已过时");
+            }
+            if ("true".equals(entry.getMetadata().get(ExternalContextTracker.METADATA_FLAG))) {
+                sb.append(" · 🌐 写入时会话含外部内容(")
+                        .append(entry.getMetadata().getOrDefault(ExternalContextTracker.METADATA_SOURCES, ""))
+                        .append(")");
             }
             sb.append("\n").append("  ").append(entry.getContent()).append("\n");
         }

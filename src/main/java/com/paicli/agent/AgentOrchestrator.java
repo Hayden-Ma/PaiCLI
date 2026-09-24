@@ -115,6 +115,7 @@ public class AgentOrchestrator {
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
         memoryManager.setProjectPath(this.toolRegistry.getProjectPath());
+        memoryManager.setExternalContextTracker(this.toolRegistry.getExternalContextTracker());
         this.toolRegistry.setMemoryWriter((fact, scope, replaceId, keepBoth) ->
                 memoryManager.storeFact(fact, scope, replaceId, keepBoth).describe());
         this.planner = new SubAgent("planner", AgentRole.PLANNER, llmClient, toolRegistry);

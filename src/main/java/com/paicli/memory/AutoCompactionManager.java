@@ -10,7 +10,12 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * 自动压缩协调器：优先使用实验性的会话记忆摘要，失败后回退到完整对话摘要。
+ * 自动压缩协调器，按代价从小到大执行：
+ * <ol>
+ *   <li>超大工具输出在回灌时已由 {@code ToolResultOffloader} 卸载（不在本类）；</li>
+ *   <li>达到较低的清理阈值时，{@link ToolResultClearer} 把旧工具结果换成占位说明（可恢复）；</li>
+ *   <li>仍达到摘要阈值时，优先使用实验性的会话记忆摘要，失败后回退到完整对话摘要（有损）。</li>
+ * </ol>
  */
 public class AutoCompactionManager {
     public static final String SESSION_MEMORY_PROPERTY = "paicli.compaction.session-memory.enabled";
@@ -18,6 +23,7 @@ public class AutoCompactionManager {
 
     private final ConversationHistoryCompactor fullCompactor;
     private final SessionMemoryCompactor sessionMemoryCompactor;
+    private final ToolResultClearer toolResultClearer;
 
     public AutoCompactionManager(LlmClient llmClient) {
         this(llmClient, sessionMemoryEnabledByConfiguration());
@@ -25,14 +31,25 @@ public class AutoCompactionManager {
 
     AutoCompactionManager(LlmClient llmClient, boolean sessionMemoryEnabled) {
         this(new ConversationHistoryCompactor(llmClient),
-                new SessionMemoryCompactor(llmClient, sessionMemoryEnabled));
+                new SessionMemoryCompactor(llmClient, sessionMemoryEnabled),
+                ToolResultClearer.fromConfiguration());
+    }
+
+    /** 测试入口：不启用旧工具结果清理，只验证摘要路径。 */
+    AutoCompactionManager(
+            ConversationHistoryCompactor fullCompactor,
+            SessionMemoryCompactor sessionMemoryCompactor) {
+        this(fullCompactor, sessionMemoryCompactor,
+                new ToolResultClearer(new ToolResultClearer.Config(false, 0, 0, java.util.Set.of())));
     }
 
     AutoCompactionManager(
             ConversationHistoryCompactor fullCompactor,
-            SessionMemoryCompactor sessionMemoryCompactor) {
+            SessionMemoryCompactor sessionMemoryCompactor,
+            ToolResultClearer toolResultClearer) {
         this.fullCompactor = fullCompactor;
         this.sessionMemoryCompactor = sessionMemoryCompactor;
+        this.toolResultClearer = toolResultClearer;
     }
 
     public void setLlmClient(LlmClient llmClient) {
@@ -40,21 +57,37 @@ public class AutoCompactionManager {
         sessionMemoryCompactor.setLlmClient(llmClient);
     }
 
+    /**
+     * @param triggerTokens 摘要阈值；旧工具结果清理阈值由 {@link ToolResultClearer#triggerTokens(int)}
+     *                      从它派生，始终更低，所以清理先于摘要发生
+     */
     public Result compactIfNeeded(List<LlmClient.Message> history, int triggerTokens) {
         if (triggerTokens <= 0) return Result.none();
+        int cleared = toolResultClearer.clearIfNeeded(history, triggerTokens).clearedCount();
         sessionMemoryCompactor.prepareIfNeeded(history, triggerTokens);
         if (TokenBudget.estimateMessagesTokens(history) < triggerTokens) {
-            return Result.none();
+            return cleared > 0 ? new Result(false, Strategy.TOOL_RESULT_CLEARING, cleared) : Result.none();
         }
         if (sessionMemoryCompactor.compactIfReady(history, triggerTokens)) {
-            return new Result(true, Strategy.SESSION_MEMORY);
+            return new Result(true, Strategy.SESSION_MEMORY, cleared);
         }
         boolean compacted = fullCompactor.compactIfNeeded(history, triggerTokens);
         if (compacted) {
             sessionMemoryCompactor.clear(history);
-            return new Result(true, Strategy.FULL_SUMMARY);
+            return new Result(true, Strategy.FULL_SUMMARY, cleared);
         }
-        return Result.none();
+        return cleared > 0 ? new Result(false, Strategy.TOOL_RESULT_CLEARING, cleared) : Result.none();
+    }
+
+    /** 当前模型下旧工具结果清理的触发阈值；未启用时返回 0。 */
+    public int toolResultClearTriggerTokens(int compactionTriggerTokens) {
+        return toolResultClearer.config().enabled()
+                ? toolResultClearer.triggerTokens(compactionTriggerTokens)
+                : 0;
+    }
+
+    public ToolResultClearer.Config toolResultClearingConfig() {
+        return toolResultClearer.config();
     }
 
     /** 手动 /compact 始终使用稳定的完整摘要路径。 */
@@ -76,13 +109,23 @@ public class AutoCompactionManager {
 
     public enum Strategy {
         NONE,
+        /** 只清理了旧工具结果，没有做摘要。 */
+        TOOL_RESULT_CLEARING,
         SESSION_MEMORY,
         FULL_SUMMARY
     }
 
-    public record Result(boolean compacted, Strategy strategy) {
+    /**
+     * @param compacted          是否做了摘要压缩（会话记忆或完整摘要）
+     * @param clearedToolResults 本次在摘要之前清理的旧工具结果条数
+     */
+    public record Result(boolean compacted, Strategy strategy, int clearedToolResults) {
+        public Result(boolean compacted, Strategy strategy) {
+            this(compacted, strategy, 0);
+        }
+
         static Result none() {
-            return new Result(false, Strategy.NONE);
+            return new Result(false, Strategy.NONE, 0);
         }
     }
 

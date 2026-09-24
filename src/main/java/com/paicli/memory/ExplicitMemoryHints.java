@@ -30,7 +30,11 @@ public final class ExplicitMemoryHints {
         return "访问 " + host + label + separator + "优先复用用户已登录的 Chrome 登录态。";
     }
 
-    private static boolean hasExplicitRememberIntent(String text) {
+    /** 用户原文是否明确要求记住或保存长期记忆。 */
+    public static boolean hasExplicitRememberIntent(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
         return text.contains("记一下")
                 || text.contains("记住")
                 || text.contains("记下来")

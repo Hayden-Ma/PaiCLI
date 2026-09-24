@@ -161,6 +161,7 @@ public class PlanExecuteAgent {
         this.toolRegistry.setContextProfile(this.memoryManager.getContextProfile());
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
         this.memoryManager.setProjectPath(this.toolRegistry.getProjectPath());
+        this.memoryManager.setExternalContextTracker(this.toolRegistry.getExternalContextTracker());
         this.toolRegistry.setMemoryWriter((fact, scope, replaceId, keepBoth) ->
                 this.memoryManager.storeFact(fact, scope, replaceId, keepBoth).describe());
         this.planner.setProjectMemorySupplier(this::buildProjectMemoryContext);
@@ -256,6 +257,18 @@ public class PlanExecuteAgent {
         int beforeMessages = messages.size();
         try {
             AutoCompactionManager.Result result = autoCompactionManager.compactIfNeeded(messages, trigger);
+            if (result.clearedToolResults() > 0) {
+                conversationLedger.appendEvent(
+                        "compaction",
+                        "plan",
+                        actor,
+                        "automatic",
+                        Map.of(
+                                "beforeMessages", beforeMessages,
+                                "afterMessages", messages.size(),
+                                "strategy", "tool_result_clearing",
+                                "clearedToolResults", result.clearedToolResults()));
+            }
             if (result.compacted()) {
                 conversationLedger.appendEvent(
                         "compaction",

@@ -9,6 +9,7 @@ import com.paicli.browser.BrowserCheckResult;
 import com.paicli.browser.BrowserConnector;
 import com.paicli.browser.BrowserGuard;
 import com.paicli.context.ContextProfile;
+import com.paicli.memory.ExternalContextTracker;
 import com.paicli.lsp.LspDiagnosticReport;
 import com.paicli.lsp.LspManager;
 import com.paicli.mcp.protocol.McpToolDescriptor;
@@ -97,6 +98,7 @@ public class ToolRegistry {
     private BrowserGuard browserGuard;
     private BrowserConnector browserConnector;
     private MemoryWriter memoryWriter;
+    private final ExternalContextTracker externalContextTracker = ExternalContextTracker.fromConfiguration();
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private java.util.function.BiConsumer<String, String[]> writeFileObserver = (p, ba) -> {};
@@ -106,6 +108,10 @@ public class ToolRegistry {
     private ToolResultOffloader toolResultOffloader = ToolResultOffloader.fromConfiguration(Path.of(projectPath));
     private boolean sanitizeCommandEnvironment;
     private volatile CommandSandbox commandSandbox;
+    /** 交互式沙箱模式；null 表示未经 {@link #configureCommandSandbox} 配置（例如基准评测入口）。 */
+    private volatile CommandSandboxMode commandSandboxMode;
+    /** REQUIRED 模式下沙箱不可用的原因；非 null 时 execute_command 拒绝执行。 */
+    private volatile String commandSandboxRequiredFailure;
     private volatile CommandExecutionObserver commandExecutionObserver;
     private final java.util.concurrent.atomic.AtomicLong commandInvocationIds = new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong commandObservationFailures = new java.util.concurrent.atomic.AtomicLong();
@@ -143,6 +149,10 @@ public class ToolRegistry {
         this.pathGuard = new PathGuard(projectPath);
         this.lspManager.setProjectPath(projectPath);
         this.toolResultOffloader.setProjectRoot(Path.of(projectPath));
+        CommandSandboxMode sandboxMode = commandSandboxMode;
+        if (sandboxMode != null && sandboxMode != CommandSandboxMode.OFF) {
+            configureCommandSandbox(sandboxMode, Path.of(projectPath));
+        }
         if (!customSnapshotService) {
             this.snapshotService.close();
             this.snapshotService = SnapshotService.forProject(Path.of(projectPath));
@@ -183,6 +193,22 @@ public class ToolRegistry {
      */
     public void setCommandSandboxRoot(Path workspaceRoot) {
         this.commandSandbox = CommandSandbox.enable(workspaceRoot);
+    }
+
+    /**
+     * 交互式 PaiCLI 的沙箱入口：按模式探测 macOS Seatbelt / Linux bubblewrap。
+     * AUTO 不可用时回退为直接执行；REQUIRED 不可用时 execute_command 拒绝执行；OFF 与旧行为一致。
+     * 项目根切换时会按同一模式重新配置。
+     */
+    public CommandSandboxStatus configureCommandSandbox(CommandSandboxMode mode, Path workspaceRoot) {
+        return applyCommandSandbox(mode, CommandSandboxDetector.activate(mode, workspaceRoot));
+    }
+
+    CommandSandboxStatus applyCommandSandbox(CommandSandboxMode mode, CommandSandboxDetector.Activation activation) {
+        this.commandSandboxMode = mode == null ? CommandSandboxMode.OFF : mode;
+        this.commandSandbox = activation.sandbox();
+        this.commandSandboxRequiredFailure = activation.requiredFailure();
+        return activation.status();
     }
 
     boolean isCommandSandboxEnabled() {
@@ -241,6 +267,14 @@ public class ToolRegistry {
     /** 注入带冲突反馈的记忆写入器；返回值会作为 save_memory 的工具结果回给模型。 */
     public void setMemoryWriter(MemoryWriter memoryWriter) {
         this.memoryWriter = memoryWriter;
+    }
+
+    /**
+     * 会话级外部内容标记：TurnToolPolicy 在 Web / 浏览器 / MCP / curl 结果进入上下文后写入，
+     * MemoryManager 据此在显式保存的记忆 metadata 里标注来源，并阻止自动写记忆。
+     */
+    public ExternalContextTracker getExternalContextTracker() {
+        return externalContextTracker;
     }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
@@ -1584,6 +1618,13 @@ public class ToolRegistry {
             // 抛 PolicyException 让外层 executeTool 统一写 audit 并格式化拒绝消息，
             // 命令围栏与路径围栏的拒绝路径走同一个出口。
             throw new PolicyException(denyReason);
+        }
+        String sandboxFailure = commandSandboxRequiredFailure;
+        if (commandSandbox == null && sandboxFailure != null) {
+            observeCommand(observation, CommandExecutionObserver.Phase.REJECTED,
+                    CommandExecutionObserver.Outcome.POLICY_DENIED, null);
+            throw new PolicyException("命令沙箱不可用（" + sandboxFailure + "），"
+                    + CommandSandboxMode.ENV + "=required 时不在宿主直接执行命令");
         }
 
         ExecutorService outputReaderExecutor = Executors.newSingleThreadExecutor(r -> {

@@ -47,6 +47,8 @@ mvn test -DskipTests=false
 - 长期记忆通过 `/save <事实>` 或用户明确说“记一下 / 记住”时的 `save_memory` 保存关键事实，默认项目级作用域，跨会话复用
 - 项目级记忆通过 `PAI.md` / `.paicli/PAI.md` 启动自动注入，适合提交到仓库的团队共享规则；`PAI.local.md` / `.paicli/PAI.local.md` 只做本地覆盖
 - 注入给模型的相关记忆只使用长期稳定事实，不把当前轮短期对话误当成“历史记忆”
+- 上下文增长到清理阈值（默认 min(100k, 摘要阈值 × 60%)）时，先把最近 3 条之外的旧工具结果换成一行占位说明（参考 Anthropic context editing），需要时可重新调用工具或读回卸载文件；仍接近预算才做摘要
+- 会话读过网页、浏览器或 MCP 返回的外部内容后，不再自动写长期记忆；`save_memory` 需要用户当轮明确说“记住”，显式保存的条目标注 `external_context`（`PAICLI_MEMORY_DISABLE_ON_EXTERNAL_CONTEXT=false` 关闭防护）
 - 对话接近预算时自动做四栏目摘要压缩；过长的旧历史分段覆盖并合并，格式不合格或未减少 Token 时保留原对话。可选 Session Memory 增量摘要快速路径，不可用时回退完整对话摘要；摘要有损，超大工具结果另有落盘读回机制
 - 新增 `/memory` 查看状态、`/memory list/search/delete/clear` 管理长期记忆、`/save` 手动保存事实；Agent 在用户明确说“记一下 / 记住”时可调用 `save_memory`
 
@@ -319,7 +321,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 - `write_file` / `edit_file` 写入后单文件 5MB 上限
 - CLI 命令：`/policy` 查看安全策略状态、`/audit [N]` 看最近 N 条审计
 
-**为什么不叫沙箱**：本地 Agent CLI（参考 Claude Code / Cursor / Aider）默认都不做容器/VM 沙箱——沙箱削弱 Agent 能力、给虚假安全感、体验更差。生产级 Agent 沙箱实际是 microVM-level（Devin / Modal / Anthropic Computer Use 用 Firecracker / gVisor）。PaiCLI 的安全模型是 **HITL + 路径校验 + 命令快速拒绝 + 审计**，不是隔离。
+**为什么不叫沙箱**：`com.paicli.policy` 这一层只做校验和审计，不提供进程隔离。进程隔离由可选的命令沙箱负责：`PAICLI_COMMAND_SANDBOX=auto` 时，`execute_command` 在 macOS 上用 Seatbelt（`sandbox-exec`），在 Linux 上用 bubblewrap（`bwrap`），两者共用一套策略：系统目录只读、用户 HOME 不可见、只有工作区可写、没有网络；探测不到或探针失败时启动页给出提示并回退直接执行。`PAICLI_COMMAND_SANDBOX=required` 时沙箱不可用则拒绝执行命令。默认仍是 `off`：Claude Code 和 Codex 默认开沙箱、关网络，但 PaiCLI 的沙箱把 HOME 重定向到工作区内，`mvn test`（依赖 `~/.m2`）、`npm install`、`git push` 等常用命令会直接失败，所以先保持显式开启。
 
 ## 启动界面
 
@@ -442,6 +444,7 @@ Plan/FILE_ONLY 配置；题面、两份 CSV、runtime 与逐题合同由同一�
 - 📦 资源上限：`write_file` / `edit_file` 写入后 5MB；`execute_command` 60 秒超时 + 8KB 输出截断
 - 📋 结构化审计：危险工具调用按天写一行 JSONL 到 `~/.paicli/audit/`，可通过 `/audit [N]` 查看
 - 🧱 定位：HITL 之外的辅助层，不是沙箱、不提供进程隔离
+- 🔒 可选命令沙箱：`PAICLI_COMMAND_SANDBOX=auto|required` 时 `execute_command` 走 macOS Seatbelt 或 Linux bubblewrap，只能写工作区、没有网络；默认 `off`，因为 `mvn` / `npm install` / `git push` 等需要网络或用户目录的命令在沙箱里会失败
 
 ## 快速开始
 

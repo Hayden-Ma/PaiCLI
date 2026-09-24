@@ -144,6 +144,18 @@ public class SubAgent {
                     profile.compressionTriggerTokens(), autoCompactionManager.isSessionMemoryEnabled());
             AutoCompactionManager.Result result = autoCompactionManager.compactIfNeeded(
                     conversationHistory, profile.compressionTriggerTokens());
+            if (result.clearedToolResults() > 0) {
+                conversationLedger.appendEvent(
+                        "compaction",
+                        "team",
+                        name,
+                        "automatic",
+                        Map.of(
+                                "beforeMessages", beforeMessages,
+                                "afterMessages", conversationHistory.size(),
+                                "strategy", "tool_result_clearing",
+                                "clearedToolResults", result.clearedToolResults()));
+            }
             if (result.compacted()) {
                 if (observation != null) observation.compacted(
                         iteration, beforeMessages, conversationHistory.size());

@@ -181,7 +181,8 @@ src/main/java/com/paicli/
 
 ### Memory
 
-- 长期记忆只通过 `/save` 或用户明确要求保存；不要自动提取事实
+- 长期记忆只通过 `/save` 或用户明确要求保存；不要自动提取事实。唯一的自动写入路径是 `ExplicitMemoryHints` 的浏览器登录态提示（用户说“记住 + 复用已登录 Chrome”时直接存一条 global 偏好）；会话摘要（Session Memory / 完整摘要）只重建 conversationHistory，不写长期记忆
+- 外部上下文防护（参考 Codex `memories.disable_on_external_context`，PaiCLI 默认开启，`PAICLI_MEMORY_DISABLE_ON_EXTERNAL_CONTEXT=false` 关闭）：`web_search` / `web_fetch` / `browser_*` / 任意 `mcp__*` 结果、`execute_command` 的 curl/wget，以及用户输入里展开的 MCP resource，会让共享 ToolRegistry 上的会话级 `ExternalContextTracker` 记下来源。此后浏览器登录态提示不再自动写入；`save_memory` 只有在当前轮用户原文明确要求记住时才放行，否则 `TurnToolPolicy` 以 `[MEMORY_EXTERNAL_CONTEXT]` 拒绝。显式保存（`/save`、用户要求后的 `save_memory`）照常写入，但 metadata 带 `external_context=true` 与 `external_context_sources`，`/memory list` 标注 🌐。防护关闭时仍记录 metadata。`/clear` 重置该标记
 - `PAI.md` 管团队共享的项目规则，长期记忆管个人或项目作用域的稳定事实；不要把一次性协作经验写进 `PAI.md`
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
 - 长期记忆去重以 `type + scope + project` 为边界，只做确定性的 Unicode/格式规范化与保守语法助词近似匹配；数字/版本不同的条目去重时保留。重复保存等价内容只刷新已有条目的 `lastVerifiedAt`
@@ -190,7 +191,8 @@ src/main/java/com/paicli/
 - system prompt Memory Policy：记忆是线索不是事实，行动前先对照当前文件核实；不一致以文件为准并提示用户更新记忆
 - 长期记忆必须可审计和可删除：`/memory list` / `/memory search <关键词>` / `/memory delete <id>` / `/memory verify <id>` / `/memory replace <id> <事实>` / `/memory clear`
 - 当前短期上下文只有各 Agent 实际发给 LLM 的 `conversationHistory`，不要再维护 `MemoryManager.shortTermMemory` 之类的影子消息副本。
-- 自动压缩有两条路径：`PAICLI_SESSION_MEMORY_COMPACTION_ENABLED=true` 时优先使用阈值前异步生成的增量 Session Memory 摘要；摘要未就绪、失效或收益不足时回退 `ConversationHistoryCompactor` 完整摘要。完整摘要按目标、用户要求、已完成证据、待办四个栏目整理；超出单次摘要输入的旧历史按顺序分段摘要再分层合并，不静默丢弃中段；最终栏目不全时尝试重整一次，仍不合格则保持原始 history。若重建后的 Token 数没有下降，也保持原始 history。两条路径最终都原地重建同一份 conversationHistory。摘要仍是有损的；当前没有对旧工具结果做会话内 microcompact。
+- 自动压缩有两条路径：`PAICLI_SESSION_MEMORY_COMPACTION_ENABLED=true` 时优先使用阈值前异步生成的增量 Session Memory 摘要；摘要未就绪、失效或收益不足时回退 `ConversationHistoryCompactor` 完整摘要。完整摘要按目标、用户要求、已完成证据、待办四个栏目整理；超出单次摘要输入的旧历史按顺序分段摘要再分层合并，不静默丢弃中段；最终栏目不全时尝试重整一次，仍不合格则保持原始 history。若重建后的 Token 数没有下降，也保持原始 history。两条路径最终都原地重建同一份 conversationHistory。摘要仍是有损的。
+- 摘要之前还有一档可恢复的“旧工具结果清理”（`ToolResultClearer`，参考 Anthropic context editing 的 `clear_tool_uses`）：`AutoCompactionManager.compactIfNeeded` 先检查清理阈值，达到后把最近 `PAICLI_TOOL_RESULT_CLEARING_KEEP`（默认 3）条之外、长度 ≥ 400 字符的 tool 消息正文换成 `[已清理的旧工具结果] 工具 X 的这次输出……已从上下文清理……需要时重新调用该工具获取最新结果[；完整输出仍保存在 <卸载文件>]`。只替换正文，`tool_call_id` 和消息条数不变，tool_call/tool_result 配对不受影响。阈值默认 `min(100k, 摘要阈值 × 0.6)`，且总是低于摘要阈值（200k 与 1M 窗口都是 100k，128k 窗口约 57k）；`PAICLI_TOOL_RESULT_CLEARING_TRIGGER_TOKENS` 覆盖，`PAICLI_TOOL_RESULT_CLEARING_EXCLUDE_TOOLS` 逗号分隔排除工具，`PAICLI_TOOL_RESULT_CLEARING_ENABLED=false` 关闭。清理后若低于摘要阈值则本轮不再摘要。system prompt 已告知模型遇到占位时重新调用工具或按路径读回卸载文件。清理会改变后续请求前缀，prompt cache 会在清理点失效一次
 - 自动压缩阈值按 Claude Code 风格预留摘要输出和安全缓冲：大窗口使用 `window - 20k - 13k`，例如 200k 窗口约 167k 触发、1M 窗口约 967k 触发；小窗口按比例缩小预留。
 - ReAct、Plan 单任务和 SubAgent 默认不设固定迭代上限；`paicli.react.hard.max.iterations` 仅在显式配置正整数时启用。显式轮数/Token 预算或停滞检测命中后必须禁用工具并做一次最佳努力收尾，返回“部分完成”结果，不能直接丢弃已有工作。
 
@@ -332,6 +334,8 @@ Team 现在有默认关闭的 `TeamExecutionObserver`：13 类进程内事件绑
 ## 当前已知边界
 
 以下在路线图但未交付：通用产品级容器/VM 沙箱 / MCP OAuth + sampling + server 自动重启。benchmark 专用 `DOCKER_RELAY` 是隔离评测入口，不改变交互式 PaiCLI 的安全模型。
+
+`execute_command` 有可选的操作系统级命令沙箱（`CommandSandbox`，一套策略两个后端：macOS Seatbelt / Linux bubblewrap）：系统与运行时目录只读、用户 HOME 不可见、只有工作区可写、无网络，HOME/TMPDIR 重定向到工作区 `.paicli-command-sandbox/`（交互式启用时自动写 `*` 的 `.gitignore`）。`PAICLI_COMMAND_SANDBOX=off`（默认，行为与旧版一致）/ `auto`（探测 + 探针，可用则启用，不可用则启动时提示并回退直接执行）/ `required`（不可用时 `execute_command` 以策略拒绝返回）。默认不开启的原因：沙箱无网络且看不到 `~/.m2`、`~/.gitconfig` 等用户目录，`mvn` / `npm install` / `git push` 这类常用命令会失败。bubblewrap 用 `--unshare-all`（含 network namespace）、`--ro-bind-try` 系统目录、`--bind` 工作区、`--die-with-parent --new-session`；容器内禁用 user namespace 时探针失败即视为不可用。命令始终作为单个 argv 交给 `/bin/bash -c`，不做 shell 拼接。基准评测的 `setCommandSandboxRoot` 仍固定走 Seatbelt，行为未变。Seatbelt profile 现额外放行根目录 "/" 本身的读取（literal，不含子树）：较新的 macOS 上缺它时 bash 启动即 SIGABRT（exit 134），这是此前 4 个 `macSandbox*` 用例失败的原因，补上后 3 个恢复通过；`java -version` 在 Seatbelt 内仍以 exit 139（SIGSEGV）退出，`macSandboxAllowsDevelopmentRuntimesAndDevNull` 仍失败，JVM 在受限 profile 下所需的额外权限尚未定位
 
 不要把 `ROADMAP.md` 中"将来要做"误读成"现在已有"。
 

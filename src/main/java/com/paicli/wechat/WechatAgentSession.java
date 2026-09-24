@@ -46,6 +46,8 @@ public class WechatAgentSession implements AutoCloseable {
         WechatPolicyConfig policyConfig = WechatPolicyConfig.forWorkspace(workspace);
         WechatToolRegistry registry = new WechatToolRegistry(new WechatPolicyDecider(policyConfig));
         registry.setProjectPath(workspace.toString());
+        // 与 CLI 共用 PAICLI_COMMAND_SANDBOX；默认 OFF 时行为不变。
+        registry.configureCommandSandbox(com.paicli.tool.CommandSandboxMode.fromConfiguration(), workspace);
         this.renderer = new WechatTerminalRenderer(localRenderer, sender);
         this.agent = new Agent(client, registry);
         try {

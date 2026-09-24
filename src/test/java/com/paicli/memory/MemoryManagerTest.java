@@ -65,4 +65,26 @@ class MemoryManagerTest {
         assertEquals(200000, manager.getTokenBudget().getContextWindow());
         assertEquals(167000, manager.getContextProfile().compressionTriggerTokens());
     }
+
+    @Test
+    void explicitSaveRecordsExternalContextInMetadata() {
+        LongTermMemory longTerm = new LongTermMemory(tempDir.toFile());
+        MemoryManager manager = new MemoryManager(new GLMClient("test-key"), 32768, 128000, longTerm);
+        ExternalContextTracker tracker = new ExternalContextTracker(true);
+        manager.setExternalContextTracker(tracker);
+
+        manager.storeFact("本地构建使用 Maven");
+        tracker.record("web_fetch");
+        tracker.record("mcp__docs__search");
+        manager.storeFact("部署文档要求 JDK 21", "global");
+
+        MemoryEntry local = longTerm.search("Maven", 5, manager.getCurrentProject()).get(0);
+        MemoryEntry external = longTerm.search("JDK", 5).get(0);
+        assertEquals(null, local.getMetadata().get(ExternalContextTracker.METADATA_FLAG));
+        assertEquals("true", external.getMetadata().get(ExternalContextTracker.METADATA_FLAG));
+        assertEquals("web_fetch,mcp__docs__search",
+                external.getMetadata().get(ExternalContextTracker.METADATA_SOURCES));
+        assertEquals("global", external.getMetadata().get("scope"));
+        assertTrue(manager.blocksAutomaticMemory());
+    }
 }

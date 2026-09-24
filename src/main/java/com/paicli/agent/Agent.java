@@ -74,6 +74,7 @@ public class Agent {
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setCurrentModel(llmClient.getProviderName(), llmClient.getModelName());
         this.memoryManager.setProjectPath(this.toolRegistry.getProjectPath());
+        this.memoryManager.setExternalContextTracker(this.toolRegistry.getExternalContextTracker());
         this.toolRegistry.setMemoryWriter((fact, scope, replaceId, keepBoth) ->
                 memoryManager.storeFact(fact, scope, replaceId, keepBoth).describe());
         conversationHistory.add(LlmClient.Message.system(buildSystemPrompt("")));
@@ -181,6 +182,7 @@ public class Agent {
                         toolRegistry.isSharedBrowserSession(),
                         toolRegistry.hasAgentOwnedCurrentBrowserPage());
         pruneHistoricalImagePayloads();
+        recordExpandedMcpResources(userInput, submittedUserInput);
         storeExplicitBrowserMemoryHint(userInput);
 
         // 检索相关长期记忆，注入到 system prompt
@@ -383,6 +385,7 @@ public class Agent {
      */
     public void clearHistory() {
         autoCompactionManager.clear(conversationHistory);
+        memoryManager.getExternalContextTracker().reset();
         conversationLedger.appendEvent(
                 "history_clear",
                 "react",
@@ -459,6 +462,11 @@ public class Agent {
         long beforeTokens = estimateCurrentContextTokens();
         try {
             AutoCompactionManager.Result result = autoCompactionManager.compactIfNeeded(conversationHistory, trigger);
+            if (result.clearedToolResults() > 0) {
+                recordCompaction("automatic:tool_result_clearing", beforeMessages, beforeTokens);
+                renderer().stream().println("🧹 上下文增长，已清理 " + result.clearedToolResults()
+                        + " 条较早的工具结果（保留最近几条；需要时可重新调用工具或读回卸载文件）。");
+            }
             if (result.compacted()) {
                 recordCompaction("automatic:" + result.strategy().name().toLowerCase(), beforeMessages, beforeTokens);
                 String strategy = result.strategy() == AutoCompactionManager.Strategy.SESSION_MEMORY
@@ -561,7 +569,27 @@ public class Agent {
         return memoryManager;
     }
 
+    /** 用户输入里展开的 MCP resource 正文同样是外部内容，按会话记一次来源。 */
+    private void recordExpandedMcpResources(String userInput, String submittedUserInput) {
+        if (userInput == null || userInput.equals(submittedUserInput)) {
+            return;
+        }
+        if (userInput.contains("<resource server=\"")) {
+            memoryManager.getExternalContextTracker().record("mcp_resource_mention");
+        }
+    }
+
+    /**
+     * 自动写记忆路径：用户说“记住 + 复用已登录 Chrome”时直接保存一条登录态偏好。站点域名取自
+     * 最近上下文，可能来自网页或 MCP 结果，所以会话接触过外部内容时跳过，交给模型按用户原文
+     * 调用 save_memory（显式保存会在 metadata 里记录外部上下文来源）。
+     */
     private void storeExplicitBrowserMemoryHint(String userInput) {
+        if (memoryManager.blocksAutomaticMemory()) {
+            log.info("Skip automatic browser-login memory hint: session has external context {}",
+                    memoryManager.getExternalContextTracker().sources());
+            return;
+        }
         List<String> recentTexts = conversationHistory.stream()
                 .map(LlmClient.Message::content)
                 .filter(content -> content != null && !content.isBlank())
@@ -613,6 +641,13 @@ public class Agent {
                 formatTokens(triggerTokens),
                 (int) (profile.compressionTriggerRatio() * 100),
                 formatTokens(triggerRemaining)));
+        int clearTrigger = autoCompactionManager.toolResultClearTriggerTokens(triggerTokens);
+        sb.append("  旧工具结果清理: ")
+                .append(clearTrigger > 0
+                        ? formatTokens(clearTrigger) + " 触发，保留最近 "
+                                + autoCompactionManager.toolResultClearingConfig().keepRecent() + " 条"
+                        : "关闭")
+                .append("\n");
         sb.append("  自动压缩: ")
                 .append(autoCompactionManager.isSessionMemoryEnabled()
                         ? "Session Memory 优先，完整摘要回退"

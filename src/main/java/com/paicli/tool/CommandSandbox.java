@@ -7,7 +7,6 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -15,17 +14,36 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Opt-in macOS Seatbelt wrapper for {@code execute_command}.
+ * {@code execute_command} 的操作系统级沙箱，一套策略、两个平台后端：
  *
- * <p>The profile is passed as one argv item to {@code sandbox-exec}; neither the
- * profile nor the command is interpolated into another shell command. The
- * sandbox may read the workspace and explicitly selected runtime directories,
- * may write only below the workspace root, and has no network access.
+ * <ul>
+ *   <li>系统目录和运行时目录只读，用户 HOME 不可见；</li>
+ *   <li>只有工作区可写，HOME / TMPDIR 重定向到工作区内的私有状态目录；</li>
+ *   <li>没有网络。</li>
+ * </ul>
+ *
+ * <p>macOS 用 Seatbelt（{@link SeatbeltProfile}），Linux 用 bubblewrap（{@link BubblewrapArguments}）。
+ * 两个后端都把命令作为单独一个 argv 交给 {@code /bin/bash -c}，不拼接任何 shell 字符串。
+ * 启用前会实际跑一次探针，探针失败即视为不可用（fail closed）。</p>
  */
 final class CommandSandbox {
 
-    static final Path DEFAULT_EXECUTABLE = Path.of("/usr/bin/sandbox-exec");
-    private static final Path DEV_NULL = Path.of("/dev/null");
+    enum Backend {
+        SEATBELT("Seatbelt", "macOS Seatbelt", Path.of("/usr/bin/sandbox-exec")),
+        BUBBLEWRAP("bubblewrap", "Linux bubblewrap", Path.of("/usr/bin/bwrap"));
+
+        final String probeName;
+        final String displayName;
+        final Path defaultExecutable;
+
+        Backend(String probeName, String displayName, Path defaultExecutable) {
+            this.probeName = probeName;
+            this.displayName = displayName;
+            this.defaultExecutable = defaultExecutable;
+        }
+    }
+
+    static final Path DEFAULT_EXECUTABLE = Backend.SEATBELT.defaultExecutable;
     private static final long PROBE_TIMEOUT_SECONDS = 3;
     private static final String STATE_DIRECTORY = ".paicli-command-sandbox";
     private static final List<Path> SYSTEM_READ_DIRECTORY_ROOTS = List.of(
@@ -51,13 +69,7 @@ final class CommandSandbox {
             Path.of("/usr/local/lib"),
             Path.of("/usr/local/share")
     );
-    private static final List<Path> SYSTEM_READ_LITERAL_PATHS = List.of(
-            Path.of("/dev/null"),
-            Path.of("/dev/random"),
-            Path.of("/dev/urandom"),
-            Path.of("/dev/zero")
-    );
-
+    private final Backend backend;
     private final Path root;
     private final Path executable;
     private final Path homeDirectory;
@@ -67,6 +79,7 @@ final class CommandSandbox {
     private final List<Path> readRoots;
     private final String profile;
 
+    /** 基准评测入口：固定使用 macOS Seatbelt，不可用时抛异常（fail closed）。 */
     static CommandSandbox enable(Path root) {
         return enable(
                 root,
@@ -79,7 +92,16 @@ final class CommandSandbox {
                                  Path executable,
                                  Map<String, String> inheritedEnvironment,
                                  Path javaHome) {
+        return enable(Backend.SEATBELT, root, executable, inheritedEnvironment, javaHome);
+    }
+
+    static CommandSandbox enable(Backend backend,
+                                 Path root,
+                                 Path executable,
+                                 Map<String, String> inheritedEnvironment,
+                                 Path javaHome) {
         CommandSandbox sandbox = new CommandSandbox(
+                backend,
                 root,
                 executable,
                 inheritedEnvironment,
@@ -96,6 +118,18 @@ final class CommandSandbox {
                    Path executable,
                    Map<String, String> inheritedEnvironment,
                    Path javaHome) {
+        this(Backend.SEATBELT, root, executable, inheritedEnvironment, javaHome);
+    }
+
+    CommandSandbox(Backend backend,
+                   Path root,
+                   Path executable,
+                   Map<String, String> inheritedEnvironment,
+                   Path javaHome) {
+        if (backend == null) {
+            throw new IllegalArgumentException("sandbox backend must not be null");
+        }
+        this.backend = backend;
         this.root = canonicalDirectory(root, "command sandbox root");
         if (executable == null) {
             throw new IllegalArgumentException("sandbox executable must not be null");
@@ -108,7 +142,9 @@ final class CommandSandbox {
                 ? ""
                 : inheritedEnvironment.getOrDefault("PATH", "");
         this.readRoots = collectReadRoots(this.root, this.javaHome, inheritedEnvironment);
-        this.profile = buildProfile(this.root, this.readRoots);
+        this.profile = backend == Backend.SEATBELT
+                ? SeatbeltProfile.build(this.root, this.readRoots)
+                : "";
     }
 
     Invocation prepare(Path workingDirectory, String command) throws IOException {
@@ -124,15 +160,7 @@ final class CommandSandbox {
         ensurePrivateDirectory(homeDirectory);
         ensurePrivateDirectory(tempDirectory);
 
-        return new Invocation(
-                List.of(
-                        executable.toString(),
-                        "-p",
-                        profile,
-                        "/bin/bash",
-                        "-c",
-                        command),
-                workingRoot);
+        return new Invocation(arguments(workingRoot, command), workingRoot);
     }
 
     void configureEnvironment(Map<String, String> environment) {
@@ -152,6 +180,16 @@ final class CommandSandbox {
         return root;
     }
 
+    /** 交互式启用时把状态目录排除出版本库，避免在用户项目里留下未跟踪文件。 */
+    void ignoreStateDirectoryInGit() throws IOException {
+        Path stateDirectory = root.resolve(STATE_DIRECTORY);
+        ensurePrivateDirectory(stateDirectory);
+        Path gitignore = stateDirectory.resolve(".gitignore");
+        if (!Files.exists(gitignore, LinkOption.NOFOLLOW_LINKS)) {
+            Files.writeString(gitignore, "*\n", StandardCharsets.UTF_8);
+        }
+    }
+
     Path homeDirectory() {
         return homeDirectory;
     }
@@ -164,14 +202,26 @@ final class CommandSandbox {
         return profile;
     }
 
+    Backend backend() {
+        return backend;
+    }
+
+    Path executable() {
+        return executable;
+    }
+
+    List<Path> readRoots() {
+        return readRoots;
+    }
+
     List<String> arguments(String command) {
-        return List.of(
-                executable.toString(),
-                "-p",
-                profile,
-                "/bin/bash",
-                "-c",
-                command);
+        return arguments(root, command);
+    }
+
+    List<String> arguments(Path workingDirectory, String command) {
+        return backend == Backend.SEATBELT
+                ? SeatbeltProfile.arguments(executable, profile, command)
+                : BubblewrapArguments.build(executable, root, workingDirectory, readRoots, command);
     }
 
     private void probe() {
@@ -190,7 +240,7 @@ final class CommandSandbox {
             if (!process.waitFor(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 process.destroyForcibly();
                 process.waitFor(1, TimeUnit.SECONDS);
-                throw new IllegalStateException("命令沙箱不可用: Seatbelt probe 超时");
+                throw new IllegalStateException("命令沙箱不可用: " + backend.probeName + " probe 超时");
             }
             if (process.exitValue() != 0) {
                 String diagnostic = new String(
@@ -198,7 +248,7 @@ final class CommandSandbox {
                         .replaceAll("[\\r\\n]+", " ")
                         .trim();
                 throw new IllegalStateException(
-                        "命令沙箱不可用: Seatbelt probe exit code=" + process.exitValue()
+                        "命令沙箱不可用: " + backend.probeName + " probe exit code=" + process.exitValue()
                                 + (diagnostic.isBlank() ? "" : " (" + diagnostic + ")"));
             }
         } catch (InterruptedException e) {
@@ -206,12 +256,12 @@ final class CommandSandbox {
             if (process != null) {
                 process.destroyForcibly();
             }
-            throw new IllegalStateException("命令沙箱不可用: Seatbelt probe 被中断", e);
+            throw new IllegalStateException("命令沙箱不可用: " + backend.probeName + " probe 被中断", e);
         } catch (IOException | SecurityException e) {
             if (process != null) {
                 process.destroyForcibly();
             }
-            throw new IllegalStateException("命令沙箱不可用: Seatbelt probe 启动失败", e);
+            throw new IllegalStateException("命令沙箱不可用: " + backend.probeName + " probe 启动失败", e);
         }
     }
 
@@ -268,7 +318,7 @@ final class CommandSandbox {
         }
     }
 
-    private static Path configuredJavaHome() {
+    static Path configuredJavaHome() {
         String value = System.getProperty("java.home");
         return value == null || value.isBlank() ? null : Path.of(value);
     }
@@ -372,53 +422,7 @@ final class CommandSandbox {
         return name.equals("bin") || name.equals("sbin") || name.equals("shims");
     }
 
-    private static String buildProfile(Path workspace, Collection<Path> readableRoots) {
-        StringBuilder profile = new StringBuilder();
-        profile.append("(version 1)\n")
-                .append("(deny default)\n")
-                .append("(deny network*)\n")
-                .append("(allow process*)\n")
-                .append("(allow sysctl-read)\n")
-                // macOS language runtimes use Mach services for basic process/runtime setup.
-                // This remains broader than container/VM IPC isolation; network and filesystem
-                // policy are still independently denied/restricted by this Seatbelt profile.
-                .append("(allow mach-lookup)\n")
-                .append("(allow file-read*\n");
-        for (Path readableRoot : readableRoots) {
-            appendPathFilters(profile, readableRoot);
-        }
-        for (Path readablePath : SYSTEM_READ_LITERAL_PATHS) {
-            if (Files.exists(readablePath)) {
-                appendLiteralFilter(profile, readablePath);
-            }
-        }
-        profile.append(")\n")
-                .append("(allow file-write*\n");
-        appendPathFilters(profile, workspace);
-        profile.append("  (literal ").append(seatbeltString(DEV_NULL)).append(")\n");
-        profile.append(")\n");
-        return profile.toString();
-    }
-
-    private static void appendPathFilters(StringBuilder profile, Path path) {
-        String literal = seatbeltString(path);
-        profile.append("  (literal ").append(literal).append(")\n")
-                .append("  (subpath ").append(literal).append(")\n");
-    }
-
-    private static void appendLiteralFilter(StringBuilder profile, Path path) {
-        profile.append("  (literal ").append(seatbeltString(path)).append(")\n");
-    }
-
-    private static String seatbeltString(Path path) {
-        String value = path.toString();
-        rejectControlCharacters(path, "sandbox profile path");
-        return "\"" + value
-                .replace("\\", "\\\\")
-                .replace("\"", "\\\"") + "\"";
-    }
-
-    private static void rejectControlCharacters(Path path, String label) {
+    static void rejectControlCharacters(Path path, String label) {
         String value = path.toString();
         for (int i = 0; i < value.length(); i++) {
             if (Character.isISOControl(value.charAt(i))) {

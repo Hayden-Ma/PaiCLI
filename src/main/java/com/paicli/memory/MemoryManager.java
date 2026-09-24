@@ -5,6 +5,7 @@ import com.paicli.context.ContextProfile;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -24,6 +25,7 @@ public class MemoryManager {
     private TokenBudget tokenBudget;
     private ContextProfile contextProfile;
     private String currentProject;
+    private ExternalContextTracker externalContextTracker = new ExternalContextTracker(false);
 
     public MemoryManager(LlmClient llmClient) {
         this(llmClient, ContextProfile.from(llmClient), null);
@@ -57,6 +59,25 @@ public class MemoryManager {
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
     }
 
+    /**
+     * 绑定会话级外部内容标记（通常来自共享的 ToolRegistry）。显式保存的记忆会据此在 metadata
+     * 中记录 {@code external_context=true} 及来源工具；自动写记忆的路径据此跳过。
+     */
+    public void setExternalContextTracker(ExternalContextTracker externalContextTracker) {
+        if (externalContextTracker != null) {
+            this.externalContextTracker = externalContextTracker;
+        }
+    }
+
+    public ExternalContextTracker getExternalContextTracker() {
+        return externalContextTracker;
+    }
+
+    /** 自动写记忆路径（非用户显式保存）是否必须跳过：防护开启且会话接触过外部内容。 */
+    public boolean blocksAutomaticMemory() {
+        return externalContextTracker.blocksAutomaticMemory();
+    }
+
     public void setProjectPath(String projectPath) {
         if (projectPath == null || projectPath.isBlank()) {
             return;
@@ -83,9 +104,7 @@ public class MemoryManager {
      */
     public MemoryWriteResult storeFact(String fact, String scope, String replaceId, boolean allowConflict) {
         String normalizedScope = normalizeScope(scope);
-        Map<String, String> metadata = "global".equals(normalizedScope)
-                ? Map.of("source", "fact", "scope", "global")
-                : Map.of("source", "fact", "scope", "project", "project", currentProject);
+        Map<String, String> metadata = factMetadata(normalizedScope);
         MemoryEntry entry = new MemoryEntry(
                 "fact-" + UUID.randomUUID().toString().substring(0, 8),
                 fact,
@@ -94,6 +113,22 @@ public class MemoryManager {
                 MemoryEntry.estimateTokens(fact)
         );
         return longTermMemory.write(entry, replaceId, allowConflict, currentProject);
+    }
+
+    private Map<String, String> factMetadata(String normalizedScope) {
+        Map<String, String> metadata = new LinkedHashMap<>();
+        metadata.put("source", "fact");
+        metadata.put("scope", normalizedScope);
+        if (!"global".equals(normalizedScope)) {
+            metadata.put("project", currentProject);
+        }
+        List<String> externalSources = externalContextTracker.sources();
+        if (!externalSources.isEmpty()) {
+            // 显式保存仍然放行，但记录这条记忆写入时会话里已有外部内容，便于审计和清理。
+            metadata.put(ExternalContextTracker.METADATA_FLAG, "true");
+            metadata.put(ExternalContextTracker.METADATA_SOURCES, String.join(",", externalSources));
+        }
+        return metadata;
     }
 
     /** 用户选择用新内容替换某条旧记忆；新条目沿用旧条目的作用域。 */

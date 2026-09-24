@@ -52,6 +52,43 @@ class AutoCompactionManagerTest {
     }
 
     @Test
+    void clearsOldToolResultsBeforeSummarizingAndSkipsSummaryWhenEnough() {
+        StubFullCompactor full = new StubFullCompactor(true);
+        StubSessionCompactor session = new StubSessionCompactor(true);
+        AutoCompactionManager manager = new AutoCompactionManager(full, session,
+                new ToolResultClearer(new ToolResultClearer.Config(true, 0, 3, java.util.Set.of())));
+        List<LlmClient.Message> history = ToolResultClearerTest.historyWithToolRounds(10, "read_file");
+        int tokens = TokenBudget.estimateMessagesTokens(history);
+        // 摘要阈值略低于当前占用；清理阈值 = 60%，清理 7 条旧结果后就降到摘要阈值以下。
+        int summaryTrigger = tokens - 10;
+
+        AutoCompactionManager.Result result = manager.compactIfNeeded(history, summaryTrigger);
+
+        assertFalse(result.compacted());
+        assertEquals(AutoCompactionManager.Strategy.TOOL_RESULT_CLEARING, result.strategy());
+        assertEquals(7, result.clearedToolResults());
+        assertEquals(0, full.calls.get());
+        assertEquals(0, session.compactCalls.get());
+        assertTrue(TokenBudget.estimateMessagesTokens(history) < summaryTrigger);
+    }
+
+    @Test
+    void stillSummarizesWhenClearingIsNotEnough() {
+        StubFullCompactor full = new StubFullCompactor(true);
+        StubSessionCompactor session = new StubSessionCompactor(false);
+        AutoCompactionManager manager = new AutoCompactionManager(full, session,
+                new ToolResultClearer(new ToolResultClearer.Config(true, 0, 3, java.util.Set.of())));
+        List<LlmClient.Message> history = ToolResultClearerTest.historyWithToolRounds(10, "read_file");
+
+        AutoCompactionManager.Result result = manager.compactIfNeeded(history, 1_000);
+
+        assertTrue(result.compacted());
+        assertEquals(AutoCompactionManager.Strategy.FULL_SUMMARY, result.strategy());
+        assertEquals(7, result.clearedToolResults());
+        assertEquals(1, full.calls.get());
+    }
+
+    @Test
     void systemPropertyEnablesExperimentalPath() {
         String old = System.getProperty(AutoCompactionManager.SESSION_MEMORY_PROPERTY);
         try {
