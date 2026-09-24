@@ -152,6 +152,52 @@ class PlanExecuteAgentTest {
     }
 
     @Test
+    void failedTaskShouldSkipDependentsAndKeepCompletedResults() {
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "独立任务已完成", null, 10, 2),
+                new LlmClient.ChatResponse("assistant", "独立任务已完成", null, 10, 2)));
+        DiamondFailurePlanner planner = new DiamondFailurePlanner(llmClient);
+        PlanExecuteAgent agent = new PlanExecuteAgent(llmClient, new ToolRegistry(), planner, null,
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                new PrintStream(new ByteArrayOutputStream()));
+
+        String result = agent.run("分析项目并输出报告");
+
+        assertTrue(result.startsWith("⚠️ 计划部分完成，有任务失败。"), result);
+        assertTrue(result.contains("已完成的任务结果"), "失败汇总不能丢掉已完成任务的结果: " + result);
+        assertTrue(result.contains("[a] 独立任务已完成"), result);
+        assertTrue(result.contains("任务 c 失败"), result);
+        assertTrue(result.contains("任务 d 已跳过"), result);
+        assertEquals(Task.TaskStatus.SKIPPED, planner.lastPlan.getTask("d").getStatus());
+    }
+
+    @Test
+    void replanningShouldStopAtConfiguredLimit() {
+        String old = System.getProperty(PlanExecuteAgent.MAX_REPLANS_PROPERTY);
+        try {
+            System.setProperty(PlanExecuteAgent.MAX_REPLANS_PROPERTY, "1");
+            StubGLMClient llmClient = new StubGLMClient(List.of());
+            AlwaysFailingChainPlanner planner = new AlwaysFailingChainPlanner(llmClient);
+            PlanExecuteAgent agent = new PlanExecuteAgent(llmClient, new ToolRegistry(), planner, null,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                    new PrintStream(new ByteArrayOutputStream()));
+
+            String result = agent.run("执行两步任务");
+
+            assertEquals(2, planner.createCount.get(), "首次规划 + 1 次重规划后应停止");
+            assertTrue(result.startsWith("⚠️ 计划部分完成，有任务失败。"), result);
+            assertTrue(result.contains("任务 y 已跳过: 已达到重新规划上限"), result);
+            assertEquals(Task.TaskStatus.SKIPPED, planner.lastPlan.getTask("y").getStatus());
+        } finally {
+            if (old == null) {
+                System.clearProperty(PlanExecuteAgent.MAX_REPLANS_PROPERTY);
+            } else {
+                System.setProperty(PlanExecuteAgent.MAX_REPLANS_PROPERTY, old);
+            }
+        }
+    }
+
+    @Test
     void shouldNotExtractFactsWhenPlanIsCanceled() throws Exception {
         StubGLMClient llmClient = new StubGLMClient(List.of());
         LongTermMemory longTermMemory = new LongTermMemory(tempDir.resolve("memory-store-cancel").toFile());
@@ -365,6 +411,46 @@ class PlanExecuteAgentTest {
             ExecutionPlan plan = new ExecutionPlan("plan-test", goal);
             plan.addTask(new Task("task_1", "读取测试文件", Task.TaskType.FILE_READ));
             plan.computeExecutionOrder();
+            return plan;
+        }
+    }
+
+    private static final class DiamondFailurePlanner extends Planner {
+        private ExecutionPlan lastPlan;
+
+        private DiamondFailurePlanner(LlmClient llmClient) {
+            super(llmClient);
+        }
+
+        @Override
+        public ExecutionPlan createPlan(String goal) {
+            ExecutionPlan plan = new ExecutionPlan("plan-diamond", goal);
+            plan.addTask(new Task("a", "读取配置", Task.TaskType.FILE_READ));
+            plan.addTask(new Task("b", "读取源码", Task.TaskType.FILE_READ));
+            plan.addTask(new Task("c", "分析源码", Task.TaskType.ANALYSIS, List.of("b")));
+            plan.addTask(new Task("d", "输出报告", Task.TaskType.ANALYSIS, List.of("c")));
+            plan.computeExecutionOrder();
+            lastPlan = plan;
+            return plan;
+        }
+    }
+
+    private static final class AlwaysFailingChainPlanner extends Planner {
+        private final AtomicInteger createCount = new AtomicInteger();
+        private ExecutionPlan lastPlan;
+
+        private AlwaysFailingChainPlanner(LlmClient llmClient) {
+            super(llmClient, new PrintStream(new ByteArrayOutputStream()));
+        }
+
+        @Override
+        public ExecutionPlan createPlan(String goal) {
+            createCount.incrementAndGet();
+            ExecutionPlan plan = new ExecutionPlan("plan-chain-" + createCount.get(), goal);
+            plan.addTask(new Task("x", "第一步", Task.TaskType.ANALYSIS));
+            plan.addTask(new Task("y", "第二步", Task.TaskType.ANALYSIS, List.of("x")));
+            plan.computeExecutionOrder();
+            lastPlan = plan;
             return plan;
         }
     }

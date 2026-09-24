@@ -353,6 +353,22 @@ class ToolRegistryTest {
     }
 
     @Test
+    void editFileMatchesLfSnippetInCrlfFileAndKeepsCrlf(@TempDir Path tempDir) throws Exception {
+        Path file = tempDir.resolve("Windows.java");
+        Files.writeString(file, "class A {\r\n  int x = 1;\r\n  int y = 2;\r\n}\r\n");
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        ToolOutput result = registry.executeToolOutput("edit_file", MAPPER.writeValueAsString(Map.of(
+                "path", "Windows.java",
+                "old_text", "  int x = 1;\n  int y = 2;",
+                "new_text", "  int x = 10;\n  int y = 20;")));
+
+        assertEquals("文件已编辑: Windows.java", result.text());
+        assertEquals("class A {\r\n  int x = 10;\r\n  int y = 20;\r\n}\r\n", Files.readString(file));
+    }
+
+    @Test
     void editFileRejectsPathOutsideProject(@TempDir Path tempDir) throws Exception {
         Path workspace = Files.createDirectory(tempDir.resolve("workspace"));
         Path outside = tempDir.resolve("outside.txt");
@@ -625,15 +641,80 @@ class ToolRegistryTest {
         };
 
         List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
-                new ToolRegistry.ToolInvocation("call_1", "first", "{}"),
-                new ToolRegistry.ToolInvocation("call_2", "second", "{}")
+                new ToolRegistry.ToolInvocation("call_1", "read_file", "{}"),
+                new ToolRegistry.ToolInvocation("call_2", "grep_code", "{}")
         ));
 
-        assertEquals(2, peak.get(), "两个工具调用应并行执行");
+        assertEquals(2, peak.get(), "两个只读工具调用应并行执行");
         assertEquals("call_1", results.get(0).id());
-        assertEquals("result-first", results.get(0).result());
+        assertEquals("result-read_file", results.get(0).result());
         assertEquals("call_2", results.get(1).id());
-        assertEquals("result-second", results.get(1).result());
+        assertEquals("result-grep_code", results.get(1).result());
+    }
+
+    @Test
+    void shouldSerializeConcurrentEditsToSameFileWithoutLosingUpdates(@TempDir Path tempDir) throws Exception {
+        Path file = tempDir.resolve("counter.txt");
+        Files.writeString(file, "a=0\nb=0\nc=0\nd=0\n");
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("e1", "edit_file",
+                        "{\"path\":\"counter.txt\",\"old_text\":\"a=0\",\"new_text\":\"a=1\"}"),
+                new ToolRegistry.ToolInvocation("e2", "edit_file",
+                        "{\"path\":\"counter.txt\",\"old_text\":\"b=0\",\"new_text\":\"b=1\"}"),
+                new ToolRegistry.ToolInvocation("e3", "edit_file",
+                        "{\"path\":\"counter.txt\",\"old_text\":\"c=0\",\"new_text\":\"c=1\"}"),
+                new ToolRegistry.ToolInvocation("e4", "edit_file",
+                        "{\"path\":\"counter.txt\",\"old_text\":\"d=0\",\"new_text\":\"d=1\"}")
+        ));
+
+        assertEquals(List.of("e1", "e2", "e3", "e4"), results.stream()
+                .map(ToolRegistry.ToolExecutionResult::id)
+                .toList());
+        assertEquals("a=1\nb=1\nc=1\nd=1\n", Files.readString(file), "同一批次的多次编辑都必须保留");
+    }
+
+    @Test
+    void shouldRunSideEffectToolsSeriallyBetweenParallelReadOnlyRuns() {
+        AtomicInteger current = new AtomicInteger();
+        AtomicInteger writePeak = new AtomicInteger();
+        List<String> executionOrder = java.util.Collections.synchronizedList(new ArrayList<>());
+        ToolRegistry registry = new ToolRegistry() {
+            @Override
+            public String executeTool(String name, String argumentsJson) {
+                int now = current.incrementAndGet();
+                if (!ToolRegistry.isParallelSafeTool(name)) {
+                    writePeak.updateAndGet(previous -> Math.max(previous, now));
+                }
+                executionOrder.add(name + ":" + argumentsJson);
+                try {
+                    Thread.sleep(20);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    current.decrementAndGet();
+                }
+                return "result-" + argumentsJson;
+            }
+        };
+
+        List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("r1", "read_file", "1"),
+                new ToolRegistry.ToolInvocation("r2", "grep_code", "2"),
+                new ToolRegistry.ToolInvocation("w1", "write_file", "3"),
+                new ToolRegistry.ToolInvocation("c1", "execute_command", "4"),
+                new ToolRegistry.ToolInvocation("r3", "read_file", "5")
+        ));
+
+        assertEquals(1, writePeak.get(), "有副作用的工具执行时不应有其他工具同时运行");
+        assertEquals(List.of("r1", "r2", "w1", "c1", "r3"), results.stream()
+                .map(ToolRegistry.ToolExecutionResult::id)
+                .toList());
+        List<String> order = List.copyOf(executionOrder);
+        assertEquals(List.of("write_file:3", "execute_command:4", "read_file:5"), order.subList(2, 5),
+                "写入、命令和后续读取必须按模型给出的顺序执行");
     }
 
     @Test
@@ -691,7 +772,7 @@ class ToolRegistryTest {
         ToolRegistry registry = new ToolRegistry(1, 1) {
             @Override
             public String executeTool(String name, String argumentsJson) {
-                if ("slow".equals(name)) {
+                if ("grep_code".equals(name)) {
                     try {
                         Thread.sleep(3000);
                     } catch (InterruptedException e) {
@@ -703,13 +784,13 @@ class ToolRegistryTest {
         };
 
         List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
-                new ToolRegistry.ToolInvocation("call_1", "slow", "{}"),
-                new ToolRegistry.ToolInvocation("call_2", "fast", "{}")
+                new ToolRegistry.ToolInvocation("call_1", "grep_code", "{}"),
+                new ToolRegistry.ToolInvocation("call_2", "read_file", "{}")
         ));
 
         assertTrue(results.get(0).timedOut());
         assertTrue(results.get(0).result().contains("工具执行超时"));
-        assertEquals("result-fast", results.get(1).result());
+        assertEquals("result-read_file", results.get(1).result());
     }
 
     @Test

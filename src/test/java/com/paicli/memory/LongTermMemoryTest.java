@@ -4,6 +4,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Map;
@@ -32,6 +33,48 @@ class LongTermMemoryTest {
 
         assertTrue(memory.retrieve("fact-1").isPresent());
         assertEquals("项目使用Java 17", memory.retrieve("fact-1").get().getContent());
+    }
+
+    @Test
+    void twoInstancesSharingFileShouldNotOverwriteEachOther() {
+        LongTermMemory other = new LongTermMemory(tempDir.toFile());
+
+        memory.store(new MemoryEntry("fact-a", "项目使用 Maven 构建", MemoryEntry.MemoryType.FACT, null, 8));
+        other.store(new MemoryEntry("fact-b", "接口统一返回 Result 包装", MemoryEntry.MemoryType.FACT, null, 8));
+        memory.store(new MemoryEntry("fact-c", "日志框架使用 SLF4J", MemoryEntry.MemoryType.FACT, null, 8));
+
+        LongTermMemory reopened = new LongTermMemory(tempDir.toFile());
+        assertEquals(3, reopened.size(), "三次写入都应落盘，后写的实例不能用旧快照覆盖先写的记忆");
+        assertTrue(reopened.retrieve("fact-a").isPresent());
+        assertTrue(reopened.retrieve("fact-b").isPresent());
+        assertTrue(reopened.retrieve("fact-c").isPresent());
+    }
+
+    @Test
+    void readsShouldSeeWritesFromAnotherInstance() {
+        LongTermMemory other = new LongTermMemory(tempDir.toFile());
+
+        other.store(new MemoryEntry("fact-x", "测试用 JUnit 5", MemoryEntry.MemoryType.FACT, null, 6));
+
+        assertTrue(memory.retrieve("fact-x").isPresent(), "另一个实例写入后，本实例读取前应刷新");
+        assertEquals(1, memory.getAll().size());
+    }
+
+    @Test
+    void corruptFileShouldBeBackedUpInsteadOfWipingMemories() throws Exception {
+        memory.store(new MemoryEntry("fact-1", "项目使用Java 17", MemoryEntry.MemoryType.FACT, null, 10));
+        Path file = tempDir.resolve("long_term_memory.json");
+        Files.writeString(file, "[{\"id\": \"broken\"");
+
+        memory.store(new MemoryEntry("fact-2", "构建用 Maven", MemoryEntry.MemoryType.FACT, null, 6));
+
+        LongTermMemory reopened = new LongTermMemory(tempDir.toFile());
+        assertTrue(reopened.retrieve("fact-1").isPresent(), "解析失败时应保留内存中已有记忆");
+        assertTrue(reopened.retrieve("fact-2").isPresent());
+        try (var files = Files.list(tempDir)) {
+            assertTrue(files.anyMatch(path -> path.getFileName().toString()
+                    .startsWith("long_term_memory.json.corrupt-")), "坏文件应另存备份");
+        }
     }
 
     @Test

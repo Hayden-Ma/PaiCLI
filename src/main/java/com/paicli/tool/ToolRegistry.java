@@ -477,14 +477,22 @@ public class ToolRegistry {
         }
         try {
             String before = Files.readString(safe, StandardCharsets.UTF_8);
-            int first = before.indexOf(oldText);
+            String matchText = oldText;
+            String replacement = newText;
+            int first = before.indexOf(matchText);
+            if (first < 0 && before.contains("\r\n") && oldText.contains("\n")) {
+                // 模型输出的片段通常只用 \n；CRLF 文件按 CRLF 重新匹配，替换文本也转成 CRLF，保持原换行风格
+                matchText = toCrlf(oldText);
+                replacement = toCrlf(newText);
+                first = before.indexOf(matchText);
+            }
             if (first < 0) {
                 throw new IllegalArgumentException("old_text 在文件中不存在: " + path);
             }
-            if (before.indexOf(oldText, first + 1) >= 0) {
+            if (before.indexOf(matchText, first + 1) >= 0) {
                 throw new IllegalArgumentException("old_text 在文件中出现多次，请提供更长的上下文: " + path);
             }
-            String after = before.substring(0, first) + newText + before.substring(first + oldText.length());
+            String after = before.substring(0, first) + replacement + before.substring(first + matchText.length());
             int contentBytes = after.getBytes(StandardCharsets.UTF_8).length;
             if (contentBytes > MAX_WRITE_FILE_BYTES) {
                 throw new PolicyException("编辑后文件 " + contentBytes + " 字节超过 "
@@ -501,6 +509,10 @@ public class ToolRegistry {
         } catch (IOException e) {
             throw new IllegalStateException("编辑文件失败: " + e.getMessage(), e);
         }
+    }
+
+    private static String toCrlf(String text) {
+        return text.replace("\r\n", "\n").replace("\n", "\r\n");
     }
 
     private String readFileForTool(Path file, Map<String, String> args) throws IOException {
@@ -1308,7 +1320,7 @@ public class ToolRegistry {
     /**
      * 执行工具调用
      *
-     * 危险工具（write_file / edit_file / execute_command / create_project）会写一行审计：
+     * 危险工具（write_file / edit_file / execute_command / create_project / revert_turn）会写一行审计：
      * - 策略拦截（PathGuard / CommandGuard / 文件大小上限）→ deny
      * - 普通异常 → error
      * - 其他情况 → allow（仅表示工具调用真的发生过，工具内部的业务错误仍以返回字符串呈现给 LLM）
@@ -1471,8 +1483,11 @@ public class ToolRegistry {
      * 执行同一轮 LLM 返回的多个工具调用。
      *
      * 结果按传入顺序返回，调用方可以安全地按原 tool_call 顺序回灌消息历史。
-     * 含浏览器工具的批次按原顺序串行，避免同一浏览器会话内的页面状态互相覆盖；
-     * 其余批次并行执行，超时后取消未完成任务，已完成工具不受影响。
+     * 只有无副作用的只读工具（{@link #PARALLEL_SAFE_TOOLS}）才会并行；写文件、执行命令、
+     * MCP、记忆写入、回滚和未知工具都按原顺序逐个串行，避免同一文件的并发 edit_file
+     * 互相覆盖（读-改-写丢更新）或命令与写入交错。连续的只读调用组成一段并行执行，
+     * 遇到有副作用的调用先等前面的只读段结束，再单独执行它，保持模型给出的先后语义。
+     * 含浏览器工具的批次整体串行，避免同一浏览器会话内的页面状态互相覆盖。
      */
     public List<ToolExecutionResult> executeTools(List<ToolInvocation> invocations) {
         if (invocations == null || invocations.isEmpty()) {
@@ -1483,27 +1498,61 @@ public class ToolRegistry {
                     .map(invocation -> ToolExecutionResult.failed(invocation, "用户取消了此次工具调用"))
                     .toList();
         }
-        if (invocations.size() == 1) {
-            ToolInvocation invocation = invocations.get(0);
-            long startedAt = System.nanoTime();
-            ToolOutput output = executeToolOutput(invocation.name(), invocation.argumentsJson());
-            return List.of(ToolExecutionResult.completed(invocation, output, elapsedMillis(startedAt)));
+        if (invocations.size() == 1
+                || invocations.stream().anyMatch(invocation -> TurnToolPolicy.isBrowserToolName(invocation.name()))) {
+            return executeSerially(invocations);
         }
-        if (invocations.stream().anyMatch(invocation ->
-                TurnToolPolicy.isBrowserToolName(invocation.name()))) {
-            List<ToolExecutionResult> results = new ArrayList<>(invocations.size());
-            for (ToolInvocation invocation : invocations) {
-                if (CancellationContext.isCancelled()) {
-                    results.add(ToolExecutionResult.failed(invocation, "用户取消了此次工具调用"));
-                    continue;
-                }
-                long startedAt = System.nanoTime();
-                ToolOutput output = executeToolOutput(invocation.name(), invocation.argumentsJson());
-                results.add(ToolExecutionResult.completed(invocation, output, elapsedMillis(startedAt)));
-            }
-            return results;
+        if (invocations.stream().allMatch(invocation -> isParallelSafeTool(invocation.name()))) {
+            return executeInParallel(invocations);
         }
 
+        List<ToolExecutionResult> results = new ArrayList<>(invocations.size());
+        List<ToolInvocation> readOnlyRun = new ArrayList<>();
+        for (ToolInvocation invocation : invocations) {
+            if (isParallelSafeTool(invocation.name())) {
+                readOnlyRun.add(invocation);
+                continue;
+            }
+            results.addAll(flushReadOnlyRun(readOnlyRun));
+            results.addAll(executeSerially(List.of(invocation)));
+        }
+        results.addAll(flushReadOnlyRun(readOnlyRun));
+        return results;
+    }
+
+    /** 无副作用、可以和同类调用并行的内置工具；不在名单里的一律串行。 */
+    static final Set<String> PARALLEL_SAFE_TOOLS = Set.of(
+            "read_file", "list_dir", "glob_files", "grep_code", "search_code",
+            "web_search", "web_fetch", "load_skill");
+
+    static boolean isParallelSafeTool(String toolName) {
+        return toolName != null && PARALLEL_SAFE_TOOLS.contains(toolName);
+    }
+
+    private List<ToolExecutionResult> flushReadOnlyRun(List<ToolInvocation> readOnlyRun) {
+        if (readOnlyRun.isEmpty()) {
+            return List.of();
+        }
+        List<ToolInvocation> run = List.copyOf(readOnlyRun);
+        readOnlyRun.clear();
+        return run.size() == 1 ? executeSerially(run) : executeInParallel(run);
+    }
+
+    private List<ToolExecutionResult> executeSerially(List<ToolInvocation> invocations) {
+        List<ToolExecutionResult> results = new ArrayList<>(invocations.size());
+        for (ToolInvocation invocation : invocations) {
+            if (CancellationContext.isCancelled()) {
+                results.add(ToolExecutionResult.failed(invocation, "用户取消了此次工具调用"));
+                continue;
+            }
+            long startedAt = System.nanoTime();
+            ToolOutput output = executeToolOutput(invocation.name(), invocation.argumentsJson());
+            results.add(ToolExecutionResult.completed(invocation, output, elapsedMillis(startedAt)));
+        }
+        return results;
+    }
+
+    private List<ToolExecutionResult> executeInParallel(List<ToolInvocation> invocations) {
         int parallelism = Math.min(invocations.size(), MAX_PARALLEL_TOOLS);
         ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
             Thread thread = new Thread(r, "paicli-tool-executor");

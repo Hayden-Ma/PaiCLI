@@ -6,11 +6,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
-import java.io.IOException;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -20,7 +20,11 @@ import java.util.stream.Collectors;
  * 1. 持久化用户偏好、项目事实、关键决策等
  * 2. 支持关键词检索
  * 3. 在相同类型和作用域内，基于规范化内容近似匹配自动去重
- * 4. 定期持久化到磁盘
+ * 4. 持久化到磁盘
+ *
+ * 并发约定：同一个 JSON 文件可能同时被多个实例和多个 PaiCLI 进程读写。每次变更都在
+ * {@link LongTermMemoryFile} 的锁内先重读磁盘最新状态再修改并原子写回；读取前检测外部变更并刷新。
+ * 文件损坏时保留内存中最后一份可用数据，不会因为一次解析失败清空全部记忆。
  */
 public class LongTermMemory implements Memory {
     private static final Logger log = LoggerFactory.getLogger(LongTermMemory.class);
@@ -30,7 +34,7 @@ public class LongTermMemory implements Memory {
     private final Map<String, MemoryEntry> entries;
     private final AtomicInteger tokenCounter;
     private final ObjectMapper mapper;
-    private final File storageFile;
+    private final LongTermMemoryFile storage;
     private final MemoryConflictDetector conflictDetector;
 
     public LongTermMemory() {
@@ -53,7 +57,7 @@ public class LongTermMemory implements Memory {
         if (!dir.exists()) {
             dir.mkdirs();
         }
-        this.storageFile = new File(dir, STORAGE_FILE);
+        this.storage = new LongTermMemoryFile(new File(dir, STORAGE_FILE), mapper);
 
         // 启动时加载已有记忆
         loadFromDisk();
@@ -61,19 +65,16 @@ public class LongTermMemory implements Memory {
 
     @Override
     public synchronized void store(MemoryEntry entry) {
-        // type + scope + project 共同限定去重域，避免不同项目或不同可见性的记忆互相误杀。
-        boolean duplicate = entries.values().stream()
-                .anyMatch(existing -> MemoryDeduplicator.isDuplicate(existing, entry));
-        if (duplicate) {
-            return;
-        }
-
-        MemoryEntry previous = entries.put(entry.getId(), entry);
-        if (previous != null) {
-            tokenCounter.addAndGet(-previous.getTokenCount());
-        }
-        tokenCounter.addAndGet(entry.getTokenCount());
-        saveToDisk();
+        withStorageLock(() -> {
+            // type + scope + project 共同限定去重域，避免不同项目或不同可见性的记忆互相误杀。
+            boolean duplicate = entries.values().stream()
+                    .anyMatch(existing -> MemoryDeduplicator.isDuplicate(existing, entry));
+            if (!duplicate) {
+                putEntry(entry);
+                saveToDisk();
+            }
+            return null;
+        });
     }
 
     /**
@@ -89,6 +90,11 @@ public class LongTermMemory implements Memory {
      */
     public synchronized MemoryWriteResult write(MemoryEntry entry, String replaceId,
                                                 boolean allowConflict, String projectKey) {
+        return withStorageLock(() -> writeLocked(entry, replaceId, allowConflict, projectKey));
+    }
+
+    private MemoryWriteResult writeLocked(MemoryEntry entry, String replaceId,
+                                          boolean allowConflict, String projectKey) {
         String scope = scopeOf(entry);
         MemoryEntry target = null;
         if (replaceId != null && !replaceId.isBlank()) {
@@ -136,26 +142,30 @@ public class LongTermMemory implements Memory {
 
     /** Automatic candidates never refresh verification time, replace entries, or bypass conflicts. */
     public synchronized boolean writeAutomatic(MemoryEntry entry) {
-        if (entries.containsKey(entry.getId()) || entries.values().stream().anyMatch(existing ->
-                MemoryDeduplicator.isDuplicate(existing, entry)
-                        || conflictDetector.isConflict(existing, entry))) {
-            return false;
-        }
-        putEntry(entry);
-        saveToDisk();
-        return true;
+        return withStorageLock(() -> {
+            if (entries.containsKey(entry.getId()) || entries.values().stream().anyMatch(existing ->
+                    MemoryDeduplicator.isDuplicate(existing, entry)
+                            || conflictDetector.isConflict(existing, entry))) {
+                return false;
+            }
+            putEntry(entry);
+            saveToDisk();
+            return true;
+        });
     }
 
     /** 用户确认某条记忆仍然成立：刷新最后核实时间。 */
     public synchronized Optional<MemoryEntry> markVerified(String id, Instant verifiedAt) {
-        MemoryEntry existing = id == null ? null : entries.get(id.trim());
-        if (existing == null) {
-            return Optional.empty();
-        }
-        MemoryEntry verified = existing.withLastVerifiedAt(verifiedAt);
-        entries.put(verified.getId(), verified);
-        saveToDisk();
-        return Optional.of(verified);
+        return withStorageLock(() -> {
+            MemoryEntry existing = id == null ? null : entries.get(id.trim());
+            if (existing == null) {
+                return Optional.<MemoryEntry>empty();
+            }
+            MemoryEntry verified = existing.withLastVerifiedAt(verifiedAt);
+            entries.put(verified.getId(), verified);
+            saveToDisk();
+            return Optional.of(verified);
+        });
     }
 
     private void putEntry(MemoryEntry entry) {
@@ -175,6 +185,7 @@ public class LongTermMemory implements Memory {
 
     @Override
     public Optional<MemoryEntry> retrieve(String id) {
+        refreshIfChangedOnDisk();
         return Optional.ofNullable(entries.get(id));
     }
 
@@ -184,6 +195,7 @@ public class LongTermMemory implements Memory {
     }
 
     public List<MemoryEntry> search(String query, int limit, String projectKey) {
+        refreshIfChangedOnDisk();
         Set<String> queryTokens = MemoryQueryTokenizer.tokenize(query);
 
         return entries.values().stream()
@@ -201,10 +213,12 @@ public class LongTermMemory implements Memory {
 
     @Override
     public List<MemoryEntry> getAll() {
+        refreshIfChangedOnDisk();
         return new ArrayList<>(entries.values());
     }
 
     public List<MemoryEntry> getAll(String projectKey) {
+        refreshIfChangedOnDisk();
         return entries.values().stream()
                 .filter(entry -> isVisibleInProject(entry, projectKey))
                 .collect(Collectors.toList());
@@ -212,29 +226,36 @@ public class LongTermMemory implements Memory {
 
     @Override
     public synchronized boolean delete(String id) {
-        MemoryEntry removed = entries.remove(id);
-        if (removed != null) {
+        return withStorageLock(() -> {
+            MemoryEntry removed = entries.remove(id);
+            if (removed == null) {
+                return false;
+            }
             tokenCounter.addAndGet(-removed.getTokenCount());
             saveToDisk();
             return true;
-        }
-        return false;
+        });
     }
 
     @Override
     public synchronized void clear() {
-        entries.clear();
-        tokenCounter.set(0);
-        saveToDisk();
+        withStorageLock(() -> {
+            entries.clear();
+            tokenCounter.set(0);
+            saveToDisk();
+            return null;
+        });
     }
 
     @Override
     public int getTokenCount() {
+        refreshIfChangedOnDisk();
         return tokenCounter.get();
     }
 
     @Override
     public int size() {
+        refreshIfChangedOnDisk();
         return entries.size();
     }
 
@@ -242,6 +263,7 @@ public class LongTermMemory implements Memory {
      * 按类型筛选记忆
      */
     public List<MemoryEntry> getByType(MemoryEntry.MemoryType type) {
+        refreshIfChangedOnDisk();
         return entries.values().stream()
                 .filter(entry -> entry.getType() == type)
                 .collect(Collectors.toList());
@@ -264,17 +286,24 @@ public class LongTermMemory implements Memory {
         return "global";
     }
 
-    /**
-     * 持久化到磁盘
-     */
+    /** 在文件锁内先重读磁盘最新状态再执行变更，避免各实例拿旧快照整文件覆盖。 */
+    private <T> T withStorageLock(Supplier<T> mutation) {
+        return storage.withLock(() -> {
+            reloadFromDisk();
+            return mutation.get();
+        });
+    }
+
     private void saveToDisk() {
-        try {
-            List<Map<String, Object>> dataList = entries.values().stream()
-                    .map(this::entryToMap)
-                    .collect(Collectors.toList());
-            mapper.writeValue(storageFile, dataList);
-        } catch (IOException e) {
-            log.warn("长期记忆持久化失败: {}", e.getMessage(), e);
+        storage.write(entries.values().stream()
+                .map(this::entryToMap)
+                .collect(Collectors.toList()));
+    }
+
+    /** 其他实例或进程改过文件时，读取前刷新内存视图。 */
+    private synchronized void refreshIfChangedOnDisk() {
+        if (storage.changedSinceLastSync()) {
+            reloadFromDisk();
         }
     }
 
@@ -292,23 +321,25 @@ public class LongTermMemory implements Memory {
     /**
      * 从磁盘加载
      */
-    @SuppressWarnings("unchecked")
     private void loadFromDisk() {
-        if (!storageFile.exists()) return;
+        reloadFromDisk();
+        log.info("加载了 {} 条长期记忆", entries.size());
+    }
 
-        try {
-            List<Map<String, Object>> dataList = mapper.readValue(storageFile, List.class);
+    /** 用磁盘内容替换内存视图；文件损坏时保留当前内存数据，下一次写入会据此重建文件。 */
+    private void reloadFromDisk() {
+        storage.read().ifPresent(dataList -> {
+            Map<String, MemoryEntry> loaded = new LinkedHashMap<>();
             for (Map<String, Object> data : dataList) {
                 MemoryEntry entry = mapToEntry(data);
                 if (entry != null) {
-                    entries.put(entry.getId(), entry);
-                    tokenCounter.addAndGet(entry.getTokenCount());
+                    loaded.put(entry.getId(), entry);
                 }
             }
-            log.info("加载了 {} 条长期记忆", entries.size());
-        } catch (IOException e) {
-            log.warn("加载长期记忆失败: {}", e.getMessage(), e);
-        }
+            entries.clear();
+            entries.putAll(loaded);
+            tokenCounter.set(loaded.values().stream().mapToInt(MemoryEntry::getTokenCount).sum());
+        });
     }
 
     private Map<String, Object> entryToMap(MemoryEntry entry) {
@@ -354,6 +385,7 @@ public class LongTermMemory implements Memory {
      * 生成记忆状态摘要
      */
     public String getStatusSummary() {
+        refreshIfChangedOnDisk();
         Map<MemoryEntry.MemoryType, Long> typeCounts = entries.values().stream()
                 .collect(Collectors.groupingBy(MemoryEntry::getType, Collectors.counting()));
 

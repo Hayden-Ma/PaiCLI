@@ -47,6 +47,10 @@ import java.util.stream.Collectors;
 public class PlanExecuteAgent {
     private static final Logger log = LoggerFactory.getLogger(PlanExecuteAgent.class);
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
+    /** 完成度低于一半时的失败最多触发几次重新规划；达到上限后停止执行剩余任务。 */
+    static final String MAX_REPLANS_PROPERTY = "paicli.plan.max.replans";
+    static final String MAX_REPLANS_ENV = "PAICLI_PLAN_MAX_REPLANS";
+    static final int DEFAULT_MAX_REPLANS = 2;
     private record PlanRunOutcome(String result, boolean persistAssistantMessage,
                                   boolean autoExtractEligible) {
         static PlanRunOutcome executed(String result) {
@@ -382,16 +386,17 @@ public class PlanExecuteAgent {
                                        StreamState streamState,
                                        boolean explicitTaskEnvelope) throws IOException {
         ExecutionPlan plan = planner.createPlan(goal);
-        return reviewAndExecutePlan(plan, streamState, explicitTaskEnvelope);
+        return reviewAndExecutePlan(plan, streamState, explicitTaskEnvelope, 0);
     }
 
     private PlanRunOutcome reviewAndExecutePlan(ExecutionPlan plan,
                                                 StreamState streamState,
-                                                boolean explicitTaskEnvelope) throws IOException {
+                                                boolean explicitTaskEnvelope,
+                                                int replansUsed) throws IOException {
         while (true) {
             PlanReviewDecision decision = reviewHandler.review(plan.getGoal(), plan);
             if (decision == null || decision.action() == PlanReviewAction.EXECUTE) {
-                return PlanRunOutcome.executed(executePlan(plan, streamState, explicitTaskEnvelope));
+                return PlanRunOutcome.executed(executePlan(plan, streamState, explicitTaskEnvelope, replansUsed));
             }
 
             if (decision.action() == PlanReviewAction.CANCEL) {
@@ -400,7 +405,7 @@ public class PlanExecuteAgent {
 
             String feedback = decision.feedback() == null ? "" : decision.feedback().trim();
             if (feedback.isEmpty()) {
-                return PlanRunOutcome.executed(executePlan(plan, streamState, explicitTaskEnvelope));
+                return PlanRunOutcome.executed(executePlan(plan, streamState, explicitTaskEnvelope, replansUsed));
             }
 
             out.println("📝 已收到补充要求，正在重新规划...\n");
@@ -425,7 +430,8 @@ public class PlanExecuteAgent {
 
     private String executePlan(ExecutionPlan plan,
                                StreamState streamState,
-                               boolean explicitTaskEnvelope) throws IOException {
+                               boolean explicitTaskEnvelope,
+                               int replansUsed) throws IOException {
         log.info("Executing plan: goal='{}', taskCount={}", plan.getGoal(), plan.getAllTasks().size());
         out.println("🚀 开始执行计划...\n");
 
@@ -439,11 +445,12 @@ public class PlanExecuteAgent {
                         task.getId(), task.getType(),
                         PlanExecutionObserver.TextFingerprint.of(task.getDescription()),
                         task.getDependencies())).toList(), plan.getExecutionOrder()));
-        StringBuilder finalResult = new StringBuilder();
+        List<String> failureLines = new ArrayList<>();
         Map<String, Boolean> streamedTaskOutputs = new HashMap<>();
         Map<String, TurnToolPolicy.TrustedUrlContext> taskTrustedUrls = new HashMap<>();
+        boolean stopAfterBatch = false;
 
-        while (true) {
+        while (!stopAfterBatch) {
             if (CancellationContext.isCancelled()) {
                 return "⏹️ 已取消当前计划执行。";
             }
@@ -477,16 +484,33 @@ public class PlanExecuteAgent {
                 log.warn("Task failed: {} error={}", task.getId(), error.getMessage());
                 out.println("❌ 失败 [" + task.getId() + "]: " + error.getMessage() + "\n");
 
-                if (plan.getProgress() < 0.5) {
-                    out.println("🔄 尝试重新规划...\n");
-                    ExecutionPlan replanned = planner.replan(plan, error.getMessage());
-                    return reviewAndExecutePlan(replanned, streamState, explicitTaskEnvelope).result();
+                failureLines.add("任务 " + task.getId() + " 失败: " + error.getMessage());
+
+                if (!stopAfterBatch && plan.getProgress() < 0.5) {
+                    int maxReplans = maxReplans();
+                    if (replansUsed < maxReplans) {
+                        out.println("🔄 尝试重新规划（第 " + (replansUsed + 1) + "/" + maxReplans + " 次）...\n");
+                        ExecutionPlan replanned = planner.replan(plan, error.getMessage());
+                        return reviewAndExecutePlan(replanned, streamState, explicitTaskEnvelope, replansUsed + 1)
+                                .result();
+                    }
+                    // 与重规划触发点保持一致：不再启动任何新任务，只收完本批已返回的结果
+                    String stopNotice = "已达到重新规划上限（" + maxReplans + " 次），停止执行剩余任务";
+                    out.println("🛑 " + stopNotice + "。\n");
+                    failureLines.add(stopNotice);
+                    stopAfterBatch = true;
+                    continue;
                 }
 
-                if (!finalResult.isEmpty()) {
-                    finalResult.append("\n");
+                for (Task skipped : plan.skipDependentsOf(task.getId())) {
+                    failureLines.add("任务 " + skipped.getId() + " 已跳过: 依赖的任务 " + task.getId() + " 失败");
                 }
-                finalResult.append("任务 ").append(task.getId()).append(" 失败: ").append(error.getMessage());
+            }
+        }
+
+        if (stopAfterBatch) {
+            for (Task skipped : plan.skipAllPending()) {
+                failureLines.add("任务 " + skipped.getId() + " 已跳过: 已达到重新规划上限");
             }
         }
 
@@ -495,17 +519,12 @@ public class PlanExecuteAgent {
             return "⚠️ 计划未能继续推进，存在未满足依赖的任务。";
         }
 
-        String planSummary = finalResult.isEmpty()
-                ? buildFinalResult(plan, streamedTaskOutputs)
-                : finalResult.toString();
-
         if (plan.hasFailed()) {
             plan.markFailed();
-            if (planSummary.isBlank()) {
-                return "⚠️ 计划部分完成，有任务失败。";
-            }
-            return "⚠️ 计划部分完成，有任务失败。\n" + planSummary;
+            return "⚠️ 计划部分完成，有任务失败。\n" + buildPartialResult(plan, streamedTaskOutputs, failureLines);
         }
+
+        String planSummary = buildFinalResult(plan, streamedTaskOutputs);
 
         plan.markCompleted();
         if (planSummary.isBlank()) {
@@ -1203,6 +1222,43 @@ public class PlanExecuteAgent {
 
         context.append("请执行此任务。如果是ANALYSIS或VERIFICATION类型，请基于以上上下文直接给出结果。");
         return context.toString();
+    }
+
+    /**
+     * 有任务失败时的汇总：先列出已完成任务的结果（已流式展示过的不重复），
+     * 再列失败和被跳过的任务，避免用户只看到失败信息而丢掉已经完成的工作。
+     */
+    private String buildPartialResult(ExecutionPlan plan, Map<String, Boolean> streamedTaskOutputs,
+                                      List<String> failureLines) {
+        List<String> completed = plan.getExecutionOrder().stream()
+                .map(plan::getTask)
+                .filter(task -> task != null && task.getStatus() == Task.TaskStatus.COMPLETED)
+                .filter(task -> !Boolean.TRUE.equals(streamedTaskOutputs.get(task.getId())))
+                .filter(task -> task.getResult() != null && !task.getResult().isBlank())
+                .map(task -> "[" + task.getId() + "] " + task.getResult())
+                .toList();
+        StringBuilder summary = new StringBuilder();
+        if (!completed.isEmpty()) {
+            summary.append("已完成的任务结果:\n").append(String.join("\n", completed)).append("\n");
+        }
+        summary.append(String.join("\n", failureLines));
+        return summary.toString();
+    }
+
+    static int maxReplans() {
+        String configured = System.getProperty(MAX_REPLANS_PROPERTY);
+        if (configured == null || configured.isBlank()) {
+            configured = System.getenv(MAX_REPLANS_ENV);
+        }
+        if (configured == null || configured.isBlank()) {
+            return DEFAULT_MAX_REPLANS;
+        }
+        try {
+            return Math.max(0, Integer.parseInt(configured.trim()));
+        } catch (NumberFormatException e) {
+            log.warn("忽略无效的 {}={}，使用默认值 {}", MAX_REPLANS_PROPERTY, configured, DEFAULT_MAX_REPLANS);
+            return DEFAULT_MAX_REPLANS;
+        }
     }
 
     private String buildFinalResult(ExecutionPlan plan, Map<String, Boolean> streamedTaskOutputs) {

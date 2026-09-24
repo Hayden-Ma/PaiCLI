@@ -164,6 +164,48 @@ public class ExecutionPlan {
     }
 
     /**
+     * 把直接或间接依赖某个失败任务、仍处于 PENDING 的任务标记为 SKIPPED。
+     * 返回按执行顺序排列的被跳过任务，调用方据此向用户说明哪些工作没有执行。
+     */
+    public List<Task> skipDependentsOf(String failedTaskId) {
+        Set<String> blocked = new HashSet<>();
+        Deque<String> queue = new ArrayDeque<>(List.of(failedTaskId));
+        while (!queue.isEmpty()) {
+            Task current = tasks.get(queue.poll());
+            if (current == null) {
+                continue;
+            }
+            for (String dependentId : current.getDependents()) {
+                if (blocked.add(dependentId)) {
+                    queue.add(dependentId);
+                }
+            }
+        }
+        return skipPendingMatching(blocked::contains);
+    }
+
+    /** 停止执行时把所有尚未开始的任务标记为 SKIPPED。 */
+    public List<Task> skipAllPending() {
+        return skipPendingMatching(id -> true);
+    }
+
+    private List<Task> skipPendingMatching(java.util.function.Predicate<String> selector) {
+        List<Task> skipped = new ArrayList<>();
+        for (String id : orderedIds()) {
+            Task task = tasks.get(id);
+            if (task != null && selector.test(id) && task.getStatus() == Task.TaskStatus.PENDING) {
+                task.markSkipped();
+                skipped.add(task);
+            }
+        }
+        return List.copyOf(skipped);
+    }
+
+    private List<String> orderedIds() {
+        return executionOrder.isEmpty() ? new ArrayList<>(tasks.keySet()) : new ArrayList<>(executionOrder);
+    }
+
+    /**
      * 是否有失败任务
      */
     public boolean hasFailed() {

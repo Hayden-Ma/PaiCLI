@@ -80,7 +80,7 @@ mvn test -DskipTests=false
 
 ### 第七期：异步执行 + 并行工具调用
 
-- 同一轮 LLM 返回多个 `tool_calls` 时，工具层会并行执行
+- 同一轮 LLM 返回多个 `tool_calls` 时，只读工具（`read_file` / `list_dir` / `glob_files` / `grep_code` / `search_code` / `web_search` / `web_fetch` / `load_skill`）并行执行；写文件、执行命令、MCP、记忆写入、回滚和未知工具按原顺序串行，避免同一文件的并发 `edit_file` 丢更新
 - ReAct、Plan-and-Execute、Multi-Agent Worker 都复用统一的批量工具执行入口
 - 工具结果仍按原始 `tool_call` 顺序回灌，保证消息历史协议稳定
 - 批量工具调用有统一超时与取消兜底，单个 `execute_command` 仍保留 60 秒命令级超时
@@ -392,7 +392,7 @@ Tips for getting started:
 
 ### 第七期
 
-- ⚡ 同一轮多个工具调用会并行执行，适合同时读取多个文件、同时列目录、同时跑独立检查
+- ⚡ 同一轮多个只读工具调用会并行执行，适合同时读取多个文件、同时列目录、同时搜索；有副作用的调用按原顺序串行
 - 🧵 ReAct、Plan-and-Execute、Multi-Agent Worker 共用同一套并行工具执行机制
 - ⏱️ 工具批次有统一超时，超时工具会被取消并把超时结果回灌给模型
 - 📋 Plan-and-Execute 与 Multi-Agent 会按 DAG 依赖批次并行推进独立任务
@@ -498,7 +498,7 @@ export AGNES_BASE_URL=https://apihub.agnes-ai.com/v1
 /model agnes
 ```
 
-长期记忆默认保存在用户目录下的 `~/.paicli/memory/long_term_memory.json`。
+长期记忆默认保存在用户目录下的 `~/.paicli/memory/long_term_memory.json`。ReAct / Plan / Team 各自的记忆实例和多个 PaiCLI 进程可以同时读写这个文件：每次写入都在进程内锁 + `long_term_memory.json.lock` 文件锁下先重读磁盘最新内容再修改，并以临时文件原子改名落盘；读取前会检测文件变化并刷新。文件解析失败时会另存为 `long_term_memory.json.corrupt-<时间戳>`，并保留内存中已有记忆，不会被空列表覆盖。
 交互式 CLI 默认在 ReAct、Plan、Team 的任务完成后，从用户实际提交的原文中自动挑选稳定偏好或项目事实；模型必须返回原文中的连续片段，最多 3 条。自动条目只存当前项目，标注“自动提取，待核实”，不会从工具输出、助手回复或压缩摘要提取，也不会覆盖冲突记忆。会话接触外部内容后默认停止自动提取。可用 `PAICLI_MEMORY_AUTO_EXTRACT_ENABLED=false` 关闭；嵌入式 Agent 默认关闭，需调用 `MemoryManager.setAutoFactExtractionEnabled(true)`。候选输入会多一次无工具模型调用。显式保存仍可用 `/save <事实>`，或用户明确说“记一下 / 记住 / 以后记得”时由 Agent 调用 `save_memory`；跨项目通用偏好可用 `/save --global <事实>` 或 `save_memory(scope=global)`。长期记忆不应包含一次性任务请求或临时文件名/目录名。
 重复记忆只会在相同 `type + scope + project` 域内合并：先规范化 Unicode 宽窄、大小写、空白和普通标点，再保守识别少量中文语法助词差异；用户显式重复保存等价内容会刷新已有条目的核实时间，自动提取重复内容则跳过且不刷新。数字、代码符号或实质内容不同的事实不会被去重合并。
 写入时另有冲突检测：同域内“只有数字/版本号不同”或字符二元组相似度 ≥ `PAICLI_MEMORY_CONFLICT_THRESHOLD`（默认 0.8）但又不是重复的条目，视为同一事实的新旧版本，新内容不会写入，`/save` 或 `save_memory` 的结果会同时列出两条，由用户选择：保留旧的（无需操作）、`/memory replace <id> <新事实>` 改用新的，或 `/save --force <事实>` 两条都保留。冲突检测基于字面相似度，不理解同义改写或语义矛盾。
@@ -753,7 +753,7 @@ I
 - `mcp__{server}__{tool}` - MCP server 动态提供的外部工具
 - `mcp__{server}__list_resources` / `mcp__{server}__read_resource` - 支持 resources 的 MCP server 自动注册的虚拟工具
 
-同一轮模型返回多个工具调用时，PaiCLI 会并行执行这些工具；如果工具之间有依赖关系，模型应分多轮调用。
+同一轮模型返回多个工具调用时，PaiCLI 只并行执行只读工具；写文件、执行命令、MCP 等有副作用的调用按模型给出的顺序逐个执行。如果工具之间有数据依赖（例如需要先读结果再决定怎么改），模型仍应分多轮调用。`edit_file` 匹配 `old_text` 时先按字面量查找，找不到且文件使用 CRLF 换行时，会把 `old_text` / `new_text` 中的 `\n` 转成 `\r\n` 再匹配，替换后保留文件原有换行风格。
 
 文件类与代码检索工具（`read_file` / `write_file` / `edit_file` / `list_dir` / `glob_files` / `grep_code` / `create_project`）路径强制限定在项目根之内，越界请求会被策略层拒绝。`edit_file` 使用 `path`、`old_text`、`new_text` 参数，原文必须在已有文件中恰好出现一次；多处匹配时请补充上下文。编辑后的文件上限为 5MB，编辑操作与整文件写入一样触发 HITL、审计、diff 展示和编辑后诊断。`execute_command` 通过命令黑名单拦截 `sudo` / `rm -rf 全盘` / `mkfs` / `dd of=/dev` / fork bomb / `curl|sh` 等。`revert_turn` 会批量回写工作区，默认触发 HITL 和审计。所有 `mcp__` 前缀工具默认触发 HITL 和审计。详见 `/policy`。
 
