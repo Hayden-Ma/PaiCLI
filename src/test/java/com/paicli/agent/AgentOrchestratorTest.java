@@ -207,6 +207,19 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void shouldRejectPlanWithUnknownDependencyInsteadOfBlockingSilently() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        String planJson = """
+                {"steps": [
+                  {"id": "a", "description": "A", "dependencies": []},
+                  {"id": "b", "description": "B", "dependencies": ["missing"]}
+                ]}
+                """;
+
+        assertTrue(orchestrator.parsePlan(planJson).isEmpty());
+    }
+
+    @Test
     void shouldParseReviewApproval() {
         AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
 

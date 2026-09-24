@@ -14,6 +14,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -336,66 +337,13 @@ public class AgentOrchestrator {
     }
 
     /**
-     * 解析规划者输出的 JSON 计划
+     * 解析规划者输出的 JSON 计划；计划不合法时返回空列表，由调用方按规划失败处理。
      */
     List<ExecutionStep> parsePlan(String planJson) {
         try {
-            String cleaned = planJson.replaceAll("```json\\s*", "")
-                    .replaceAll("```\\s*", "")
-                    .trim();
-
-            JsonNode root = mapper.readTree(cleaned);
-            JsonNode stepsNode = root.path("steps");
-
-            if (!stepsNode.isArray() || stepsNode.isEmpty()) {
-                // 尝试 "tasks" 字段（兼容 Plan-and-Execute 的格式）
-                stepsNode = root.path("tasks");
-            }
-
-            if (!stepsNode.isArray() || stepsNode.isEmpty()) {
-                log.warn("Plan JSON has no 'steps' or 'tasks' array");
-                return List.of();
-            }
-
-            List<ExecutionStep> steps = new ArrayList<>();
-            Map<String, String> idMapping = new HashMap<>();
-            int stepIndex = 1;
-
-            // 第一遍：创建步骤（重编号）
-            for (JsonNode stepNode : stepsNode) {
-                String originalId = stepNode.path("id").asText();
-                String newId = "step_" + stepIndex++;
-                idMapping.put(originalId, newId);
-
-                String description = stepNode.path("description").asText();
-                String type = stepNode.path("type").asText("COMMAND");
-                steps.add(ExecutionStep.pending(newId, description, type, new ArrayList<>()));
-            }
-
-            // 第二遍：建立依赖
-            stepIndex = 1;
-            for (JsonNode stepNode : stepsNode) {
-                String newId = "step_" + stepIndex++;
-                JsonNode depsNode = stepNode.path("dependencies");
-                if (depsNode.isArray()) {
-                    List<String> deps = new ArrayList<>();
-                    for (JsonNode dep : depsNode) {
-                        String mapped = idMapping.getOrDefault(dep.asText(), dep.asText());
-                        deps.add(mapped);
-                    }
-                    // 替换步骤的依赖
-                    int idx = stepIndex - 2;
-                    if (idx >= 0 && idx < steps.size()) {
-                        ExecutionStep old = steps.get(idx);
-                        steps.set(idx, new ExecutionStep(old.id(), old.description(), old.type(),
-                                deps, old.result(), old.status()));
-                    }
-                }
-            }
-
-            return steps;
-        } catch (Exception e) {
-            log.error("Failed to parse plan JSON", e);
+            return TeamPlanParser.parse(planJson);
+        } catch (IOException e) {
+            log.warn("Rejected team plan: {}", e.getMessage());
             return List.of();
         }
     }
