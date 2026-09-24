@@ -65,6 +65,7 @@ mvn test -DskipTests=false
 - 主从架构：编排器（Orchestrator）协调子代理（SubAgent）
 - 规划者拆解任务 -> 执行者执行 -> 检查者审查质量
 - 审查未通过时带反馈重试（最多 2 次），冲突自动解决
+- 计划和审查结论都按 JSON 严格解析：计划依赖不合法直接判规划失败；审查结论只有 `approved: true` 才算通过，无法解析一律按未通过处理
 - 新增 `/team` CLI 命令，进入多 Agent 协作模式
 
 ### 第六期：Human-in-the-Loop + 审批流

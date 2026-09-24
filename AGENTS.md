@@ -222,6 +222,12 @@ E1 独立原型另覆盖限定本地异常：MERGE 输入准备前、请求前�
 
 E1 的有限重规划独立判定要求：从实际 provider DAG 重算原生插入顺序 DFS，而非接受任意拓扑顺序；按批次、按 executionOrder 登记已返回结果，核对低于 50% 完成时的失败触发、上一轮目标全文和已完成任务列表。新 planner 输入与新 executionId/scoped 轨迹分别绑定；六项成功断言来自最后一次执行，不跨计划拼接，早期安全违规累计。最后 planner 拒绝/未执行为有效失败，provider 失败仍先按 Worker 分类。schema 2 未存异常消息摘要，不能宣称已认证失败原因正文等于原始异常；它只证明实际送给 provider 的文本，不是评分依据。该原型尚不是正式 E1 准入。
 
+### Team 计划与审查结论
+
+- Team planner 回复由 `TeamPlanParser` 按 Planner 同一套规则严格校验（唯一非空 id、依赖引用已声明 id、无环、单个 JSON 对象）；不合法即 PLAN_INVALID，不静默保留未知依赖。
+- Reviewer 结论由 `TeamReviewVerdict` fail-closed 读取：只有 JSON 布尔 `approved: true` 通过，其余一律未通过；不要恢复关键词兜底。
+- Plan-and-Execute `Planner.parsePlan` 的围栏剥离正则与 `e1_replay.py` 逐字对齐，改动前必须同步独立重放器；planner/reviewer 请求不暴露工具是 `TeamRequestAudit` / E1 的审计约束，引入 `submit_*` 工具或 `response_format` 前先改审计合同。
+
 ### 并行工具
 
 Team 现在有默认关闭的 `TeamExecutionObserver`：13 类进程内事件绑定 run/step/attempt/actor/activation/clearHistory 代数，记录实际追加 user index、完整 post-policy 工具结果摘要、独立 review 事实与产品终态。当前 reviewer ERROR 或拒绝重试后产品仍可能 COMPLETED，事件不把它算成批准；本轮保留原产品分支。预算返回 RESULT 仍观察为 PARTIAL。压缩前保守标记未归属调用可能性，实际压缩后 index 失效；RunExited 只表示主方法结束，不保证并行后代停止。RuntimeException/AssertionError 观察失败每 run 计一次，默认不持久化。`TeamObservationWire` 尚未接 relay/宿主请求/整题预算/文件归属或评分，E2 仍 PLANNED、24/28 不变。详见正式运行手册第 47 节。

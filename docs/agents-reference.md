@@ -124,6 +124,9 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - 三角色：Planner / Worker(默认 2 个) / Reviewer
 - 流程：规划 → 按依赖分配 Worker → Reviewer 审查 → 未通过重试(最多 2 次)
+- Team 计划由 `TeamPlanParser` 严格解析：回复必须是单个 JSON 对象（只容忍包住整段回复的一层 ```json 围栏，值里的围栏原样保留），`steps`（兼容 `tasks`）非空，id 唯一且非空，依赖只能引用已声明 id，不能成环；重复键、尾随文字、未知依赖或环都会让整个计划失败（PLAN_INVALID），不再静默保留未知依赖导致步骤永久阻塞
+- Reviewer 结论由 `TeamReviewVerdict` 读取，fail-closed：只有 `approved` 为 JSON 布尔 `true` 才算通过；空回复、纯文本、字符串 `"true"`、缺字段、重复键或尾随文字一律按未通过进入重试，没有关键词兜底。Reviewer LLM 调用失败（ERROR）仍沿用原有产品分支
+- 不用 `submit_plan` / `submit_review` 工具或 `response_format: json_schema`：评测审计 `TeamRequestAudit` 要求 planner/reviewer 请求不暴露工具，E1 `e1_replay.py` 要求 Plan 规划请求无工具并按原正则从正文重放计划；DeepSeek 只支持 `json_object`，GLM 官方文档的 `response_format` 只有 `text` / `json_object`
 - SubAgent IOException 返回 ERROR 类型
 - 所有子代理共享 ToolRegistry 和 MemoryManager
 
