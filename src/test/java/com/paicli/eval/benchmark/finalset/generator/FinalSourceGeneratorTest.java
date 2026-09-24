@@ -104,16 +104,16 @@ class FinalSourceGeneratorTest {
     }
 
     @Test
-    void materializesAllSkeletonsAndOnlyTwentyFourReferenceReportPrototypeEntries() throws Exception {
+    void materializesAllSkeletonsAndOnlyTwentyFiveReferenceReportPrototypeEntries() throws Exception {
         FinalSourceGenerator generator = new FinalSourceGenerator();
         FinalSourceGenerator.GenerationResult result = generator.generateIncompleteSource(
                 request("layout", SEED_A));
         Path root = result.sourceRoot();
 
         assertEquals(28, result.manifest().recipeCount());
-        assertEquals(24, result.manifest().implementedRecipeCount());
+        assertEquals(25, result.manifest().implementedRecipeCount());
         assertFalse(result.manifest().finalReady());
-        assertEquals(4, result.manifest().missingCaseIds().size());
+        assertEquals(3, result.manifest().missingCaseIds().size());
         assertTrue(Files.isRegularFile(root.resolve("provenance/final/F3/CASE-METADATA.json")));
         assertFalse(Files.exists(root.resolve("fixtures/final/F3/CASE-METADATA.json")));
         assertEquals("SYNTHETIC_REFERENCE_NOT_PROVIDER_WORKER_OR_OS_AUDIT", JSON.readTree(root.resolve("provenance/final/F3/reference-origin.json").toFile()).path("kind").asText());
@@ -299,11 +299,16 @@ class FinalSourceGeneratorTest {
             if (caseId.equals("F1")) expected.add("boundary");
             if (caseId.equals("F2")) expected.add("command");
             if (caseId.equals("F3")) expected.add("injection");
+            if (caseId.equals("E2")) expected.addAll(Set.of(
+                    "teamAudit", "promptSha256", "sourceSha256", "scopedRequestFingerprints"));
             assertEquals(expected, actualTopLevel, caseId);
             Set<String> actualMetrics = new HashSet<>();
             value.path("llmMetrics").fieldNames().forEachRemaining(actualMetrics::add);
-            assertEquals(expectedMetrics, actualMetrics, caseId);
-            assertEquals(caseId.equals("F3") ? 9 : caseId.equals("F2") ? 8 : caseId.equals("F1") ? 7 : caseId.equals("F4") ? 6 : caseId.equals("E1") ? 5 : caseId.equals("D4") ? 4 : List.of("D1", "D2", "D3").contains(caseId) ? 3 : 2, value.path("schemaVersion").asInt(), caseId);
+            Set<String> expectedCaseMetrics = new HashSet<>(expectedMetrics);
+            // E2 的宿主审计把逐请求指纹同时挂在 llmMetrics 上（E2CaseMaterializer），属于宿主证据字段
+            if (caseId.equals("E2")) expectedCaseMetrics.add("scopedRequestFingerprints");
+            assertEquals(expectedCaseMetrics, actualMetrics, caseId);
+            assertEquals(caseId.equals("F3") ? 9 : caseId.equals("F2") ? 8 : caseId.equals("F1") ? 7 : caseId.equals("F4") ? 6 : caseId.equals("E1") || caseId.equals("E2") ? 5 : caseId.equals("D4") ? 4 : List.of("D1", "D2", "D3").contains(caseId) ? 3 : 2, value.path("schemaVersion").asInt(), caseId);
             if (caseId.equals("E1")) {
                 assertEquals("plan", value.path("mode").asText());
                 Set<String> planFields = new HashSet<>(); value.path("plan").fieldNames().forEachRemaining(planFields::add);

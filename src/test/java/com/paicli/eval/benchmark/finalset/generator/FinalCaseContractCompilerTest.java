@@ -52,7 +52,7 @@ class FinalCaseContractCompilerTest {
             assertTrue(contract.verifierDependencyPaths().contains(item.privateOraclePath()));
             assertTrue(contract.verifierDependencyPaths().stream().noneMatch(p -> p.startsWith("references/")));
         }
-        assertEquals(24, compiled); assertEquals(84, weight);
+        assertEquals(25, compiled); assertEquals(88, weight);
         assertFalse(Files.exists(result.sourceRoot().resolve("suite.json")));
         assertThrows(IllegalStateException.class, () -> new FinalSourceGenerator().requireFinalReady(result.sourceRoot()));
     }
