@@ -517,3 +517,95 @@ EMBEDDING_BASE_URL=http://localhost:11434
 不覆盖：真实 LLM 联调、真实 Embedding API、真实 MCP server 联调、终端完整手工体验。
 
 完整测试类列表：CliCommandParserTest / MainBrowserCommandTest / PlanReviewInputParserTest / MainInputNormalizationTest / ExecutionPlanTest / MemoryEntryTest / SessionMemoryCompactorTest / AutoCompactionManagerTest / ToolResultClearerTest / ExternalContextTrackerTest / ConversationHistoryCompactorTest / LongTermMemoryTest / MemoryRetrieverTest / MemoryManagerTest / ExplicitMemoryHintsTest / ContextProfileTest / PlanExecuteAgentTest / AgentMemoryHintTest / AgentWebSearchDecisionTest / AgentRoleTest / AgentMessageTest / AgentOrchestratorTest / EmbeddingClientTest / SearchResultTest / NetworkPolicyTest / HtmlExtractorTest / WebFetcherTest / SearchProviderFactoryTest / ZhipuSearchProviderTest / VectorStoreTest / CodeChunkerTest / CodeAnalyzerTest / CodeIndexTest / ApprovalPolicyTest / ApprovalResultTest / HitlToolRegistryTest / TerminalHitlHandlerTest / ToolRegistryTest / TurnToolPolicyTest / TurnToolPolicyMemoryGuardTest / CommandSandboxDetectorTest / BubblewrapArgumentsTest / BrowserSessionTest / BrowserConnectivityCheckTest / SensitivePagePolicyTest / BrowserGuardTest / McpSchemaSanitizerTest / McpConfigLoaderTest / JsonRpcClientTest / McpToolBridgeTest / McpResourceCacheTest / AtMentionParserTest / AtMentionExpanderTest / AtMentionCompleterTest / NotificationRouterTest / PathGuardTest / CommandGuardTest / AuditLogTest / SkillFrontmatterParserTest / SkillRegistryTest / SkillStateStoreTest / SkillBuiltinExtractorTest / SkillContextBufferTest / SkillIndexFormatterTest / LoadSkillToolTest / SkillCommandHandlerTest / BetterHarnessOptionsTest / BetterHarnessEvidenceCollectorTest / BetterHarnessRunnerTest
+
+## 从 AGENTS.md 迁入的细节（2026-09-24）
+
+以下内容原样迁自根目录 `AGENTS.md`，是实现细节和约定；`AGENTS.md` 只保留每次改动都需要遵守的规则摘要。
+
+### Provider 协议差异
+
+DeepSeek V4、GLM-5.3、混元 Hy4 preview 与 Kimi thinking 模式下，assistant tool-call 消息的 `reasoning_content` 必须随下一轮请求历史带回；其他 provider 默认只把 reasoning 写日志 / 展示。
+三条高推理请求路径保持 provider 协议差异：DeepSeek V4 使用 `thinking.type=enabled`、`reasoning_effort=max`、`temperature=1`、`top_p=0.95`；GLM-5.3 在同档参数外还发送 `thinking.clear_thinking=false`、`tool_stream=true` 和 `stream_options.include_usage=true`；混元 Hy4 preview 使用 `reasoning_effort=high` 和 `stream_options.include_usage=true`。
+DeepSeek SSE 调用默认强制 HTTP/1.1，避免部分网络/网关下 HTTP/2 长流被远端重置成 `stream was reset: INTERNAL_ERROR`。
+DeepSeek V4 若把工具调用编码为正文中的 DSML，adapter 只会把结构完整且工具名已在当前请求中暴露的单个 DSML block 转回 `tool_calls`；未知、畸形或未授权调用保持普通文本。流式监听器只暂存疑似 DSML block，普通正文与 reasoning 继续实时输出。
+DeepSeek 与混元 Hy4 当前按文本 provider 处理：`supportsImageInput()` 返回 false，历史或工具回灌里的图片 `ContentPart` 会在请求序列化时替换为文本提示，不能把 `image_url` block 发给对应 API。
+OpenAI-compatible LLM 请求统一由 `LlmRetryPolicy` 做有限重试：默认总尝试 3 次，仅覆盖 `408` / `429` / 可恢复 `5xx` 和瞬时连接 / 读取故障，指数退避 + jitter，并在等待上限内读取 `Retry-After`；`400` / `401` 等确定性错误直接失败。SSE 未出现 `[DONE]` 或非空 `finish_reason` 视为中断；尚未向 `StreamListener` 交付内容时可重发，已交付 reasoning/content 后不得自动重放，避免重复输出。相关系统属性见 `.env.example`。
+
+混元 provider 名为 `hunyuan`，默认模型 `hy4-preview`，默认 Base URL 为 `https://tokenhub.tencentmaas.com/v1`，走 Bearer 鉴权的 OpenAI-compatible Chat Completions，支持流式 tools、1M context window 和 prompt cache；可用 `/model hy4-preview` 明确切换，或用 `/model hunyuan` 读取 provider 配置。
+讯飞星辰 MaaS provider 名为 `xfyun`，默认 Base URL 为 `https://maas-api.cn-huabei-1.xf-yun.com/v2`。`model` 必须使用服务管控页展示的 `modelId`；公开模型名 / Hugging Face 仓库名不一定可直接调用。微调模型用 `/config provider xfyun --lora-id <resourceId>` 配置服务卡片上的 resourceId，PaiCLI 会作为 HTTP header `lora_id` 发出。`xfyun` 当前按 MaaS 文档走纯对话请求，不向上游发送 PaiCLI 内置工具列表。
+Agnes provider 名为 `agnes`，默认 Base URL 为 `https://apihub.agnes-ai.com/v1`，默认模型 `agnes-2.0-flash`，走 OpenAI-compatible Chat Completions，默认 1M context window，支持流式输出和 tools。
+
+### 启动与 inline 渲染约定
+
+- 开屏 Banner 使用无右边框的简洁布局，避免 CJK/ANSI 字宽导致右侧竖线错位；Phase 22 后默认是 π 主题彩色 logo + Qoder 风格首屏，只展示模型、MCP、Skill、ReAct 状态和三条 getting-started tips，不再把 MCP server 明细刷成启动日志。
+- inline 模式使用 JLine 4 的 LineReader 编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`。
+- 默认 CLI 启动路径应先 `Renderer.start()` 并初始化底部 dock；inline 首屏不要在 `readLine` 前裸写 stdout，而是通过 `InlineRenderer.installStartupScreen(...)` 挂到 `LineReader.CALLBACK_INIT`，首次进入输入时用 `printAbove` 一次性显示完整 Banner + tips，避免 logo 被 LineReader 首次重绘滚出可视区域。
+- `BottomStatusBar` 现在是 JLine `Status` 托管的底部 dock：由 JLine 维护滚动区域和状态行位置，不再手写 `\n` / `moveUp` / `CLEAR_TO_EOS` 清屏。输入期会把 LineReader 光标定位到 dock 上方一行，让 `*` 输入行和 Status 同处底部区域；dock 保留两类信息：上层模式 + MCP/Skill 摘要，下层 Auto Model / model / phase / ctx 百分比与 token / cost / elapsed / cwd。关键字段可用克制的 JLine `AttributedString` 彩色样式突出，但纯文本格式和宽度裁剪逻辑要保持稳定。`ctx` 表示当前仍会带入下一轮请求的上下文估算；`in/out/cache` 表示最近任务的 LLM 调用统计，二者不要混用。
+- 普通任务和斜杠命令提交后，`Main` 会把本轮原始输入以暗色整行块写回 transcript：输入态左提示仍是 `* `，提交回显左提示改为 `>`；单行输入只占一行，不额外追加空白行。普通任务随后再展开 MCP resource / 本地 `@path` 并进入 Agent；不要只依赖 JLine 提交行残留，否则 activity 重绘或 dock 刷新可能让用户输入从可见历史里消失。`/clear` 清空 ReAct conversationHistory、对应的 Session Memory 预计算状态和待注入 Skill buffer，并重建不含上一轮检索记忆的 system prompt；长期记忆保留。`/compact` 会手动走完整摘要压缩当前 ReAct conversationHistory，不等待上下文阈值触发，保留最近 1 个 user 轮次和 tool_call/tool_result 边界。
+- ReAct LLM 调用期间，inline renderer 使用固定高度 live thinking 区动态显示 `Thinking...` 和灰色竖线 reasoning 预览；该区域只能清理自己刚打印的几行，不能用独立 JLine `Display.update()` / `CLEAR_TO_EOS` 向上覆盖 transcript。content 或 tool call 开始前先清掉 live 区，再把完整 reasoning 引用块落到正文区，正文回答用低调标记起始，不再刷强标题。
+- 交互期输出应优先走 `Renderer.stream()`；`Main`、`PlanExecuteAgent`、`Planner`、`AgentOrchestrator` 都支持把输出流接到 inline renderer，避免直接争抢 stdout。`CodeIndex` 的索引进度通过 `ProgressListener` 注入，`/index` 应绑定到当前 renderer 输出流。
+- Phase 22 开始，`InlineRenderer` 可绑定当前 `LineReader`；当 `LineReader.isReading()` 为 true 时，`Renderer.stream()` 的完整行输出优先通过 `LineReader#printAbove` 显示在输入行上方，未绑定 / 非读取态 / 测试路径回退到原 `PrintStream`。
+- Markdown 表格渲染要按当前终端列宽分配列宽；长内容在单元格内部换行，不能依赖终端自动折行把整行表格打散。
+- ReAct 正常结束后不再把 `📊 Token: ...` 打进正文区；token/cost/elapsed 会保留在底部强状态行，phase 回到 `idle`。
+- 默认 CLI 启动路径应尽早建立 `Terminal -> LineReader -> Renderer`，启动 Banner、模型加载、MCP 启动、Skill summary、ReAct 提示和退出提示都应走 `Renderer.stream()`；除 fatal bootstrap / runtime API / legacy TUI 降级外，不要在交互主路径新增裸 `System.out.println`。
+- 启动期 MCP 不得阻塞首屏：CLI 默认最多等待 8 秒（`PAICLI_MCP_STARTUP_WAIT_SECONDS` / `-Dpaicli.mcp.startup.wait.seconds` 可调），超时后保留未完成 server 为 `STARTING` 并后台继续初始化；`/mcp` 查看最新状态。
+- `LineReader` 使用 `PaiCliHighlighter` 做输入实时高亮：slash 命令、`@` 引用、`@image:`、`@clipboard`、敏感词和明显危险 shell 片段会在编辑阶段被标记；不要把这类视觉提示混入最终提交文本。
+- `LineReader` 使用 `PaiCliCompleter` 做上下文补全：`/model` provider、`/mcp` 子命令与 server、`/skill` 子命令与 skill name、`/task` / `/browser` / `/snapshot` 子命令、`@image:` 本地路径、本地 `@path` 和 MCP resource `@server:uri` 引用都应从同一个 completer 出口维护。
+- 普通用户输入进入 Agent 前会先展开 MCP resource mention，再由 `LocalPathMentionExpander` 展开本地 `@path`：文件会内联为 `<file>` 块，目录会内联为 `<directory>` 列表；绝对路径或符号链接逃逸项目根时保持原文不展开。
+- `LineReader` 使用 `PaiCliHistory` 持久化输入历史到 `~/.paicli/history/input.history`；如果 `paicli.history.file` / `PAICLI_HISTORY_FILE` 指向目录，也会自动使用该目录下的 `input.history`，避免把目录当文件读；默认忽略空白、重复、明显密钥/Bearer、base64 图片和超长输入，用户可用 `/history clear` 清空本机输入历史。
+- 启动期会加载 `~/.paicli/PAI.md`、项目根 `PAI.md`、项目根 `.paicli/PAI.md`、`PAI.local.md`、`.paicli/PAI.local.md`，按此顺序注入 Project Context；`@relative/path.md` 可导入项目根内文件，总注入内容有字符预算，避免项目记忆变成 token 噪音。
+- `/init` 会根据当前项目生成短 `PAI.md`，只放 commands / project positioning / architecture / pitfalls / don'ts；默认不覆盖已有文件。
+- `/export` 导出当前 ReAct `conversationHistory` 为 Markdown 到 `~/.paicli/exports/session-*.md`；只支持无参数命令，包含完整 system prompt，便于检查 LLM 实际接收前的指令。
+- `/better-harness` 走 PaiCLI 原生四阶段审查：确定性脱敏证据快照 → 三路无工具 specialist 并行分析 → lead 汇总 → Java 确定性渲染。终端必须实时显示 5 个确定性工作单元、先完成先反馈的三路审查进度、累计耗时和 ESC 取消提示，不能只打印启动文案后静默等待；最终 Markdown 必须经过 `TerminalMarkdownRenderer` 按当前终端宽度渲染，不能直接输出 `#` / `**` 等源码标记。默认只读取当前 ledger 元数据和项目内公开工程资产，不读取消息正文、工具参数/结果、Memory 正文或用户目录配置；`--inline` 不写文件。
+- 默认 CLI 会创建一个 `ConversationLedger` 并在 ReAct / Plan / Team 三条路径间共享，原始 `LlmClient.Message` 以 append-only JSONL 写入 `~/.paicli/history/raw/session-*.jsonl`。记录包含 mode / actor / source，以及完整 system / user / assistant / tool_call / tool_result（含 reasoning、工具参数和结果、图片 payload）；`/clear`、图片裁剪和 conversationHistory 压缩只改发送视图，只能向账本追加边界事件，不能改写或删除旧行。该目录在 POSIX 上使用 0700、文件使用 0600；内容可能敏感，不要提交或随意分享。
+- JLine 交互升级计划记录在 `docs/phase-22-jline-interaction-upgrade.md`。
+
+### Memory 与压缩细节
+
+- 交互式 CLI 默认在 ReAct / Plan / Team 任务完成后，对用户实际提交的原文做一次受约束的事实提取（`PAICLI_MEMORY_AUTO_EXTRACT_ENABLED=false` 关闭；嵌入式 Agent 默认关闭，须显式开启）。模型只能选择原文中逐字存在的稳定偏好/项目事实，最多 3 条；自动条目只写项目级并标注待核实，重复/冲突不写且不刷新旧条目核实时间。用户可 `/memory verify` 或删除。外部内容防护阻止自动提取；不会从 assistant、工具返回、展开的 MCP resource 或压缩摘要提取。显式保存仍走 `/save` / `save_memory`；`ExplicitMemoryHints` 的浏览器登录态提示在用户明确要求记住时可直接保存。会话摘要只重建 conversationHistory
+- 外部上下文防护（参考 Codex `memories.disable_on_external_context`，PaiCLI 默认开启，`PAICLI_MEMORY_DISABLE_ON_EXTERNAL_CONTEXT=false` 关闭）：`web_search` / `web_fetch` / `browser_*` / 任意 `mcp__*` 结果、`execute_command` 的 curl/wget，以及用户输入里展开的 MCP resource，会让共享 ToolRegistry 上的会话级 `ExternalContextTracker` 记下来源。此后浏览器登录态提示不再自动写入；`save_memory` 只有在当前轮用户原文明确要求记住时才放行，否则 `TurnToolPolicy` 以 `[MEMORY_EXTERNAL_CONTEXT]` 拒绝。显式保存（`/save`、用户要求后的 `save_memory`）照常写入，但 metadata 带 `external_context=true` 与 `external_context_sources`，`/memory list` 标注 🌐。防护关闭时仍记录 metadata。`/clear` 重置该标记
+- `PAI.md` 管团队共享的项目规则，长期记忆管个人或项目作用域的稳定事实；不要把一次性协作经验写进 `PAI.md`
+- 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
+- 长期记忆文件可能被多个实例（ReAct / Plan / Team 各持一个）和多个进程同时读写：`LongTermMemoryFile` 负责进程内路径锁 + `.lock` 文件锁、临时文件原子改名和坏文件备份；`LongTermMemory` 每次变更前在锁内重读磁盘，读取前检测文件变化并刷新。不要绕开 `withStorageLock` 直接写盘
+- 长期记忆去重以 `type + scope + project` 为边界，只做确定性的 Unicode/格式规范化与保守语法助词近似匹配；数字/版本不同的条目去重时保留。显式重复保存等价内容会刷新核实时间；自动提取遇到重复或冲突时不写，也不刷新旧条目的核实时间
+- 显式写入（`/save`、`save_memory`）另走 `MemoryConflictDetector`：同域内仅数字/版本不同，或字符二元组 Dice ≥ `PAICLI_MEMORY_CONFLICT_THRESHOLD`（默认 0.8）且非重复，视为冲突，不写入、不覆盖，结果同时列出新旧两条，由用户选择 `/memory replace <id> <事实>`（或 `save_memory replace_id`）/ `/save --force`（或 `keep_both=true`）/ 保持不变。模型不得替用户做选择。检测只看字面相似度，不做语义冲突消解
+- `MemoryEntry` 同时记录写入时间 `timestamp` 与最后核实时间 `lastVerifiedAt`（旧数据缺省为写入时间）；`MemoryRetriever` 注入时带两个日期，超过 `PAICLI_MEMORY_STALE_DAYS`（默认 30，≤0 关闭）未核实的标注“可能已过时”。`/memory verify <id>` 刷新核实时间。没有给模型开放“核实记忆”工具，核实状态只由用户动作更新
+- system prompt Memory Policy：记忆是线索不是事实，行动前先对照当前文件核实；不一致以文件为准并提示用户更新记忆
+- 长期记忆必须可审计和可删除：`/memory list` / `/memory search <关键词>` / `/memory delete <id>` / `/memory verify <id>` / `/memory replace <id> <事实>` / `/memory clear`
+- 当前短期上下文只有各 Agent 实际发给 LLM 的 `conversationHistory`，不要再维护 `MemoryManager.shortTermMemory` 之类的影子消息副本。
+- 自动压缩有两条路径：`PAICLI_SESSION_MEMORY_COMPACTION_ENABLED=true` 时优先使用阈值前异步生成的增量 Session Memory 摘要；摘要未就绪、失效或收益不足时回退 `ConversationHistoryCompactor` 完整摘要。完整摘要按目标、用户要求、已完成证据、待办四个栏目整理；超出单次摘要输入的旧历史按顺序分段摘要再分层合并，不静默丢弃中段；最终栏目不全时尝试重整一次，仍不合格则保持原始 history。若重建后的 Token 数没有下降，也保持原始 history。两条路径最终都原地重建同一份 conversationHistory。摘要仍是有损的。
+- 摘要之前还有一档可恢复的“旧工具结果清理”（`ToolResultClearer`，参考 Anthropic context editing 的 `clear_tool_uses`）：`AutoCompactionManager.compactIfNeeded` 先检查清理阈值，达到后把最近 `PAICLI_TOOL_RESULT_CLEARING_KEEP`（默认 3）条之外、长度 ≥ 400 字符的 tool 消息正文换成 `[已清理的旧工具结果] 工具 X 的这次输出……已从上下文清理……需要时重新调用该工具获取最新结果[；完整输出仍保存在 <卸载文件>]`。只替换正文，`tool_call_id` 和消息条数不变，tool_call/tool_result 配对不受影响。阈值默认 `min(100k, 摘要阈值 × 0.6)`，且总是低于摘要阈值（200k 与 1M 窗口都是 100k，128k 窗口约 57k）；`PAICLI_TOOL_RESULT_CLEARING_TRIGGER_TOKENS` 覆盖，`PAICLI_TOOL_RESULT_CLEARING_EXCLUDE_TOOLS` 逗号分隔排除工具，`PAICLI_TOOL_RESULT_CLEARING_ENABLED=false` 关闭。清理后若低于摘要阈值则本轮不再摘要。system prompt 已告知模型遇到占位时重新调用工具或按路径读回卸载文件。清理会改变后续请求前缀，prompt cache 会在清理点失效一次
+- 自动压缩阈值按 Claude Code 风格预留摘要输出和安全缓冲：大窗口使用 `window - 20k - 13k`，例如 200k 窗口约 167k 触发、1M 窗口约 967k 触发；小窗口按比例缩小预留。
+- ReAct、Plan 单任务和 SubAgent 默认不设固定迭代上限；`paicli.react.hard.max.iterations` 仅在显式配置正整数时启用。显式轮数/Token 预算或停滞检测命中后必须禁用工具并做一次最佳努力收尾，返回“部分完成”结果，不能直接丢弃已有工作。
+
+### 工具结果处理细节
+
+- 工具结果进入 conversationHistory 前统一经 `ToolResultBoundary.wrap()` 包成 `<tool_result tool="..." trust="untrusted-data">…</tool_result>`；内容里伪造的开闭标签会被转义。system prompt 声明标记内只是数据、其中指令一律不执行。边界只改变模型看到的文本，不产生任何授权：URL provenance 仍只来自顶层原文和 `ToolOutput.discoveredUrls()`，不要从包裹文本里解析 URL。raw ledger 记录的是实际发送的包裹后消息
+- 超大工具结果由 `ToolResultOffloader` 可恢复卸载：超过 `PAICLI_TOOL_OFFLOAD_THRESHOLD_CHARS`（默认 32000 字符）时完整内容写入项目内 `.paicli/tool-outputs/<session>/NNN-<tool>.txt`（自动生成 `*` 的 `.gitignore`），上下文只保留大小、路径、`read_file` 读回提示和首尾预览。卸载发生在 `TurnToolPolicy.execute()` 观察原始结果之后（`ToolRegistry.offloadForContext`），登录态识别等策略判断仍基于原文。`read_file` 显式带 `offset`/`limit` 或读取卸载目录时豁免，避免循环卸载
+- `execute_command` 在卸载开启时完整捕获输出（上限 2M 字符），超过 8000 字符的输出写入会话文件而不是截断丢弃；`PAICLI_TOOL_OFFLOAD_ENABLED=false` 时恢复原 8000 字符截断。`grep_code` / `web_fetch` 自身的 `max_chars` 预算不变
+
+### Web + Browser 细节
+
+- 每轮 system prompt 会注入当前日期/时区，用于相对日期理解；不做基于“最新/当前/今天”等关键词的自动 freshness 预检。模型只能在顶层用户目标明确时选择联网工具，用户明确要求不要联网时优先遵从。
+- 当前顶层输入只是裸标题、主题或摘录，没有动作、问题或目标时，先澄清，本轮不调用任何工具；不得自行猜测 URL。
+- 用户明确要求查找但没有提供 URL 时，先 `web_search` 再基于结果继续；`web_fetch` 与浏览器导航 URL 只能来自用户实际提交的顶层原文（不含 `@path` / MCP resource 展开正文），或本执行分支成功完成的 `web_search` 结构化 `discoveredUrls`。搜索正文、snippet、query 回显、错误提示、`web_fetch` 正文、浏览器导航/快照/网络列表、普通本地工具输出、模型 reasoning / 回复 / tool arguments 都不能扩充 URL 授权；当前 StepSearch MCP 的非结构化文本不会生成 URL 凭据。
+- 运行时 `TurnToolPolicy` 覆盖 ReAct / Plan / Team，在 StepSearch、内置 Web provider 或 MCP / Chrome 路由之前执行；Plan 审阅补充会重建策略。Plan 并行任务和 Team worker 各用独立策略副本，不能跨分支共享新发现的 URL；只有 DAG 中声明的后继依赖才会继承前置分支的类型化 `web_search` URL 凭据，不从任务回复文本重新提取。grounded URL 只开放导航，成功导航只建立当前页的读取上下文；读取结果不产生新 URL 授权，点击/填写等交互仍需顶层原文明确授权。shared Chrome 状态必须从真实 `BrowserSession` 跨轮读取，非 PaiCLI 创建的标签页只能在用户明确要求时只读，不能由 Agent 导航、改写或关闭；导航结果不得把完整标签页清单回灌模型。策略拒绝不得通过换工具或换 provider 绕过。
+- “当前项目/当前 README/当前文件/当前代码”等表达属于本地上下文任务，通常应由模型选择 `glob_files` / `grep_code` / `read_file`，而不是联网工具。
+- 当前模型为 `step-3.7-flash*` 且自动/显式 `step_search` MCP 的 `web_search` / `web_fetch` 已就绪时，内置 `web_search` / `web_fetch` 会优先转调 StepSearch MCP；未就绪或调用失败时回退到原 SearchProvider / WebFetcher。
+- 有可信来源的已知 URL 先 `web_fetch`，SPA/防爬墙 fallback 到 Chrome DevTools MCP
+- 浏览器读取优先 `take_snapshot`，不默认 `take_screenshot`
+- 公开页面不要提前切 shared 模式
+
+### 命令沙箱细节
+
+`execute_command` 有可选的操作系统级命令沙箱（`CommandSandbox`，一套策略两个后端：macOS Seatbelt / Linux bubblewrap）：系统与运行时目录只读、用户 HOME 不可见、只有工作区可写、无网络，HOME/TMPDIR 重定向到工作区 `.paicli-command-sandbox/`（交互式启用时自动写 `*` 的 `.gitignore`）。`PAICLI_COMMAND_SANDBOX=off`（默认，行为与旧版一致）/ `auto`（探测 + 探针，可用则启用，不可用则启动时提示并回退直接执行）/ `required`（不可用时 `execute_command` 以策略拒绝返回）。默认不开启的原因：沙箱无网络且看不到 `~/.m2`、`~/.gitconfig` 等用户目录，`mvn` / `npm install` / `git push` 这类常用命令会失败。bubblewrap 用 `--unshare-all`（含 network namespace）、`--ro-bind-try` 系统目录、`--bind` 工作区、`--die-with-parent --new-session`；容器内禁用 user namespace 时探针失败即视为不可用。命令始终作为单个 argv 交给 `/bin/bash -c`，不做 shell 拼接。基准评测的 `setCommandSandboxRoot` 仍固定走 Seatbelt，行为未变。Seatbelt profile 现额外放行根目录 "/" 本身的读取（literal，不含子树）：较新的 macOS 上缺它时 bash 启动即 SIGABRT（exit 134），这是此前 4 个 `macSandbox*` 用例失败的原因，补上后 3 个恢复通过；`java -version` 在 Seatbelt 内仍以 exit 139（SIGSEGV）退出，`macSandboxAllowsDevelopmentRuntimesAndDevNull` 仍失败，JVM 在受限 profile 下所需的额外权限尚未定位
+
+### 架构、代码搜索与 Planner 校验原文
+
+- 已交付 23 期（ReAct → Plan+DAG → Memory → RAG → Multi-Agent → HITL → 并行工具 → 多模型 → 联网 → MCP 核心 → MCP 高级 → 长上下文 → Chrome DevTools → CDP 会话复用 → Skill → TUI → LSP 诊断 → Side-Git 快照 → Prompt 分层 → Runtime API → 图片输入 → 微信 iLink 通道文本 MVP）
+
+核心内置工具 12 个：`read_file` / `write_file` / `edit_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn`。`edit_file` 仅精确替换已有文件中唯一匹配的 `old_text`，局部修改时模型无需输出整个文件；与 `write_file` 一样受路径限制、HITL 审批和审计约束。
+
+代码库理解默认走 Claude Code 式实时探索：`glob_files` 找候选文件、`grep_code` 精确定位符号或字符串、`read_file` 按需读取具体行段。`grep_code` 优先使用本机 `ripgrep`，不可用时回退到 Java 扫描；结果受 `max_results` / `head_limit` / `max_chars` 预算约束，返回 `partial: true` 或 `suggested_reads` 时应继续缩小搜索范围或按建议读取行段。`search_code` 是 RAG 语义辅助，适合模糊自然语言、关键词不明确、常规搜索无果、巨型/跨知识检索场景，不作为精确代码定位的首选。
+
+- Planner 的 JSON 计划必须有非空 tasks、唯一非空字符串 id，依赖必须精确引用原始已声明 id；缺失 dependencies 等同空数组，其他错误形状、未知依赖和环直接失败，不静默删边或猜测重编号别名。description 可省略并保持空字符串兼容；出现时必须为字符串，不将数值、null 或对象强制转成文本。id 的空白判定遵循 Java `String.isBlank()`，NBSP 不算空白。

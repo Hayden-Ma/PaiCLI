@@ -1,18 +1,8 @@
-# CLAUDE.md
+@AGENTS.md
 
-兼容保留文件。
+## Claude Code 补充
 
-本仓库的协作入口已切换到根目录 `AGENTS.md`，后续规则和项目快照以 `AGENTS.md` 为准。
-
-首次进入仓库时，请优先阅读：
-
-1. `AGENTS.md`
-2. 与当前任务直接相关的源码文件
-
-可以实现类似的效果吗：Read 1 file, searched memories (ctrl+o to expand) Read 3 files (ctrl+o to expand)
-
-![](https://cdn.tobebetterjavaer.com/paicoding/CLAUDE-2b7755723b1c47f8862bae4999504467.png)
-
-编辑文件的时候，也有对应的提示，类似git对比一样
-
-![](https://cdn.tobebetterjavaer.com/paicoding/CLAUDE-b175c64d08c1408e95c4f10dcc91a77f.png)
+- 本仓库规则以 `AGENTS.md` 为准（上面已导入），这里只放 Claude Code 专属说明，保持简短
+- 改 Plan 失败处理、重规划或 `parsePlan` 前，先看 `src/main/resources/benchmark/e1_replay.py` 的对应约束
+- 单测必须带 `-DskipTests=false`，否则 `mvn test` 什么都不跑也会显示成功
+- 评测相关实现和任何真实模型 / Docker 调用都需要用户逐阶段明确授权

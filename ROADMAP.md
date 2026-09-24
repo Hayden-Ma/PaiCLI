@@ -415,6 +415,17 @@
 - HITL 改为单字符 `[y/n/a/s/m]` 提示；`/config` 改为浮起 palette
 - 切换：`PAICLI_RENDERER=inline|lanterna|plain`，旧 `PAICLI_TUI=true` 兼容映射到 lanterna
 
+**活动折叠与编辑提示打磨（参考 Claude Code，2026-09-24 从需求笔记并入）**：
+
+![](https://cdn.tobebetterjavaer.com/paicoding/CLAUDE-2b7755723b1c47f8862bae4999504467.png)
+
+![](https://cdn.tobebetterjavaer.com/paicoding/CLAUDE-b175c64d08c1408e95c4f10dcc91a77f.png)
+
+- ✅ 按工具类型折叠活动块（“📖 读取 N 个文件”“✏️ 编辑 N 个文件”等），`ctrl+o` 展开
+- ✅ `write_file` / `edit_file` 成功后展示类似 git 的行内 diff
+- ⬜ 同一轮多种工具合并为一行活动摘要，例如“读取 1 个文件，搜索了记忆”，对齐 Claude Code 的 “Read 1 file, searched memories”
+- ⬜ `glob_files` / `grep_code` / `load_skill` / `revert_turn` / 浏览器工具补专用标签，目前落到默认的“🔧 工具名 × N”
+
 **核心知识点**：
 - TUI开发
 - 终端渲染（DECSTBM、ANSI 局部重绘、JLine widget 绑定）
