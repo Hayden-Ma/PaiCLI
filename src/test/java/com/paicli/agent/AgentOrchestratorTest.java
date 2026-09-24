@@ -220,67 +220,30 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void shouldParseReviewApproval() {
-        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+    void proseReviewIsTreatedAsRejectionAndTriggersRetry(@TempDir Path tempDir) {
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                response("""
+                        {"summary": "单步任务", "steps": [
+                          {"id": "s1", "description": "执行任务", "type": "COMMAND", "dependencies": []}
+                        ]}
+                        """),
+                response("第一次执行结果"),
+                // 旧实现会把含“通过”的纯文本判为批准；现在不是 JSON 结论就按未通过处理。
+                response("审查通过，代码质量良好"),
+                response("第二次执行结果"),
+                response("{\"approved\": true, \"summary\": \"通过\", \"issues\": []}")
+        ));
 
-        // 正常通过的 JSON
-        assertTrue(orchestrator.parseReviewApproval(
-                "{\"approved\": true, \"summary\": \"通过\", \"issues\": []}"));
+        AgentOrchestrator orchestrator = new AgentOrchestrator(
+                llmClient,
+                new ToolRegistry(),
+                new NoOpMemoryManager(tempDir.toFile())
+        );
 
-        // 未通过的 JSON
-        assertFalse(orchestrator.parseReviewApproval(
-                "{\"approved\": false, \"summary\": \"未通过\", \"issues\": [\"缺少错误处理\"]}"));
+        String finalResult = orchestrator.run("测试审查结论解析");
 
-        // null 或空内容采取保守策略：默认不通过
-        assertFalse(orchestrator.parseReviewApproval(null));
-        assertFalse(orchestrator.parseReviewApproval(""));
-
-        // 含否定关键词的纯文本
-        assertFalse(orchestrator.parseReviewApproval("执行结果未通过审查"));
-        assertFalse(orchestrator.parseReviewApproval("代码质量不合格"));
-
-        // 含肯定关键词的非 JSON 文本
-        assertTrue(orchestrator.parseReviewApproval("审查通过，代码质量良好"));
-
-        // 既无肯定关键词也无 JSON：保守判为不通过
-        assertFalse(orchestrator.parseReviewApproval("hmm"));
-
-        // JSON 缺少 approved 字段：保守判为不通过
-        assertFalse(orchestrator.parseReviewApproval("{\"summary\": \"无 approved 字段\"}"));
-    }
-
-    @Test
-    void shouldParseReviewIssues() {
-        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
-
-        String reviewJson = """
-                {
-                    "approved": false,
-                    "summary": "存在问题",
-                    "issues": ["缺少错误处理", "代码风格不一致"],
-                    "suggestions": ["添加 try-catch", "统一缩进"]
-                }
-                """;
-
-        String issues = orchestrator.parseReviewIssues(reviewJson);
-        assertTrue(issues.contains("缺少错误处理"));
-        assertTrue(issues.contains("代码风格不一致"));
-    }
-
-    @Test
-    void shouldFallbackToSummaryForIssues() {
-        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
-
-        String reviewJson = "{\"approved\": false, \"summary\": \"质量不达标\", \"issues\": []}";
-        String issues = orchestrator.parseReviewIssues(reviewJson);
-        assertEquals("质量不达标", issues);
-    }
-
-    @Test
-    void shouldHandleInvalidReviewJson() {
-        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
-        String issues = orchestrator.parseReviewIssues("not valid json");
-        assertEquals("审查未通过，请改进执行结果", issues);
+        assertTrue(finalResult.contains("第二次执行结果"));
+        assertFalse(finalResult.contains("第一次执行结果"));
     }
 
     @Test

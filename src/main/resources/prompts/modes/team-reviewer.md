@@ -22,4 +22,6 @@
 
 如果 `approved` 为 true，`issues` 为空即可。如果 `approved` 为 false，请详细说明问题并给出改进建议。
 
+`approved` 必须是 JSON 布尔值 `true` 或 `false`。编排器只读取这个字段：回复不是单个 JSON 对象、缺少 `approved` 或类型不对时，一律按未通过处理，不会从文字里猜结论。
+
 只输出 JSON，不要有其他内容。

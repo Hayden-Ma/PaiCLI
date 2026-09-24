@@ -1,7 +1,5 @@
 package com.paicli.agent;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.history.ConversationLedger;
 import com.paicli.llm.LlmClient;
 import com.paicli.memory.MemoryManager;
@@ -50,7 +48,6 @@ import static com.paicli.agent.TeamExecutionObserver.*;
  */
 public class AgentOrchestrator {
     private static final Logger log = LoggerFactory.getLogger(AgentOrchestrator.class);
-    private static final ObjectMapper mapper = new ObjectMapper();
     private static final int MAX_RETRIES_PER_STEP = 2;
 
     private final LlmClient llmClient;
@@ -365,87 +362,6 @@ public class AgentOrchestrator {
     }
 
     /**
-     * 解析检查者的审批结果
-     *
-     * 解析失败时采取保守策略：默认判为"不通过"，避免在审查者异常输出时让问题结果直接放行。
-     */
-    boolean parseReviewApproval(String reviewContent) {
-        if (reviewContent == null || reviewContent.isEmpty()) {
-            log.warn("Reviewer returned empty content, defaulting to rejected");
-            return false;
-        }
-        try {
-            String cleaned = reviewContent.replaceAll("```json\\s*", "")
-                    .replaceAll("```\\s*", "")
-                    .trim();
-            JsonNode root = mapper.readTree(cleaned);
-            JsonNode approvedNode = root.path("approved");
-            if (approvedNode.isMissingNode() || approvedNode.isNull()) {
-                log.warn("Reviewer JSON missing 'approved' field, defaulting to rejected");
-                return false;
-            }
-            return approvedNode.asBoolean(false);
-        } catch (Exception e) {
-            // 无法解析 JSON：必须同时不含否定关键词且含有肯定关键词，才视为通过
-            String lower = reviewContent.toLowerCase();
-            boolean hasNegativeKeyword = lower.contains("未通过") || lower.contains("不通过")
-                    || lower.contains("不合格") || lower.contains("有问题")
-                    || lower.contains("\"approved\": false") || lower.contains("\"approved\":false");
-            boolean hasPositiveKeyword = lower.contains("通过") || lower.contains("合格")
-                    || lower.contains("\"approved\": true") || lower.contains("\"approved\":true");
-            if (hasNegativeKeyword) {
-                return false;
-            }
-            if (!hasPositiveKeyword) {
-                log.warn("Reviewer output unparseable and contains no explicit approval, defaulting to rejected");
-                return false;
-            }
-            return true;
-        }
-    }
-
-    /**
-     * 解析检查者反馈的问题
-     */
-    String parseReviewIssues(String reviewContent) {
-        if (reviewContent == null || reviewContent.isEmpty()) {
-            return "";
-        }
-        try {
-            String cleaned = reviewContent.replaceAll("```json\\s*", "")
-                    .replaceAll("```\\s*", "")
-                    .trim();
-            JsonNode root = mapper.readTree(cleaned);
-
-            JsonNode issuesNode = root.path("issues");
-            if (issuesNode.isArray() && !issuesNode.isEmpty()) {
-                StringBuilder sb = new StringBuilder();
-                for (JsonNode issue : issuesNode) {
-                    sb.append("- ").append(issue.asText()).append("\n");
-                }
-                return sb.toString().trim();
-            }
-
-            JsonNode suggestionsNode = root.path("suggestions");
-            if (suggestionsNode.isArray() && !suggestionsNode.isEmpty()) {
-                StringBuilder sb = new StringBuilder();
-                for (JsonNode suggestion : suggestionsNode) {
-                    sb.append("- ").append(suggestion.asText()).append("\n");
-                }
-                return sb.toString().trim();
-            }
-
-            // 返回 summary 作为备选
-            String summary = root.path("summary").asText();
-            if (!summary.isEmpty()) {
-                return summary;
-            }
-        } catch (Exception ignored) {
-        }
-        return "审查未通过，请改进执行结果";
-    }
-
-    /**
      * 获取记忆管理器
      */
     public MemoryManager getMemoryManager() {
@@ -629,7 +545,8 @@ public class AgentOrchestrator {
             return;
         }
 
-        boolean approved = parseReviewApproval(reviewResult.content());
+        TeamReviewVerdict verdict = TeamReviewVerdict.parse(reviewResult.content());
+        boolean approved = verdict.approved();
         String acceptedResult = result.content();
 
         if (approved) {
@@ -641,7 +558,7 @@ public class AgentOrchestrator {
         }
 
         int retries = retryCount.getOrDefault(step.id(), 0);
-        String issues = parseReviewIssues(reviewResult.content());
+        String issues = verdict.feedback();
         if (observation != null) observation.reviewed(1, workerActivation, reviewerActivation,
                 ReviewDecision.REJECTED, reviewResult.content(), issues);
         log.info("Step {} rejected (retry {}/{}): {}", step.id(), retries, MAX_RETRIES_PER_STEP, issues);
@@ -686,8 +603,9 @@ public class AgentOrchestrator {
                 break;
             }
 
-            approved = parseReviewApproval(retryReview.content());
-            issues = parseReviewIssues(retryReview.content());
+            TeamReviewVerdict retryVerdict = TeamReviewVerdict.parse(retryReview.content());
+            approved = retryVerdict.approved();
+            issues = retryVerdict.feedback();
             if (observation != null) observation.reviewed(retries + 1, workerActivation,
                     reviewerActivation, approved ? ReviewDecision.APPROVED : ReviewDecision.REJECTED,
                     retryReview.content(), issues);
