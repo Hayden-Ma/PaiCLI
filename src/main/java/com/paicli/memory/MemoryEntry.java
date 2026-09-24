@@ -61,7 +61,9 @@ public class MemoryEntry {
 
     /** 返回核实时间更新后的新条目，原条目保持不变。 */
     public MemoryEntry withLastVerifiedAt(Instant verifiedAt) {
-        return new MemoryEntry(id, content, type, timestamp, verifiedAt, metadata, tokenCount);
+        Map<String, String> verifiedMetadata = new LinkedHashMap<>(metadata);
+        verifiedMetadata.remove("verification_pending");
+        return new MemoryEntry(id, content, type, timestamp, verifiedAt, verifiedMetadata, tokenCount);
     }
 
     /**

@@ -340,6 +340,8 @@ public class Main {
             startupNote = appendStartupNote(startupNote, sandboxStatus.message());
 
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
+            reactAgent.getMemoryManager().setAutoFactExtractionEnabled(
+                    com.paicli.memory.AutoFactExtractor.enabledByConfiguration());
             reactAgent.setConversationLedger(conversationLedger);
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
             reactAgent.setSkillRegistry(skillRegistry);
@@ -3061,10 +3063,17 @@ public class Main {
             if ("project".equals(scope) && project != null && !project.isBlank()) {
                 sb.append(" ").append(shortenPath(project));
             }
-            sb.append(" · 写入 ").append(entry.getTimestamp())
-                    .append(" · 最后核实 ").append(entry.getLastVerifiedAt());
+            sb.append(" · 写入 ").append(entry.getTimestamp());
+            if ("true".equals(entry.getMetadata().get("verification_pending"))) {
+                sb.append(" · 尚未经用户核实");
+            } else {
+                sb.append(" · 最后核实 ").append(entry.getLastVerifiedAt());
+            }
             if (memoryManager.isStale(entry)) {
                 sb.append(" · ⚠️ 可能已过时");
+            }
+            if ("true".equals(entry.getMetadata().get("verification_pending"))) {
+                sb.append(" · 🔎 自动提取，待核实");
             }
             if ("true".equals(entry.getMetadata().get(ExternalContextTracker.METADATA_FLAG))) {
                 sb.append(" · 🌐 写入时会话含外部内容(")

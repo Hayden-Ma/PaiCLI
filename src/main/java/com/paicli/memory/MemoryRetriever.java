@@ -109,13 +109,21 @@ public class MemoryRetriever {
 
     private String formatEntry(MemoryEntry entry) {
         StringBuilder line = new StringBuilder("- [").append(entry.getType()).append("]");
+        if ("true".equals(entry.getMetadata().get("verification_pending"))) {
+            line.append("[自动提取，待核实]");
+        }
         boolean stale = isStale(entry);
         if (stale) {
             line.append("[").append(STALE_LABEL).append("]");
         }
+        boolean pending = "true".equals(entry.getMetadata().get("verification_pending"));
         line.append(" ").append(entry.getContent())
-                .append("（写入 ").append(date(entry.getTimestamp()))
-                .append("，最后核实 ").append(date(entry.getLastVerifiedAt()));
+                .append("（写入 ").append(date(entry.getTimestamp()));
+        if (pending) {
+            line.append("，尚未经用户核实");
+        } else {
+            line.append("，最后核实 ").append(date(entry.getLastVerifiedAt()));
+        }
         if (stale) {
             line.append("，已超过 ").append(staleAfter.toDays()).append(" 天未核实，使用前必须先核实");
         }

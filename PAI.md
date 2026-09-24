@@ -21,7 +21,7 @@ PaiCLI 是面向商业使用的 Java Agent CLI 产品，对标 Claude Code；当
 - 改行为要同步 `AGENTS.md` / `README.md` / `ROADMAP.md`；路线图只在状态变化时更新。
 - 改命令入口要联动 `Main.java`、`CliCommandParser.java`、测试、`README.md`、`AGENTS.md`。
 - 改工具集要联动 `ToolRegistry.java`、Agent/Plan/SubAgent 提示词和文档。
-- 长期记忆只通过 `/save` 或用户明确要求保存；不要自动提取临时事实。
+- 交互式 CLI 在完成任务后可从用户原文自动提取跨会话稳定事实，项目级保存并标为待核实；不要从工具输出、模型推测或临时请求中提取。显式保存仍走 `/save` / `save_memory`。
 - `ctx` 表示下一轮仍会带入请求的上下文估算；`in/out/cache` 表示最近任务 LLM 调用统计，不要混用。
 
 ## Don't

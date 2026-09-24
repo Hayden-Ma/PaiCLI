@@ -35,6 +35,27 @@ class PlanExecuteAgentTest {
     Path tempDir;
 
     @Test
+    void completedPlanExtractsUserFactWithoutReadingTaskToolOutput() {
+        StubGLMClient client = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "任务完成", null, 10, 2),
+                new LlmClient.ChatResponse("assistant",
+                        "{\"facts\":[{\"quote\":\"我偏好中文回答\"}]}", null, 10, 2)));
+        LongTermMemory store = new LongTermMemory(tempDir.resolve("auto-memory").toFile());
+        MemoryManager manager = new MemoryManager(client, 4096, 128000, store);
+        manager.setAutoFactExtractionEnabled(true);
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        PlanExecuteAgent agent = new PlanExecuteAgent(client, registry, new StubPlanner(client),
+                manager, (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                new PrintStream(new ByteArrayOutputStream()));
+
+        assertTrue(agent.run("我偏好中文回答。请读取测试文件。").contains("计划执行完成"));
+        assertEquals(1, store.size());
+        assertEquals("我偏好中文回答", store.getAll().get(0).getContent());
+        assertEquals(2, client.messageSnapshots.size());
+    }
+
+    @Test
     void shouldKeepPlanExecutionArtifactsInTheTaskConversationOnly() throws Exception {
         Path sampleFile = Files.createFile(tempDir.resolve("sample.txt"));
         Files.writeString(sampleFile, "plan-memory-content");
@@ -140,6 +161,7 @@ class PlanExecuteAgentTest {
                 128000,
                 longTermMemory
         );
+        memoryManager.setAutoFactExtractionEnabled(true);
         PlanExecuteAgent agent = new PlanExecuteAgent(
                 llmClient,
                 new ToolRegistry(),
@@ -148,7 +170,7 @@ class PlanExecuteAgentTest {
                 (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.cancel()
         );
 
-        String result = agent.run("列出当前目录的文件");
+        String result = agent.run("我偏好中文回答。列出当前目录的文件");
 
         assertEquals("⏹️ 已取消本次计划执行。", result);
         assertEquals(0, longTermMemory.size());

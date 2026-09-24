@@ -2,9 +2,12 @@ package com.paicli.memory;
 
 import com.paicli.llm.LlmClient;
 import com.paicli.context.ContextProfile;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -20,8 +23,11 @@ import java.util.UUID;
  * {@link AutoCompactionManager} 直接压缩；这里不再复制保存第二份消息列表。</p>
  */
 public class MemoryManager {
+    private static final Logger log = LoggerFactory.getLogger(MemoryManager.class);
     private final LongTermMemory longTermMemory;
     private final MemoryRetriever retriever;
+    private final AutoFactExtractor autoFactExtractor;
+    private boolean autoFactExtractionEnabled;
     private TokenBudget tokenBudget;
     private ContextProfile contextProfile;
     private String currentProject;
@@ -46,12 +52,57 @@ public class MemoryManager {
         this.contextProfile = contextProfile;
         this.longTermMemory = longTermMemory != null ? longTermMemory : new LongTermMemory();
         this.retriever = new MemoryRetriever(this.longTermMemory);
+        this.autoFactExtractor = new AutoFactExtractor(llmClient);
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
         this.currentProject = defaultProjectKey();
     }
 
     public void setLlmClient(LlmClient llmClient) {
         applyContextProfile(ContextProfile.from(llmClient));
+        autoFactExtractor.setLlmClient(llmClient);
+    }
+
+    public void setAutoFactExtractionEnabled(boolean enabled) {
+        this.autoFactExtractionEnabled = enabled;
+    }
+
+    public boolean isAutoFactExtractionEnabled() {
+        return autoFactExtractionEnabled;
+    }
+
+    /**
+     * After a completed top-level turn, extract only source-backed facts from the submitted
+     * user text. No assistant, tool, expanded resource, or compressed-summary text is used.
+     */
+    public List<MemoryEntry> extractFactsFromUserTurn(String submittedUserInput) {
+        if (!autoFactExtractionEnabled || blocksAutomaticMemory()) return List.of();
+        AutoFactExtractor.Result extraction;
+        try {
+            extraction = autoFactExtractor.extractFacts(submittedUserInput);
+        } catch (Exception e) {
+            log.warn("automatic fact extraction failed; conversation result remains available ({})",
+                    e.getClass().getSimpleName());
+            return List.of();
+        }
+        if (extraction.called()) {
+            tokenBudget.recordUsage(extraction.inputTokens(), extraction.outputTokens(),
+                    extraction.cachedInputTokens());
+        }
+        if (blocksAutomaticMemory() || com.paicli.runtime.CancellationContext.isCancelled()) return List.of();
+        List<MemoryEntry> saved = new ArrayList<>();
+        for (String fact : extraction.facts()) {
+            Map<String, String> metadata = new LinkedHashMap<>();
+            metadata.put("source", "auto_user_fact");
+            metadata.put("scope", "project");
+            metadata.put("project", currentProject);
+            metadata.put("verification_pending", "true");
+            MemoryEntry entry = new MemoryEntry(
+                    "fact-" + UUID.randomUUID().toString().substring(0, 8),
+                    fact, MemoryEntry.MemoryType.FACT, metadata,
+                    MemoryEntry.estimateTokens(fact));
+            if (longTermMemory.writeAutomatic(entry)) saved.add(entry);
+        }
+        return List.copyOf(saved);
     }
 
     public void applyContextProfile(ContextProfile contextProfile) {
@@ -199,6 +250,8 @@ public class MemoryManager {
     public String getSystemStatus() {
         return "上下文策略: " + contextProfile.summary() + "\n" +
                 "短期上下文: 由当前 Agent conversationHistory 维护\n" +
+                "自动事实提取: " + (autoFactExtractionEnabled
+                        ? (blocksAutomaticMemory() ? "开启（外部内容防护暂停）" : "开启") : "关闭") + "\n" +
                 longTermMemory.getStatusSummary() + "\n" +
                 tokenBudget.getUsageReport();
     }

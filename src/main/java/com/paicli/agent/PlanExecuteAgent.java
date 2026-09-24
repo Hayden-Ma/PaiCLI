@@ -47,17 +47,18 @@ import java.util.stream.Collectors;
 public class PlanExecuteAgent {
     private static final Logger log = LoggerFactory.getLogger(PlanExecuteAgent.class);
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
-    private record PlanRunOutcome(String result, boolean persistAssistantMessage) {
+    private record PlanRunOutcome(String result, boolean persistAssistantMessage,
+                                  boolean autoExtractEligible) {
         static PlanRunOutcome executed(String result) {
-            return new PlanRunOutcome(result, true);
+            return new PlanRunOutcome(result, true, result != null && result.startsWith("✅"));
         }
 
         static PlanRunOutcome canceled(String result) {
-            return new PlanRunOutcome(result, false);
+            return new PlanRunOutcome(result, false, false);
         }
 
         static PlanRunOutcome failed(String result) {
-            return new PlanRunOutcome(result, true);
+            return new PlanRunOutcome(result, true, false);
         }
     }
 
@@ -350,6 +351,13 @@ public class PlanExecuteAgent {
                         "plan-agent",
                         "run_result",
                         LlmClient.Message.assistant(outcome.result()));
+            }
+            if (outcome.autoExtractEligible() && !CancellationContext.isCancelled()) {
+                int saved = memoryManager.extractFactsFromUserTurn(submittedUserInput).size();
+                if (saved > 0) {
+                    out.println("💾 自动提取并保存 " + saved
+                            + " 条项目事实（待核实；可用 /memory list 查看和删除）。");
+                }
             }
             if (streamState.hasStreamedOutput() && (outcome.result() == null || outcome.result().isBlank())) {
                 return "";

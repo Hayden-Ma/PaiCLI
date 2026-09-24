@@ -316,7 +316,16 @@ class TeamExecutionObservationTest {
 
     @Test void nativeFullCompactionMarksUnsupportedScopeBeforeSummaryAndInvalidatesInputIndex() throws Exception {
         String toolText = "COMPACTION_TOOL_PRIVATE_甲" + "界".repeat(6_000);
-        String summary = "COMPACTION_SUMMARY_PRIVATE_乙：已观察三份离线图片工具结果。";
+        String summary = """
+                ## 当前目标与成功条件
+                COMPACTION_SUMMARY_PRIVATE_乙：完成离线任务。
+                ## 用户要求与已确认决定
+                只读取本地文件。
+                ## 已完成工作及证据
+                已观察三份离线图片工具结果。
+                ## 未解决问题与下一步
+                继续完成 worker 工作。
+                """.trim();
         var events = new CopyOnWriteArrayList<Event>();
         var summaryEventCursors = new ArrayList<Integer>();
         var script = new ScriptClient(text(singlePlan()), tools(

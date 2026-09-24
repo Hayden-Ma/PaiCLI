@@ -134,6 +134,18 @@ public class LongTermMemory implements Memory {
                 : MemoryWriteResult.replaced(entry, target, scope);
     }
 
+    /** Automatic candidates never refresh verification time, replace entries, or bypass conflicts. */
+    public synchronized boolean writeAutomatic(MemoryEntry entry) {
+        if (entries.containsKey(entry.getId()) || entries.values().stream().anyMatch(existing ->
+                MemoryDeduplicator.isDuplicate(existing, entry)
+                        || conflictDetector.isConflict(existing, entry))) {
+            return false;
+        }
+        putEntry(entry);
+        saveToDisk();
+        return true;
+    }
+
     /** 用户确认某条记忆仍然成立：刷新最后核实时间。 */
     public synchronized Optional<MemoryEntry> markVerified(String id, Instant verifiedAt) {
         MemoryEntry existing = id == null ? null : entries.get(id.trim());

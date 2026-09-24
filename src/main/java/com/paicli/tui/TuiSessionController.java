@@ -430,8 +430,13 @@ public final class TuiSessionController implements AutoCloseable {
                     .append(entry.getId())
                     .append(" [").append(LongTermMemory.scopeOf(entry)).append("] ")
                     .append(memoryManager.isStale(entry) ? "[可能已过时] " : "")
+                    .append("true".equals(entry.getMetadata().get("verification_pending"))
+                            ? "[自动提取，待核实] " : "")
                     .append(entry.getContent())
-                    .append(" (最后核实 ").append(entry.getLastVerifiedAt()).append(")")
+                    .append(" (")
+                    .append("true".equals(entry.getMetadata().get("verification_pending"))
+                            ? "尚未经用户核实" : "最后核实 " + entry.getLastVerifiedAt())
+                    .append(")")
                     .append("\n");
         }
         return sb.toString().trim();

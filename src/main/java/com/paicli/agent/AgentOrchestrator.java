@@ -192,6 +192,14 @@ public class AgentOrchestrator {
         Throwable failure = null;
         try {
             result = runObserved(userInput, submittedUserInput, explicitTaskEnvelope, observation);
+            if (observation.runExitReason == RunExitReason.COMPLETED
+                    && !CancellationContext.isCancelled()) {
+                int saved = memoryManager.extractFactsFromUserTurn(submittedUserInput).size();
+                if (saved > 0) {
+                    out.println("💾 自动提取并保存 " + saved
+                            + " 条项目事实（待核实；可用 /memory list 查看和删除）。");
+                }
+            }
             return result;
         } catch (RuntimeException | Error e) {
             failure = e;

@@ -293,6 +293,7 @@ public class Agent {
 
                 // 记录 token 使用
                 memoryManager.recordTokenUsage(budget.totalInputTokens(), budget.totalOutputTokens(), budget.totalCachedInputTokens());
+                reportAutomaticallySavedFacts(submittedUserInput);
                 pushStatus(budget, startNanos, "idle");
                 log.info("ReAct run finished: inputTokens={}, outputTokens={}, reasoningChars={}, answerChars={}",
                         budget.totalInputTokens(),
@@ -476,6 +477,14 @@ public class Agent {
             }
         } catch (Exception e) {
             log.warn("conversationHistory compaction failed", e);
+        }
+    }
+
+    private void reportAutomaticallySavedFacts(String submittedUserInput) {
+        List<com.paicli.memory.MemoryEntry> saved = memoryManager.extractFactsFromUserTurn(submittedUserInput);
+        if (!saved.isEmpty()) {
+            renderer().stream().println("💾 自动提取并保存 " + saved.size()
+                    + " 条项目事实（待核实；可用 /memory list 查看和删除）。");
         }
     }
 

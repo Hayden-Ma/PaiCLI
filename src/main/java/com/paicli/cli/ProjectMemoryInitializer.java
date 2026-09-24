@@ -98,7 +98,7 @@ final class ProjectMemoryInitializer {
             pitfalls.add("改行为要同步 `AGENTS.md` / `README.md` / `ROADMAP.md`；路线图只在状态变化时更新。");
             pitfalls.add("改命令入口要联动 `Main.java`、`CliCommandParser.java`、测试、`README.md`、`AGENTS.md`。");
             pitfalls.add("改工具集要联动 `ToolRegistry.java`、Agent/Plan/SubAgent 提示词和文档。");
-            pitfalls.add("长期记忆只通过 `/save` 或用户明确要求保存；不要自动提取临时事实。");
+            pitfalls.add("交互式 CLI 可从用户原文自动提取项目级稳定事实，标为待核实；不要从临时任务、工具输出或模型推测中提取。显式保存用 `/save` 或 `save_memory`。");
             donts.add("不提交 `.env`、真实 API Key、`target/` 产物。");
             donts.add("不把 `ROADMAP.md` 的未来计划写成已交付能力。");
             donts.add("不在交互主路径新增裸 `System.out.println`；优先走 `Renderer.stream()`。");

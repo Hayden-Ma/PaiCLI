@@ -44,11 +44,11 @@ mvn test -DskipTests=false
 ### 第三期：Memory + 上下文工程
 
 - 每个 Agent 实例用自己的 `conversationHistory` 管理当前对话与工具结果，不再复制第二份影子短期记忆
-- 长期记忆通过 `/save <事实>` 或用户明确说“记一下 / 记住”时的 `save_memory` 保存关键事实，默认项目级作用域，跨会话复用
+- 交互式 CLI 默认在任务完成后，从用户原文自动提取稳定事实并存为项目级长期记忆（标为待核实）；也可通过 `/save <事实>` 或明确说“记一下 / 记住”时的 `save_memory` 显式保存
 - 项目级记忆通过 `PAI.md` / `.paicli/PAI.md` 启动自动注入，适合提交到仓库的团队共享规则；`PAI.local.md` / `.paicli/PAI.local.md` 只做本地覆盖
 - 注入给模型的相关记忆只使用长期稳定事实，不把当前轮短期对话误当成“历史记忆”
 - 上下文增长到清理阈值（默认 min(100k, 摘要阈值 × 60%)）时，先把最近 3 条之外的旧工具结果换成一行占位说明（参考 Anthropic context editing），需要时可重新调用工具或读回卸载文件；仍接近预算才做摘要
-- 会话读过网页、浏览器或 MCP 返回的外部内容后，不再自动写长期记忆；`save_memory` 需要用户当轮明确说“记住”，显式保存的条目标注 `external_context`（`PAICLI_MEMORY_DISABLE_ON_EXTERNAL_CONTEXT=false` 关闭防护）
+- 会话读过网页、浏览器或 MCP 返回的外部内容后，自动事实提取和其他自动写入都会停止；`save_memory` 需要用户当轮明确说“记住”，显式保存的条目标注 `external_context`（`PAICLI_MEMORY_DISABLE_ON_EXTERNAL_CONTEXT=false` 关闭防护）
 - 对话接近预算时自动做四栏目摘要压缩；过长的旧历史分段覆盖并合并，格式不合格或未减少 Token 时保留原对话。可选 Session Memory 增量摘要快速路径，不可用时回退完整对话摘要；摘要有损，超大工具结果另有落盘读回机制
 - 新增 `/memory` 查看状态、`/memory list/search/delete/clear` 管理长期记忆、`/save` 手动保存事实；Agent 在用户明确说“记一下 / 记住”时可调用 `save_memory`
 
@@ -268,7 +268,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 
 - ReAct、Plan task executor、Multi-Agent 三角色、Planner 的 system prompt 已从 Java 硬编码抽离到 `src/main/resources/prompts/`
 - `PromptAssembler` 按 `base -> personality -> mode -> approval -> runtime_context -> project_context -> skills -> context_mgmt -> handoff` 组装；`runtime_context` 注入当前日期/时区，动态项目上下文靠后注入
-- `project_context` 会先注入 `PAI.md` 项目记忆，再注入 `/save` 检索到的相关长期记忆和 MCP resource 索引
+- `project_context` 会先注入 `PAI.md` 项目记忆，再注入检索到的相关长期记忆（含自动提取后待核实的条目）和 MCP resource 索引
 - 支持用户级覆盖 `~/.paicli/prompts/...`，支持项目级覆盖 `.paicli/prompts/...`，项目级优先级最高
 - 覆盖是整文件替换；`base.md` 和最终 prompt 必须包含 `## Language`
 - Prompt 改动审计模板见 `docs/prompt-analysis-template.md`
@@ -499,10 +499,10 @@ export AGNES_BASE_URL=https://apihub.agnes-ai.com/v1
 ```
 
 长期记忆默认保存在用户目录下的 `~/.paicli/memory/long_term_memory.json`。
-长期记忆只保存显式保存意图下的稳定事实：`/save <事实>`，或用户在自然语言里明确说“记一下 / 记住 / 以后记得”时由 Agent 调用 `save_memory`。默认保存为当前项目作用域；跨项目通用偏好可用 `/save --global <事实>` 或 `save_memory(scope=global)`。它不应包含一次性任务请求或临时文件名/目录名。
-重复记忆只会在相同 `type + scope + project` 域内合并：先规范化 Unicode 宽窄、大小写、空白和普通标点，再保守识别少量中文语法助词差异；重复保存等价内容只刷新已有条目的核实时间。数字、代码符号或实质内容不同的事实不会被去重合并。
+交互式 CLI 默认在 ReAct、Plan、Team 的任务完成后，从用户实际提交的原文中自动挑选稳定偏好或项目事实；模型必须返回原文中的连续片段，最多 3 条。自动条目只存当前项目，标注“自动提取，待核实”，不会从工具输出、助手回复或压缩摘要提取，也不会覆盖冲突记忆。会话接触外部内容后默认停止自动提取。可用 `PAICLI_MEMORY_AUTO_EXTRACT_ENABLED=false` 关闭；嵌入式 Agent 默认关闭，需调用 `MemoryManager.setAutoFactExtractionEnabled(true)`。候选输入会多一次无工具模型调用。显式保存仍可用 `/save <事实>`，或用户明确说“记一下 / 记住 / 以后记得”时由 Agent 调用 `save_memory`；跨项目通用偏好可用 `/save --global <事实>` 或 `save_memory(scope=global)`。长期记忆不应包含一次性任务请求或临时文件名/目录名。
+重复记忆只会在相同 `type + scope + project` 域内合并：先规范化 Unicode 宽窄、大小写、空白和普通标点，再保守识别少量中文语法助词差异；用户显式重复保存等价内容会刷新已有条目的核实时间，自动提取重复内容则跳过且不刷新。数字、代码符号或实质内容不同的事实不会被去重合并。
 写入时另有冲突检测：同域内“只有数字/版本号不同”或字符二元组相似度 ≥ `PAICLI_MEMORY_CONFLICT_THRESHOLD`（默认 0.8）但又不是重复的条目，视为同一事实的新旧版本，新内容不会写入，`/save` 或 `save_memory` 的结果会同时列出两条，由用户选择：保留旧的（无需操作）、`/memory replace <id> <新事实>` 改用新的，或 `/save --force <事实>` 两条都保留。冲突检测基于字面相似度，不理解同义改写或语义矛盾。
-每条记忆记录写入时间和最后核实时间；超过 `PAICLI_MEMORY_STALE_DAYS`（默认 30 天）未核实的记忆在检索注入和 `/memory list` 中标注“可能已过时”。`/memory verify <id>` 表示用户确认仍然成立并刷新核实时间。system prompt 要求模型把记忆当线索：行动前用当前文件核实，不一致时以文件为准并提示用户更新记忆。
+每条记忆记录写入时间和最后核实时间；自动提取条目额外标注“待核实”，在用户确认前不把写入时间表述成用户核实时间。超过 `PAICLI_MEMORY_STALE_DAYS`（默认 30 天）未核实的记忆在检索注入和 `/memory list` 中标注“可能已过时”。`/memory verify <id>` 表示用户确认仍然成立并刷新核实时间。system prompt 要求模型把记忆当线索：行动前用当前文件核实，不一致时以文件为准并提示用户更新记忆。
 可用 `/memory list` 查看长期记忆，`/memory search <关键词>` 搜索当前项目可见记忆，`/memory delete <id>` 删除单条记忆。
 
 项目级记忆使用 Markdown 文件维护，和 `/save` 的长期记忆分工不同：

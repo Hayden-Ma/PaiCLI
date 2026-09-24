@@ -181,11 +181,11 @@ src/main/java/com/paicli/
 
 ### Memory
 
-- 长期记忆只通过 `/save` 或用户明确要求保存；不要自动提取事实。唯一的自动写入路径是 `ExplicitMemoryHints` 的浏览器登录态提示（用户说“记住 + 复用已登录 Chrome”时直接存一条 global 偏好）；会话摘要（Session Memory / 完整摘要）只重建 conversationHistory，不写长期记忆
+- 交互式 CLI 默认在 ReAct / Plan / Team 任务完成后，对用户实际提交的原文做一次受约束的事实提取（`PAICLI_MEMORY_AUTO_EXTRACT_ENABLED=false` 关闭；嵌入式 Agent 默认关闭，须显式开启）。模型只能选择原文中逐字存在的稳定偏好/项目事实，最多 3 条；自动条目只写项目级并标注待核实，重复/冲突不写且不刷新旧条目核实时间。用户可 `/memory verify` 或删除。外部内容防护阻止自动提取；不会从 assistant、工具返回、展开的 MCP resource 或压缩摘要提取。显式保存仍走 `/save` / `save_memory`；`ExplicitMemoryHints` 的浏览器登录态提示在用户明确要求记住时可直接保存。会话摘要只重建 conversationHistory
 - 外部上下文防护（参考 Codex `memories.disable_on_external_context`，PaiCLI 默认开启，`PAICLI_MEMORY_DISABLE_ON_EXTERNAL_CONTEXT=false` 关闭）：`web_search` / `web_fetch` / `browser_*` / 任意 `mcp__*` 结果、`execute_command` 的 curl/wget，以及用户输入里展开的 MCP resource，会让共享 ToolRegistry 上的会话级 `ExternalContextTracker` 记下来源。此后浏览器登录态提示不再自动写入；`save_memory` 只有在当前轮用户原文明确要求记住时才放行，否则 `TurnToolPolicy` 以 `[MEMORY_EXTERNAL_CONTEXT]` 拒绝。显式保存（`/save`、用户要求后的 `save_memory`）照常写入，但 metadata 带 `external_context=true` 与 `external_context_sources`，`/memory list` 标注 🌐。防护关闭时仍记录 metadata。`/clear` 重置该标记
 - `PAI.md` 管团队共享的项目规则，长期记忆管个人或项目作用域的稳定事实；不要把一次性协作经验写进 `PAI.md`
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；默认项目级作用域，跨项目通用偏好才用 global
-- 长期记忆去重以 `type + scope + project` 为边界，只做确定性的 Unicode/格式规范化与保守语法助词近似匹配；数字/版本不同的条目去重时保留。重复保存等价内容只刷新已有条目的 `lastVerifiedAt`
+- 长期记忆去重以 `type + scope + project` 为边界，只做确定性的 Unicode/格式规范化与保守语法助词近似匹配；数字/版本不同的条目去重时保留。显式重复保存等价内容会刷新核实时间；自动提取遇到重复或冲突时不写，也不刷新旧条目的核实时间
 - 显式写入（`/save`、`save_memory`）另走 `MemoryConflictDetector`：同域内仅数字/版本不同，或字符二元组 Dice ≥ `PAICLI_MEMORY_CONFLICT_THRESHOLD`（默认 0.8）且非重复，视为冲突，不写入、不覆盖，结果同时列出新旧两条，由用户选择 `/memory replace <id> <事实>`（或 `save_memory replace_id`）/ `/save --force`（或 `keep_both=true`）/ 保持不变。模型不得替用户做选择。检测只看字面相似度，不做语义冲突消解
 - `MemoryEntry` 同时记录写入时间 `timestamp` 与最后核实时间 `lastVerifiedAt`（旧数据缺省为写入时间）；`MemoryRetriever` 注入时带两个日期，超过 `PAICLI_MEMORY_STALE_DAYS`（默认 30，≤0 关闭）未核实的标注“可能已过时”。`/memory verify <id>` 刷新核实时间。没有给模型开放“核实记忆”工具，核实状态只由用户动作更新
 - system prompt Memory Policy：记忆是线索不是事实，行动前先对照当前文件核实；不一致以文件为准并提示用户更新记忆

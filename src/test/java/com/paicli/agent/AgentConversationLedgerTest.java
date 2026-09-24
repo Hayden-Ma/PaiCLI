@@ -4,6 +4,7 @@ import com.paicli.tool.ToolResultBoundary;
 import com.paicli.history.ConversationLedger;
 import com.paicli.llm.LlmClient;
 import com.paicli.memory.MemoryManager;
+import com.paicli.memory.LongTermMemory;
 import com.paicli.tool.ToolRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -15,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Queue;
@@ -71,10 +73,21 @@ class AgentConversationLedgerTest {
 
     @Test
     void clearAndCompactionOnlyMutateDeliveryView(@TempDir Path tempDir) throws Exception {
+        String summary = """
+                ## 当前目标与成功条件
+                继续当前会话。
+                ## 用户要求与已确认决定
+                保留用户要求。
+                ## 已完成工作及证据
+                已完成第一轮。
+                ## 未解决问题与下一步
+                继续回答。
+                """;
         QueueClient llm = new QueueClient(List.of(
                 new LlmClient.ChatResponse("assistant", "answer-1", "reason-1", null, 10, 2),
                 new LlmClient.ChatResponse("assistant", "answer-2", "reason-2", null, 10, 2),
-                new LlmClient.ChatResponse("assistant", "summary", null, null, 10, 2)
+                new LlmClient.ChatResponse("assistant", summary, null, null, 10, 2),
+                new LlmClient.ChatResponse("assistant", "answer-3", null, null, 10, 2)
         ));
         StubToolRegistry registry = new StubToolRegistry();
         registry.setProjectPath(tempDir.toString());
@@ -83,7 +96,7 @@ class AgentConversationLedgerTest {
         Agent agent = new Agent(llm, registry);
         agent.setConversationLedger(ledger);
 
-        agent.run("turn one");
+        agent.run("turn one " + "x".repeat(2_000));
         agent.run("turn two");
         byte[] beforeCompaction = Files.readAllBytes(ledger.file());
 
@@ -95,6 +108,11 @@ class AgentConversationLedgerTest {
                 Arrays.copyOf(afterCompaction, beforeCompaction.length));
         assertTrue(ledger.readAll().stream()
                 .anyMatch(entry -> "compaction".equals(entry.event())));
+
+        agent.run("turn three");
+        List<LlmClient.Message> nextRequest = llm.requests.get(3);
+        assertTrue(nextRequest.get(1).content().contains(summary.trim()));
+        assertTrue(nextRequest.stream().anyMatch(message -> "turn three".equals(message.content())));
 
         byte[] beforeClear = Files.readAllBytes(ledger.file());
         agent.clearHistory();
@@ -184,6 +202,34 @@ class AgentConversationLedgerTest {
                 .anyMatch(entry -> "reviewer reasoning".equals(entry.message().reasoningContent())));
     }
 
+    @Test
+    void completedTeamRunExtractsSubmittedUserFact(@TempDir Path tempDir) {
+        QueueClient llm = new QueueClient(List.of(
+                new LlmClient.ChatResponse("assistant", """
+                        {"summary":"one step","steps":[
+                          {"id":"s1","description":"执行检查","type":"ANALYSIS","dependencies":[]}
+                        ]}
+                        """, null, null, 10, 2),
+                new LlmClient.ChatResponse("assistant", "检查完成", null, null, 10, 2),
+                new LlmClient.ChatResponse("assistant",
+                        "{\"approved\":true,\"summary\":\"通过\",\"issues\":[]}", null, null, 10, 2),
+                new LlmClient.ChatResponse("assistant",
+                        "{\"facts\":[{\"quote\":\"我偏好中文回答\"}]}", null, null, 10, 2)
+        ));
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        LongTermMemory store = new LongTermMemory(tempDir.resolve("memory").toFile());
+        MemoryManager manager = new MemoryManager(llm, 4096, 128000, store);
+        manager.setAutoFactExtractionEnabled(true);
+        AgentOrchestrator team = new AgentOrchestrator(llm, registry, manager,
+                new PrintStream(new ByteArrayOutputStream()));
+
+        assertTrue(team.run("我偏好中文回答。完成一次检查。").contains("检查完成"));
+        assertEquals(1, store.size());
+        assertEquals("我偏好中文回答", store.getAll().get(0).getContent());
+        assertEquals(4, llm.requests.size());
+    }
+
     private static final class StubToolRegistry extends ToolRegistry {
         @Override
         public List<ToolExecutionResult> executeTools(List<ToolInvocation> invocations) {
@@ -201,6 +247,7 @@ class AgentConversationLedgerTest {
 
     private static final class QueueClient implements LlmClient {
         private final Queue<ChatResponse> responses;
+        private final List<List<Message>> requests = new ArrayList<>();
 
         private QueueClient(List<ChatResponse> responses) {
             this.responses = new ArrayDeque<>(responses);
@@ -214,6 +261,7 @@ class AgentConversationLedgerTest {
         @Override
         public ChatResponse chat(List<Message> messages, List<Tool> tools,
                                  StreamListener listener) throws IOException {
+            requests.add(List.copyOf(messages));
             ChatResponse response = responses.poll();
             if (response == null) {
                 throw new IOException("missing response");
