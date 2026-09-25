@@ -277,3 +277,32 @@ DeepSeek 适配器在 `tools == null || tools.isEmpty()` 时跳过 DSML 转换�
 - **内置 Skill 的 tags 警告**：内置 `better-harness` 用多行 YAML 列表，极简解析器只支持行内数组。已统一为行内格式、升级内置缓存版本、修正本机缓存，33 项 Skill 测试通过。没有为此扩展完整 YAML 解析能力。
 
 本轮累计代码仍未提交。上述其他故障的测试成绩也不能用于证明待评审的意图判断升级方案有效。
+
+## 11. 评审结论与落地（Claude，2026-09-25）
+
+**结论：附条件接受方案方向，拒绝两次局部修复。** 已按下述方案实施，替代第 7 节提议。
+
+归因核实：原始账本 `session-1790305232921-…` 中 DeepSeek 输出的确为 `｜DSML｜｜ calls` 容器；11:12:50 的请求日志为 `tools=0`。归因成立。
+
+根本问题是门禁默认值方向错误：`looksActionable()` 没命中动作词表就清空全部工具，每次漏判都是一次“模型想做事却没有工具”的静默失败。自然语言判断可以用，但只能用来收紧（命中才限制），不能用来授予基本能力（没命中就剥夺）。
+
+对第 9 节问题的回答：
+
+1. 归因充分；证据缺口（真实服务端控制变量）不影响修复方向，因为修复后提供 tools 本来就是正确请求形态。
+2. 正则不再作为工具资格门槛。保留的只有两类只做收紧的高精度判断：明确禁网，明确标题标记（`《…》`、`# `、“（附…面试题）”、“X：Y？”）。
+3. 续接编号与分句补丁属于补丁堆积，已撤回；DSML `calls` 容器兼容属于协议格式解析，有真实证据，保留。
+4. 是降级，但只对“没有标记的裸标题”这一窄场景：从代码拦截变为提示词要求澄清。URL 来源校验不变，模型仍不能抓取臆造 URL；未经请求的 `web_search` 是只读操作，结果仍包成不可信数据。可以接受。
+5. 原门禁从来不是副作用防线（输入含“修改”即开放全部写工具）。真正的防线已补：交互式 CLI 默认确认 `execute_command`、`revert_turn` 与全部 MCP 工具。
+6. 不需要额外意图分类请求。
+7. 未转换的 DSML 现在会提示“工具调用未执行”，并注明若是用户要求展示的示例可忽略。
+8. 确定性测试只验证工具暴露、转换、执行分发与审批分支；模型是否会澄清裸标题属于模型行为，需要单独的真实模型样本，本次未运行。
+9. 见下方落地清单。
+
+落地清单（均有离线测试，未调用真实模型）：
+
+- `TurnToolPolicy`：删除 `looksActionable` 及其动作词表，`actionable` 换成只收紧的 `headlineOnly`；撤回 `fromConversationReply` 与分句判断。测试 `TurnToolPolicyTest.onlyHighPrecisionHeadlineMarkersHideWebSearch`、`headlinesNeverLoseLocalToolsOrGainUngroundedFetch`
+- `Agent`：撤回续接状态；标题输入时在终端提示“本轮未开放联网工具”
+- `LlmClient.looksLikeUnexecutedToolCall` + `DeepSeekClient` 实现，三条执行路径在最终回复后提示。测试 `UnexecutedToolCallNoticeTest`、`DeepSeekUnexecutedToolCallTest`
+- HITL 三档：`/hitl default`（启动默认）、`/hitl on`、`/hitl off`；默认档只在交互式 `SwitchableHitlHandler` 开启，评测等非交互处理器保持关闭。测试 `HitlDefaultConfirmationTest`
+- 事故回放 `DeepSeekConversationReplayTest` 在去掉全部自然语言补丁后仍通过：“1”与“进入 demo 目录，编译并运行 Hello.java”都能拿到工具并执行
+- 顺带：删除误提交的仓库根目录 `Hello.java`；状态栏里并不存在的 Ctrl+Y 提示改为 `/hitl` 命令

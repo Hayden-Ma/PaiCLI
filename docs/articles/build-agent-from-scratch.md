@@ -121,7 +121,9 @@ tools.put("read_file", new Tool(
 
 PaiCLI 现在内置了 17 个工具，接入 MCP 之后，外部 server 的工具会以 `mcp__{server}__{tool}` 的名字动态注册进来。发给模型之前，工具清单会先按名字排个序。顺序固定下来之后，每次请求的前缀都一样，更容易命中模型服务的 prompt cache（提示词缓存）。
 
-发给模型的清单还会逐轮筛选。每轮发送前，程序会按用户这句话的意图过一遍。用户明确说了不要联网，联网工具就不出现在清单里；用户只丢过来一个标题，没说要干什么，这一轮一个工具都不给，先问清楚再说。
+发给模型的清单还会逐轮筛选，但这一步只做减法。用户明确说了不要联网，联网工具就不出现在清单里；用户只丢过来一个带书名号或者“（附面试题）”这类标记的标题，程序收掉联网工具，并在终端提示用户说明要做什么。本地工具在任何情况下都照常给。
+
+为什么只做减法？按用户的措辞判断“这是不是一个任务”，靠的是关键词，中文的说法千变万化，词表永远补不全。要是反过来，没命中关键词就不给工具，那么“进入 demo 目录，编译并运行 Hello.java”这种正常指令，只要漏判一次，模型就两手空空，任务不声不响地没做成。只做减法的话，漏判的代价顶多是模型多搜一次，搜索结果照样按不可信数据处理。
 
 ![](https://cdn.paicoding.com/stutymore/build-agent-from-scratch-20260925095535-30fb73ad.png)
 
@@ -330,7 +332,7 @@ static Result apply(String content, String oldText, String newText, boolean repl
 
 ![](https://cdn.paicoding.com/stutymore/build-agent-from-scratch-20260924181809-71e906ad.png)
 
-开启 HITL（Human-in-the-Loop，人工审批）后，`edit_file` 执行前会弹出审批框，编辑成功后终端里会显示一段 diff。
+切到 ask 模式（人工审批，也叫 HITL，Human-in-the-Loop）后，`edit_file` 执行前会弹出审批框，编辑成功后终端里会显示一段 diff。
 
 ![](https://cdn.paicoding.com/stutymore/build-agent-from-scratch-20260925100659-0df0c18a.png)
 
@@ -340,9 +342,9 @@ static Result apply(String content, String oldText, String newText, boolean repl
 
 命令执行前会过一遍黑名单，`sudo`、对根目录和家目录的 `rm -rf`、`mkfs`、`curl | sh` 这类命令直接拦下。这份黑名单只是辅助手段，正则总有绕过去的写法。
 
-真正的把关是人工审批。HITL 在 PaiCLI 里默认关闭，输入 `/hitl on` 之后，写文件、编辑文件、执行命令、创建项目、回滚快照和所有 MCP 工具，执行前都要用户点头。
+真正的把关在审批环节。PaiCLI 启动后默认处于 auto 模式，写文件、编辑文件直接执行，每条 Shell 命令则先交给一个轻量模型分类器审查。分类器只看用户这一轮的原话和命令本身，看不到网页和文件内容；它判定只读、低风险才直接执行；判定有风险或者审查出了问题，命令不会执行，拒绝原因作为工具结果交回给模型，让它换一种做法，或者在回复里向用户说明为什么需要这条命令。MCP 工具和回滚快照在 auto 下也是同样处理。模型在同一轮里连续被拦到第 3 次，才会弹出审批框交给用户决定。
 
-默认关闭是为了本地开发时少打断几次。
+想让每个危险操作都经过人工确认，就按 Shift+Tab 切到 ask 模式，或者输入 `/hitl on`。Shift+Tab 在 auto、plan、ask 三个模式之间循环，状态栏左侧会显示当前模式。交互式命令行里没有“全部放行”的档位，最宽松就是 auto。
 
 ![](https://cdn.paicoding.com/stutymore/build-agent-from-scratch-20260925100909-f1d971ab.png)
 
@@ -446,10 +448,6 @@ java -jar target/paicli-1.0-SNAPSHOT.jar
 
 【截图：编译运行的工具调用；风格：swimlane；截图目标：展示 execute_command 两次调用、退出码和程序输出；关键词：execute_command、exit code、运行结果】
 
-最后输入 `/hitl on`，再让它写一个新文件，可以看到执行前弹出的审批框。
-
-【截图：HITL 审批框；风格：checklist-card；截图目标：展示写文件前弹出的审批框、危险等级和可选操作；关键词：HITL、审批、危险等级】
-
 ## 简历怎么写
 
 ### PaiCLI｜Java 终端 Coding Agent｜核心开发 第 1 期
@@ -469,3 +467,5 @@ java -jar target/paicli-1.0-SNAPSHOT.jar
 - 设计 Tool Result 安全与大结果管理机制，将文件、Shell 等工具返回统一标记为 Untrusted Content，并转义可能伪造边界标签的内容，降低间接 Prompt Injection 风险；超过 32K 字符的结果自动持久化为 Artifact，仅向模型提供文件路径及首尾摘要，避免大工具结果持续占用 Context。
 
 - 增强 Agent 文件编辑与异常恢复能力，文本修改依次采用精确匹配、逐行归一化、移除行号前缀三种策略，并支持批量替换；运行时记录近期 Tool Call 与 Error Pattern，同一操作或同类错误连续 3 次触发纠偏提示，连续 5 轮仍无法推进时停止工具调用并基于已有结果返回，避免 Agent 长时间重复执行无效操作。
+
+- 设计 auto 权限模式，用关闭思考的轻量模型分类器审查 Shell 命令，分类器只能看到用户原话和命令本身，看不到网页、文件等工具结果，以此收窄提示词注入。
