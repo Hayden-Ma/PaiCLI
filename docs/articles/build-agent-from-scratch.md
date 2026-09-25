@@ -446,7 +446,7 @@ java -jar target/paicli-1.0-SNAPSHOT.jar
 进入 demo 目录，编译并运行 Hello.java
 ```
 
-【截图：编译运行的工具调用；风格：swimlane；截图目标：展示 execute_command 两次调用、退出码和程序输出；关键词：execute_command、exit code、运行结果】
+![](https://cdn.paicoding.com/stutymore/build-agent-from-scratch-20260925185052.png)
 
 ## 简历怎么写
 
