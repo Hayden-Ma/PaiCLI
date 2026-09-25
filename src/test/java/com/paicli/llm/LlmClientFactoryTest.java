@@ -12,6 +12,20 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 class LlmClientFactoryTest {
 
     @Test
+    void freshConfigPrefersDeepSeekFlash() {
+        PaiCliConfig config = new PaiCliConfig();
+        config.getProviders().put("glm", new PaiCliConfig.ProviderConfig("test-glm-key", null, null));
+        config.getProviders().put("deepseek", new PaiCliConfig.ProviderConfig("test-deepseek-key", null, null));
+
+        LlmClient client = LlmClientFactory.createFromConfig(config);
+
+        assertEquals("deepseek", config.getDefaultProvider());
+        // 具体模型可能被本机 .env 的 DEEPSEEK_MODEL 覆盖，这里只断言选中的 provider
+        assertInstanceOf(DeepSeekClient.class, client);
+        assertEquals("deepseek", client.getProviderName());
+    }
+
+    @Test
     void createsGlm5vTurboClientWithMultimodalEndpoint() {
         PaiCliConfig config = new PaiCliConfig();
         config.getProviders().put("glm",

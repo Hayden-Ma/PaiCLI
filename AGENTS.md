@@ -25,7 +25,7 @@ PaiCLI 仓库给 Agent / 新线程的首读入口，Codex 直接读取，Claude 
 
 ## 运行与命令
 
-Java 17+ / Maven；可选 `ripgrep`（`grep_code` 优先用，缺失时回退 Java 扫描）；至少一个 API Key：`GLM_API_KEY` / `DEEPSEEK_API_KEY` / `HUNYUAN_API_KEY` / `STEP_API_KEY` / `KIMI_API_KEY` / `FREELLMAPI_API_KEY` / `XFYUN_MAAS_API_KEY` / `AGNES_API_KEY`。
+Java 17+ / Maven；可选 `ripgrep`（`grep_code` 优先用，缺失时回退 Java 扫描）；至少一个 API Key：`DEEPSEEK_API_KEY` / `GLM_API_KEY` / `HUNYUAN_API_KEY` / `STEP_API_KEY` / `KIMI_API_KEY` / `FREELLMAPI_API_KEY` / `XFYUN_MAAS_API_KEY` / `AGNES_API_KEY`。
 
 ```bash
 cp .env.example .env
@@ -61,7 +61,7 @@ src/main/java/com/paicli/
 - MCP 配置合并 `~/.paicli/mcp.json` 与项目 `.paicli/mcp.json`；检测到 `STEP_API_KEY` 自动内置 `step_search`
 - 思考模型（DeepSeek Flash / V4 Pro、GLM-5.3、混元 Hy4、Kimi thinking）的 `reasoning_content` 必须随下一轮带回；各 provider 协议差异、重试策略见 `docs/agents-reference.md`
 - 手动模型管理：`/model list [provider]` / `/model refresh <provider>` / `/model add <provider> <id> [--like <同供应商模型>]`；模型能力保存在 `providers.<provider>.models`。刷新只追加、添加不切换、未知能力按 128k 文本处理；用户显式切换后才应用，保存失败保留旧选择，不用推理请求探测能力
-- DeepSeek 默认 `deepseek-flash`（V4.1 Flash），支持图片；官方兼容旧名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 同样支持图片，`deepseek-v4-pro` 仍为文本模型。历史评测合同的模型标识不随交互默认值改写
+- DeepSeek 是默认 provider（`PaiCliConfig.defaultProvider`，Key 回退顺序 deepseek 在前），默认模型 DeepSeek V4.1 Flash（模型 ID `deepseek-flash`），支持图片；官方兼容旧名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 同样支持图片，`deepseek-v4-pro` 仍为文本模型。历史评测合同的模型标识不随交互默认值改写
 - 交互期输出走 `Renderer.stream()`，主路径不要新增裸 `System.out.println`；inline 渲染约定见 `docs/agents-reference.md`
 
 ## 关键行为约束

@@ -228,7 +228,7 @@ public class Main {
         LlmClient llmClient = LlmClientFactory.createFromConfig(config);
         if (llmClient == null) {
             System.err.println("❌ 错误: 未找到可用的 API Key");
-            System.err.println("请在 .env 文件中添加 GLM_API_KEY、DEEPSEEK_API_KEY、HUNYUAN_API_KEY、STEP_API_KEY、KIMI_API_KEY、FREELLMAPI_API_KEY、XFYUN_MAAS_API_KEY 或 AGNES_API_KEY");
+            System.err.println("请在 .env 文件中添加 DEEPSEEK_API_KEY、GLM_API_KEY、HUNYUAN_API_KEY、STEP_API_KEY、KIMI_API_KEY、FREELLMAPI_API_KEY、XFYUN_MAAS_API_KEY 或 AGNES_API_KEY");
             System.exit(1);
         }
         AtomicReference<LlmClient> llmClientRef = new AtomicReference<>(llmClient);
@@ -622,11 +622,11 @@ public class Main {
                         if (selection == null || selection.isEmpty()) {
                             ui.println("🤖 当前模型: " + llmClient.getModelName() + " (" + llmClient.getProviderName() + ")");
                             ui.println("   管理模型: /model list / /model refresh <provider> / /model add");
-                            ui.println("   GLM 明确模型：");
+                            ui.println("   明确模型：");
+                            ui.println("   /model deepseek-flash - 切换到 DeepSeek V4.1 Flash（默认，支持图片）");
                             ui.println("   /model glm-5.3-flash - 切换到 GLM-5.3-Flash");
                             ui.println("   /model glm-5.1       - 切换到 GLM-5.1");
                             ui.println("   /model glm-5v-turbo  - 切换到 GLM-5V-Turbo 多模态");
-                            ui.println("   /model deepseek-flash - 切换到 DeepSeek V4.1 Flash 多模态");
                             ui.println("   其它 provider 使用你配置里的具体模型：");
                             ui.println("   /model deepseek      - 切换到 DeepSeek（读取配置模型）");
                             ui.println("   /model hunyuan       - 切换到混元（读取配置模型）");
@@ -1695,10 +1695,10 @@ public class Main {
                 new SlashCommandHint("/model list", "/model list", "查看模型列表与能力"),
                 new SlashCommandHint("/model refresh ", "/model refresh <provider>", "手动刷新模型列表"),
                 new SlashCommandHint("/model add ", "/model add <provider> <模型ID>", "添加或更新模型能力"),
+                new SlashCommandHint("/model deepseek-flash", "/model deepseek-flash", "切换到 DeepSeek V4.1 Flash（默认，支持图片）"),
                 new SlashCommandHint("/model glm-5.3-flash", "/model glm-5.3-flash", "切换到 GLM-5.3-Flash"),
                 new SlashCommandHint("/model glm-5.1", "/model glm-5.1", "切换到 GLM-5.1"),
                 new SlashCommandHint("/model glm-5v-turbo", "/model glm-5v-turbo", "切换到 GLM-5V-Turbo 多模态"),
-                new SlashCommandHint("/model deepseek-flash", "/model deepseek-flash", "切换到 DeepSeek V4.1 Flash 多模态"),
                 new SlashCommandHint("/model deepseek", "/model deepseek", "切换到 DeepSeek（读取配置模型）"),
                 new SlashCommandHint("/model hunyuan", "/model hunyuan", "切换到混元（读取配置模型）"),
                 new SlashCommandHint("/model hy4-preview", "/model hy4-preview", "切换到混元 Hy4 preview"),

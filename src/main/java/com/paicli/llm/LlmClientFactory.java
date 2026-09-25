@@ -61,7 +61,7 @@ public class LlmClientFactory {
             return client;
         }
 
-        for (String provider : new String[]{"glm", "deepseek", "hunyuan", "step", "kimi", "freellmapi", "xfyun", "agnes"}) {
+        for (String provider : new String[]{"deepseek", "glm", "hunyuan", "step", "kimi", "freellmapi", "xfyun", "agnes"}) {
             client = create(provider, config);
             if (client != null) {
                 return client;

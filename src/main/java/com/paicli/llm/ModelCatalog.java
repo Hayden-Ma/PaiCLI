@@ -9,8 +9,8 @@ public final class ModelCatalog {
     public static final Map<String, List<String>> BUILTINS;
     static {
         Map<String, List<String>> models = new LinkedHashMap<>();
-        models.put("glm", List.of("glm-5.1", "glm-5.3-flash", "glm-5v-turbo"));
         models.put("deepseek", List.of("deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"));
+        models.put("glm", List.of("glm-5.1", "glm-5.3-flash", "glm-5v-turbo"));
         models.put("hunyuan", List.of("hy4-preview"));
         models.put("step", List.of("step-3.5-flash"));
         models.put("kimi", List.of("kimi-k2.6"));

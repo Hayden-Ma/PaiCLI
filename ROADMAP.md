@@ -9,10 +9,11 @@
 **已完成**
 
 - ReAct循环（思考-行动-观察）
-- GLM-5.1 API集成
-- 5个基础工具（文件、Shell、项目创建）
+- DeepSeek V4.1 Flash 接入（模型 ID `deepseek-flash`，默认 provider），也可切换 GLM、Kimi 等 OpenAI 兼容模型
+- 基础工具：读写与精确编辑文件、列目录、执行 Shell 命令、创建项目
 - 交互式CLI
-- 约400行代码
+
+> 模型说明：第 1 期默认接入 DeepSeek V4.1 Flash。模型迭代很快，后续默认模型可能继续升级，请以 `.env.example` 和 README 为准。
 
 **核心知识点**：ReAct模式、Function Calling、Agent基础架构
 
@@ -175,7 +176,7 @@
 - 配置持久化：`~/.paicli/config.json` 存储默认模型，支持 `.env` 回退读取 API Key
 - `LlmClientFactory` 工厂：根据 provider 名称和配置创建对应客户端
 - 手动模型管理：list / refresh / add；支持同供应商能力模板、配置覆盖、显式切换，刷新不自动启用新模型，失败保留原配置。
-- 2026-09-25：DeepSeek 默认升级为 `deepseek-flash`（V4.1 Flash），补齐新名称的思考参数、DSML 兼容和图片输入；旧 Flash 别名兼容，V4 Pro 保留文本模式。历史评测合同不变。
+- 2026-09-25：DeepSeek 默认升级为 `deepseek-flash`（V4.1 Flash），补齐新名称的思考参数、DSML 兼容和图片输入；旧 Flash 别名兼容，V4 Pro 保留文本模式。历史评测合同不变。同日 DeepSeek 成为默认 provider，Key 回退顺序改为 deepseek 在前。
 
 **核心知识点**：
 - 策略模式 + Provider 抽象

@@ -93,7 +93,7 @@ mvn test -DskipTests=false
 - `/model glm-5.3-flash` / `/model glm-5.1` / `/model glm-5v-turbo` 明确切 GLM 模型；`/model hy4-preview` 明确切混元 Hy4；`/model deepseek` / `/model hunyuan` / `/model step` / `/model kimi` / `/model freellmapi` / `/model xfyun` / `/model agnes` 切 provider 并读取配置里的具体模型
 - 配置持久化到 `~/.paicli/config.json`，API Key 可从配置、环境变量或 `.env` 读取
 - DeepSeek V4.1 Flash / V4 Pro 使用 `thinking.type=enabled`、`reasoning_effort=max`、`temperature=1`、`top_p=0.95`（DeepSeek 思考模式忽略 temperature，仅保留兼容）；GLM-5.3 还启用持续思考、流式工具与 usage；混元 Hy4 使用 `reasoning_effort=high` 并请求流式 usage。三者在 thinking tool-call 续轮都会带回 assistant `reasoning_content`
-- DeepSeek 默认 `deepseek-flash`（V4.1 Flash），支持图片输入；旧名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 由官方转到新版，同样启用图片能力。`deepseek-v4-pro` 仍按文本模型处理。升级已有配置可执行 `/model deepseek-flash`；保存的 provider 模型优先于环境变量和 `.env`。
+- DeepSeek 是默认 provider：未保存默认 provider 时优先使用，找不到 Key 时按 deepseek → glm → hunyuan → step → kimi → freellmapi → xfyun → agnes 顺序回退。默认模型 DeepSeek V4.1 Flash（模型 ID `deepseek-flash`），支持图片输入；旧名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 由官方转到新版，同样启用图片能力。`deepseek-v4-pro` 仍按文本模型处理。升级已有配置可执行 `/model deepseek-flash`；保存的 provider 模型优先于环境变量和 `.env`。
 - DeepSeek V4.1 Flash / V4 Pro 对正文 DSML 工具调用提供 fail-closed 兼容：只转换当前请求已暴露的工具，未知或畸形块保持文本；普通正文与 reasoning 仍保持流式输出
 - OpenAI-compatible provider 共用有限重试：`408` / `429` / 可恢复 `5xx` 与瞬时连接故障默认总尝试 3 次，采用指数退避 + jitter 并读取 `Retry-After`；确定性 `4xx` 直接失败。SSE 尚未交付输出时可安全重发，已经流给终端的半截内容不会自动重放
 
@@ -364,7 +364,7 @@ Tips for getting started:
 
 ### 第一期
 
-- 🤖 基于 GLM-5.1 的智能对话
+- 🤖 默认接入 DeepSeek V4.1 Flash（模型 ID `deepseek-flash`），也可切换 GLM、Kimi 等模型；模型迭代很快，后续默认模型可能继续升级，请以 `.env.example` 为准
 - 🔄 ReAct Agent 循环（思考-行动-观察）
 - 🛠️ 工具调用（文件操作、确定性代码搜索、Shell命令、项目创建、RAG 语义检索、联网搜索、MCP 动态工具）
 - 💬 交互式命令行界面
@@ -468,7 +468,7 @@ Plan/FILE_ONLY 配置；题面、两份 CSV、runtime 与逐题合同由同一�
 
 ### 1. 配置 API Key
 
-复制 `.env.example` 为 `.env`，并填入你的 GLM、DeepSeek、混元、StepFun、Kimi、FreeLLMAPI、讯飞星辰 MaaS 或 Agnes API Key：
+复制 `.env.example` 为 `.env`，并填入你的 DeepSeek、GLM、混元、StepFun、Kimi、FreeLLMAPI、讯飞星辰 MaaS 或 Agnes API Key。DeepSeek 是默认接入选择，没有在 `~/.paicli/config.json` 保存默认 provider 时优先使用它：
 
 ```bash
 cp .env.example .env
@@ -478,11 +478,11 @@ cp .env.example .env
 或者在环境变量中设置：
 
 ```bash
-export GLM_API_KEY=your_api_key_here
-export GLM_MODEL=glm-5.3-flash
-# 或
 export DEEPSEEK_API_KEY=your_deepseek_api_key_here
 export DEEPSEEK_MODEL=deepseek-flash
+# 或
+export GLM_API_KEY=your_api_key_here
+export GLM_MODEL=glm-5.3-flash
 # 或
 export HUNYUAN_API_KEY=your_hunyuan_api_key_here
 export HUNYUAN_MODEL=hy4-preview
@@ -506,8 +506,8 @@ export AGNES_BASE_URL=https://apihub.agnes-ai.com/v1
 也可以在 PaiCLI 内用命令写入 `~/.paicli/config.json`，不会覆盖 Kimi 配置：
 
 ```text
-/model glm-5.3-flash
 /model deepseek-flash
+/model glm-5.3-flash
 /config provider hunyuan --base-url https://tokenhub.tencentmaas.com/v1 --api-key <key> --model hy4-preview --default
 /model hy4-preview
 /config provider freellmapi --base-url http://localhost:5173/v1 --api-key <key> --model auto

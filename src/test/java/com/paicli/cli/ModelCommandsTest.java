@@ -40,7 +40,7 @@ class ModelCommandsTest {
         config.getProviders().put("deepseek", new PaiCliConfig.ProviderConfig("key", null, "deepseek-v4-pro"));
         String output = ModelCommands.handle("add deepseek next --like deepseek-flash --context 200000 --vision false --effort high", config, null);
         assertTrue(output.contains("已保存"));
-        assertEquals("glm", config.getDefaultProvider());
+        assertEquals("deepseek", config.getDefaultProvider());
         assertEquals("deepseek-v4-pro", config.getModel("deepseek"));
         PaiCliConfig restarted = new ObjectMapper().readValue(config.saved, PaiCliConfig.class);
         var restored = restarted.getProviders().get("deepseek").getModels().get("next");
@@ -107,7 +107,7 @@ class ModelCommandsTest {
         config.getProviders().put("deepseek", new PaiCliConfig.ProviderConfig("key", null, "deepseek-v4-pro"));
         assertThrows(IOException.class, () -> ModelCommands.switchModel(config, new Main.ModelSelection("deepseek", "next", true)));
         assertEquals("deepseek-v4-pro", config.getModel("deepseek"));
-        assertEquals("glm", config.getDefaultProvider());
+        assertEquals("deepseek", config.getDefaultProvider());
     }
 
     @Test

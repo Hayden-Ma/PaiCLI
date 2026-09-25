@@ -476,11 +476,11 @@ TuiBootstrap / LanternaWindow / TuiSessionController / pane/ / hitl/ / history/ 
 ## .env.example Reference
 
 ```bash
-GLM_API_KEY=your_api_key_here
+DEEPSEEK_API_KEY=your_deepseek_api_key_here   # 默认 provider
+# DEEPSEEK_MODEL=deepseek-flash
+# GLM_API_KEY=your_api_key_here
 # GLM_MODEL=glm-5.3-flash
 # GLM_MODEL=glm-5v-turbo
-# DEEPSEEK_API_KEY=your_deepseek_api_key_here
-# DEEPSEEK_MODEL=deepseek-flash
 # HUNYUAN_API_KEY=your_hunyuan_api_key_here
 # HUNYUAN_MODEL=hy4-preview
 # HUNYUAN_BASE_URL=https://tokenhub.tencentmaas.com/v1
