@@ -18,7 +18,6 @@ class ContextProfileTest {
         ContextProfile profile = ContextProfile.from(new GLMClient("test-key"));
 
         assertEquals(200_000, profile.maxContextWindow());
-        assertEquals(160_000, profile.agentTokenBudget());                  // 200k × 0.8
         assertEquals(0.835, profile.compressionTriggerRatio(), 0.001);
         assertEquals(167_000, profile.compressionTriggerTokens());          // 200k - 20k - 13k
         assertTrue(profile.mcpResourceIndexEnabled());                      // window ≥ 32k
@@ -30,7 +29,6 @@ class ContextProfileTest {
         ContextProfile profile = ContextProfile.from(new DeepSeekClient("test-key"));
 
         assertEquals(1_000_000, profile.maxContextWindow());
-        assertEquals(800_000, profile.agentTokenBudget());                  // 1M × 0.8
         assertEquals(967_000, profile.compressionTriggerTokens());          // 1M - 20k - 13k
         assertEquals("automatic-prefix-cache", profile.promptCacheMode());
         assertTrue(profile.mcpResourceIndexEnabled());

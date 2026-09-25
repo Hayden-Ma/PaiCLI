@@ -174,6 +174,8 @@
 - 运行时模型切换：`/model glm-5.1` / `/model glm-5v-turbo` 明确切 GLM 模型；`/model deepseek` / `/model step` / `/model kimi` 切 provider 并读取配置里的具体模型
 - 配置持久化：`~/.paicli/config.json` 存储默认模型，支持 `.env` 回退读取 API Key
 - `LlmClientFactory` 工厂：根据 provider 名称和配置创建对应客户端
+- 手动模型管理：list / refresh / add；支持同供应商能力模板、配置覆盖、显式切换，刷新不自动启用新模型，失败保留原配置。
+- 2026-09-25：DeepSeek 默认升级为 `deepseek-flash`（V4.1 Flash），补齐新名称的思考参数、DSML 兼容和图片输入；旧 Flash 别名兼容，V4 Pro 保留文本模式。历史评测合同不变。
 
 **核心知识点**：
 - 策略模式 + Provider 抽象
@@ -687,10 +689,10 @@ E2 原生观察接口已接线：默认关闭的 13 类角色/输入/工具/审�
 
 - ⬜ 会话恢复：`--continue` / `--session <id>`，`/sessions` 管理面板，`/fork`、`/rewind`、`/retry`。PaiCLI 已有原始会话账本，缺恢复入口。参考 `packages/tui/src/features/session/manager.ts`
 - ⬜ 按轮次回滚：可选“只回退对话 / 对话连同文件”，还原前比对哈希，文件已被别处改过则跳过并说明。参考 `packages/local-runtime/src/turns/file-changes.ts`
-- ⬜ `edit_file` 容错：精确匹配失败后做 Unicode、行尾空白、引号归一化再匹配；剥掉从 read 输出带来的行号前缀；支持 `replace_all`
+- ✅ `edit_file` 容错：精确匹配失败后做 Unicode、行尾空白、引号归一化再匹配；剥掉从 read 输出带来的行号前缀；支持 `replace_all`（2026-09-25）
 - ⬜ 运行中插话：Enter 插话改变当前方向，Alt+Enter 排到下一轮，`/btw` 只读旁路会话；同时修掉 ESC 取消的线程竞态。参考 `packages/tui/src/tui/shell/keybindings.ts`
 - ⬜ 无头执行 `exec`：固定 JSON 结果结构、明确退出码、`--max-steps` / `--timeout`，可接 CI 与评测。参考 `packages/tui/src/headless/`
-- ⬜ 停滞检测升级：识别多类重复信号（含来回切换、参数微调），只注入提醒不拦截，并配默认轮数上限询问是否继续。参考 `packages/agent-modules/runaway-guard/`
+- 🔄 停滞检测升级：识别多类重复信号（含来回切换、参数微调），只注入提醒不拦截，并配默认轮数上限询问是否继续。参考 `packages/agent-modules/runaway-guard/`。2026-09-25 已完成“同一动作 / 同类错误连续 3 步注入一次提醒”，停滞兜底窗口调为 5；来回切换、文件内容未变化和到上限询问是否继续待做
 - ⬜ 写操作按真实路径排队加锁，不同文件之间恢复并行（当前为写类工具整体串行）。参考 `withFileMutationQueue`（`packages/agent-tools/src/desktop/local-pi-tools.ts`）
 
 ### 第三批：扩展与工程化

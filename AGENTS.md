@@ -56,10 +56,12 @@ src/main/java/com/paicli/
 ```
 
 - 内置工具 17 个：`read_file` / `write_file` / `edit_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `browser_connect` / `browser_disconnect` / `browser_status` / `save_memory` / `load_skill` / `revert_turn`；MCP 工具动态注册为 `mcp__{server}__{tool}`
-- `edit_file` 只精确替换已有文件中唯一匹配的 `old_text`；CRLF 文件会转换后重试匹配并保留原换行；新建文件用 `write_file`
+- `edit_file` 默认只替换唯一匹配的 `old_text`，`replace_all=true` 时全部精确替换；精确匹配失败后按逐行归一化（NFKC、行尾空白、引号、横线、特殊空格）模糊匹配，仍失败且片段每行都带 read_file 行号前缀时剥前缀重试一次；CRLF 文件保留原换行；新建文件用 `write_file`
 - 代码理解默认 `glob_files` → `grep_code` → `read_file`；`search_code`（RAG）只做模糊语义辅助
 - MCP 配置合并 `~/.paicli/mcp.json` 与项目 `.paicli/mcp.json`；检测到 `STEP_API_KEY` 自动内置 `step_search`
-- 思考模型（DeepSeek V4、GLM-5.3、混元 Hy4、Kimi thinking）的 `reasoning_content` 必须随下一轮带回；各 provider 协议差异、重试策略见 `docs/agents-reference.md`
+- 思考模型（DeepSeek Flash / V4 Pro、GLM-5.3、混元 Hy4、Kimi thinking）的 `reasoning_content` 必须随下一轮带回；各 provider 协议差异、重试策略见 `docs/agents-reference.md`
+- 手动模型管理：`/model list [provider]` / `/model refresh <provider>` / `/model add <provider> <id> [--like <同供应商模型>]`；模型能力保存在 `providers.<provider>.models`。刷新只追加、添加不切换、未知能力按 128k 文本处理；用户显式切换后才应用，保存失败保留旧选择，不用推理请求探测能力
+- DeepSeek 默认 `deepseek-flash`（V4.1 Flash），支持图片；官方兼容旧名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 同样支持图片，`deepseek-v4-pro` 仍为文本模型。历史评测合同的模型标识不随交互默认值改写
 - 交互期输出走 `Renderer.stream()`，主路径不要新增裸 `System.out.println`；inline 渲染约定见 `docs/agents-reference.md`
 
 ## 关键行为约束
@@ -72,7 +74,7 @@ src/main/java/com/paicli/
 - 长期记忆文件被多个实例和进程共享：变更必须走 `withStorageLock`（锁内重读 → 修改 → 原子写回），不要绕开直接写盘
 - 自动提取只从用户原文逐字抽取，最多 3 条、只写 project、标待核实，重复或冲突一律跳过；读过 web / browser / MCP / curl 等外部内容后暂停自动写入，`save_memory` 需用户本轮明确要求记住
 - system prompt 的 Memory Policy：记忆是线索不是事实，行动前对照当前文件核实
-- 循环不设固定轮数上限；预算或停滞检测命中后关闭工具做一次部分完成收尾，不丢弃已有工作
+- 循环不设固定轮数上限；同一动作或同类错误连续 3 步时由 `RunawayGuard` 注入一次 `[runaway guard]` 提醒（不拦截工具），停滞兜底默认窗口 5，须大于提醒阈值；预算或停滞检测命中后关闭工具做一次部分完成收尾，不丢弃已有工作
 
 ### 工具执行
 

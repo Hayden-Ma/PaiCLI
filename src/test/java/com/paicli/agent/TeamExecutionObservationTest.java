@@ -329,9 +329,10 @@ class TeamExecutionObservationTest {
         var events = new CopyOnWriteArrayList<Event>();
         var summaryEventCursors = new ArrayList<Integer>();
         var script = new ScriptClient(text(singlePlan()), tools(
-                call("image-one", "read_file", "{\"path\":\"input.txt\"}"),
-                call("image-two", "read_file", "{\"path\":\"input.txt\"}"),
-                call("image-three", "read_file", "{\"path\":\"input.txt\"}")),
+                // 参数互不相同：三次相同调用会被重复检测判定为同一动作重复，额外注入提醒
+                call("image-one", "read_file", "{\"path\":\"input.txt\",\"limit\":1}"),
+                call("image-two", "read_file", "{\"path\":\"input.txt\",\"limit\":2}"),
+                call("image-three", "read_file", "{\"path\":\"input.txt\",\"limit\":3}")),
                 text(summary), text("compacted-worker-result"), review(true));
         var client = new BaseClient() {
             @Override public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {

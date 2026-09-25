@@ -92,9 +92,27 @@ mvn test -DskipTests=false
 - 内置 `GLMClient`、`DeepSeekClient`、`HunyuanClient`、`StepClient`、`KimiClient`、`FreeLlmApiClient`、`XfyunMaaSClient`、`AgnesClient` 八个瘦实现
 - `/model glm-5.3-flash` / `/model glm-5.1` / `/model glm-5v-turbo` 明确切 GLM 模型；`/model hy4-preview` 明确切混元 Hy4；`/model deepseek` / `/model hunyuan` / `/model step` / `/model kimi` / `/model freellmapi` / `/model xfyun` / `/model agnes` 切 provider 并读取配置里的具体模型
 - 配置持久化到 `~/.paicli/config.json`，API Key 可从配置、环境变量或 `.env` 读取
-- DeepSeek V4 使用 `thinking.type=enabled`、`reasoning_effort=max`、`temperature=1`、`top_p=0.95`；GLM-5.3 还启用持续思考、流式工具与 usage；混元 Hy4 使用 `reasoning_effort=high` 并请求流式 usage。三者在 thinking tool-call 续轮都会带回 assistant `reasoning_content`
-- DeepSeek V4 对正文 DSML 工具调用提供 fail-closed 兼容：只转换当前请求已暴露的工具，未知或畸形块保持文本；普通正文与 reasoning 仍保持流式输出
+- DeepSeek V4.1 Flash / V4 Pro 使用 `thinking.type=enabled`、`reasoning_effort=max`、`temperature=1`、`top_p=0.95`（DeepSeek 思考模式忽略 temperature，仅保留兼容）；GLM-5.3 还启用持续思考、流式工具与 usage；混元 Hy4 使用 `reasoning_effort=high` 并请求流式 usage。三者在 thinking tool-call 续轮都会带回 assistant `reasoning_content`
+- DeepSeek 默认 `deepseek-flash`（V4.1 Flash），支持图片输入；旧名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 由官方转到新版，同样启用图片能力。`deepseek-v4-pro` 仍按文本模型处理。升级已有配置可执行 `/model deepseek-flash`；保存的 provider 模型优先于环境变量和 `.env`。
+- DeepSeek V4.1 Flash / V4 Pro 对正文 DSML 工具调用提供 fail-closed 兼容：只转换当前请求已暴露的工具，未知或畸形块保持文本；普通正文与 reasoning 仍保持流式输出
 - OpenAI-compatible provider 共用有限重试：`408` / `429` / 可恢复 `5xx` 与瞬时连接故障默认总尝试 3 次，采用指数退避 + jitter 并读取 `Retry-After`；确定性 `4xx` 直接失败。SSE 尚未交付输出时可安全重发，已经流给终端的半截内容不会自动重放
+
+#### 手动维护模型
+
+`/model list [provider]` 查看内置、已配置和新发现的模型，以及上下文窗口和图片能力。`/model refresh <provider>` 使用该供应商当前 API 地址和凭证请求模型列表，只追加新 ID，保留已有配置和当前选择；不会发送对话或执行推理测试。供应商没有模型列表接口时，可以手动添加：
+
+```text
+/model refresh deepseek
+/model list deepseek
+/model add deepseek <新模型ID> --like deepseek-flash
+/model deepseek/<新模型ID>
+```
+
+`--like` 仅接受同供应商已登记的模型，沿用其协议处理与能力配置，例如思考内容回传、DSML 工具调用和图片格式。还可以覆盖 `--context <tokens>`、`--vision true|false`、`--max-output <tokens>`、`--thinking auto|enabled|disabled`、`--effort auto|low|medium|high|max`、`--reasoning-history true|false`；`--dsml true|false` 仅用于 DeepSeek 的兼容处理。`auto` 表示沿用供应商/模板设置，不是自动探测。只有协议兼容的新模型适合复用模板；新的 API 协议仍需更新客户端代码。
+
+配置保存在 `~/.paicli/config.json` 的 `providers.<provider>.models`，重复 `add` 只更新显式指定的能力项；使用 `--like` 会重新以该模板为基础。添加、更新和刷新均不切换当前会话，即使正在使用同名模型，也需再次 `/model` 才应用修改。切换成功后同步更新上下文预算并保留对话，写盘失败则保留原选择。模型 ID 有歧义或不含厂商前缀时，可以使用 `/model <provider>/<模型ID>`；原 `/model deepseek-flash` 和 `/model deepseek` 继续可用。
+
+新发现或未指定模板的新模型默认按 **128k、仅文本** 保守处理，列表标注发现条目的能力待配置；这不代表供应商实际能力已核实。刷新失败不删除旧条目，也不会猜测哪个模型是“最新版”。
 
 ### 第九期：联网能力 + Web 工具
 
@@ -125,7 +143,7 @@ mvn test -DskipTests=false
 ### 第十二期：长上下文工程
 
 - `LlmClient` 声明模型能力：`maxContextWindow()`、`supportsPromptCaching()`、`promptCacheMode()`
-- GLM-5.3-Flash、DeepSeek V4、混元 Hy4 preview 与 Agnes 2.0 Flash 使用 1M window；GLM-5.1 使用 200k，StepFun 与 Kimi K2.6 使用 256k，FreeLLMAPI 默认按 128k 保守预算
+- GLM-5.3-Flash、DeepSeek V4.1 Flash / V4 Pro、混元 Hy4 preview 与 Agnes 2.0 Flash 使用 1M window；GLM-5.1 使用 200k，StepFun 与 Kimi K2.6 使用 256k，FreeLLMAPI 默认按 128k 保守预算
 - `AgentBudget` 按当前模型动态计算预算，默认 `80% * maxContextWindow`，仍可用系统属性覆盖
 - 上下文预算按模型 window 连续派生：所有窗口都保留自动压缩，较大窗口可启用更多 MCP resource 索引能力
 - `search_code` 未显式传 `top_k` 时按上下文模式自适应；默认代码定位仍优先实时 grep/read
@@ -139,7 +157,7 @@ mvn test -DskipTests=false
 - `~/.paicli/mcp.json` 不存在时启动自动创建模板，默认使用 `--isolated=true` 临时浏览器 profile
 - 用于处理 SPA / JS 渲染 / 防爬墙 / 表单交互页面；微信公众号文章、知乎专栏、推特、小红书等 `web_fetch` 失败站点会引导走浏览器 MCP
 - HITL 的“全部放行”支持 MCP server 维度，连续浏览器操作可对 `chrome-devtools` 一次确认
-- `image` 类型结果会作为图片输入附加到下一轮；文本 fallback 仍保留，用于日志、人类可读摘要，以及 DeepSeek 等不接受图片块的 provider 自动降级上下文
+- `image` 类型结果会作为图片输入附加到下一轮；文本 fallback 仍保留，用于日志、人类可读摘要，以及 DeepSeek V4 Pro 等不接受图片块的 provider 自动降级上下文
 - MCP initialize 默认超时为 60 秒；CLI 首屏默认最多等待 8 秒，超时后先进入交互，未完成的 server 保持 `starting` 并在后台继续启动，可用 `/mcp` 和 `/mcp logs <name>` 追踪
 
 ### 第十四期：CDP 会话复用 + 登录态访问
@@ -289,13 +307,13 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 
 - `LlmClient.Message` 支持 `ContentPart`，包括 `text`、`image_base64`、`image_url`
 - 请求体在含图片且 provider 支持图片输入时输出带图片块的 content array，纯文本仍保持 string content
-- `LlmClient` 公共接口用 `supportsImageInput()` 声明图片能力；DeepSeek、混元 Hy4 等文本 provider 会把图片块替换成文本提示，避免 `image_url` 进入不支持多模态的 API 请求体
+- `LlmClient` 公共接口用 `supportsImageInput()` 声明图片能力；DeepSeek V4 Pro、混元 Hy4 等文本 provider 会把图片块替换成文本提示，避免 `image_url` 进入不支持多模态的 API 请求体
 - GLM 套餐用户可通过 `/model glm-5v-turbo` 切换到 GLM-5V-Turbo 多模态模型，再用 Ctrl+V 或 `@image:` 输入图片；本地 base64 图片会按智谱格式写入 `image_url.url`
 - MCP `image` content 会保留 base64 与 `mimeType`，在 ReAct / Plan / SubAgent 工具结果后作为图片 user message 回灌；当前 provider 不支持图片输入时，请求序列化层会自动省略图片 payload 并保留文本提示
 - 用户可通过 `@image:file:///abs/path.png`、`@image:/abs/path.png` 或 `@image:relative/path.png` 引用本地图片
 - 本地图片和 MCP 图片都会按 Claude Code 同类策略预处理：不是 OCR 成文本，而是压缩 / 缩放后作为图片块发送；带 alpha 的 PNG 会铺白底重编码；额外注入来源、尺寸和坐标映射元信息
 - 本地 `@image:` 消息会要求模型优先分析本轮图片；除非用户明确要求结合历史，历史对话和历史工具结果不能替代当前图片内容
-- 新一轮 ReAct / SubAgent 任务开始前会省略历史 image payload，仅保留文本元信息，避免旧截图反复进入上下文；模型 `reasoning_content` 默认只写日志 / 展示，DeepSeek V4、GLM-5.3、混元 Hy4 preview 与 Kimi thinking tool-call 续轮会按 provider 协议带回上一轮 assistant reasoning
+- 新一轮 ReAct / SubAgent 任务开始前会省略历史 image payload，仅保留文本元信息，避免旧截图反复进入上下文；模型 `reasoning_content` 默认只写日志 / 展示，DeepSeek V4.1 Flash / V4 Pro、GLM-5.3、混元 Hy4 preview 与 Kimi thinking tool-call 续轮会按 provider 协议带回上一轮 assistant reasoning
 - DeepSeek 流式调用默认使用 HTTP/1.1，规避部分 HTTP/2 网关长 SSE 响应被重置导致的 `stream was reset: INTERNAL_ERROR`
 - 当前边界：不做视频 / 音频、图像生成、TUI sixel 图片预览
 
@@ -426,7 +444,7 @@ Plan/FILE_ONLY 配置；题面、两份 CSV、runtime 与逐题合同由同一�
 
 ### 第八期
 
-- 🔄 GLM-5.3-Flash、GLM-5.1、GLM-5V-Turbo、DeepSeek V4、混元 Hy4 preview、阶跃星辰 StepFun、Kimi K2.6、FreeLLMAPI、讯飞星辰 MaaS 与 Agnes 2.0 Flash 多模型；支持 `/model glm-5.3-flash`、`/model deepseek-v4-flash`、`/model hy4-preview` 明确切模型，也支持 `/model deepseek|hunyuan|step|kimi|freellmapi|xfyun|agnes` 读取 provider 配置模型
+- 🔄 GLM-5.3-Flash、GLM-5.1、GLM-5V-Turbo、DeepSeek V4.1 Flash / V4 Pro、混元 Hy4 preview、阶跃星辰 StepFun、Kimi K2.6、FreeLLMAPI、讯飞星辰 MaaS 与 Agnes 2.0 Flash 多模型；支持 `/model glm-5.3-flash`、`/model deepseek-flash`、`/model hy4-preview` 明确切模型，也支持 `/model deepseek|hunyuan|step|kimi|freellmapi|xfyun|agnes` 读取 provider 配置模型
 - 🧱 `LlmClient` 接口 + 模板方法基类，新增 provider 只需 ~20 行
 - 💾 默认模型持久化到 `~/.paicli/config.json`
 
@@ -464,7 +482,7 @@ export GLM_API_KEY=your_api_key_here
 export GLM_MODEL=glm-5.3-flash
 # 或
 export DEEPSEEK_API_KEY=your_deepseek_api_key_here
-export DEEPSEEK_MODEL=deepseek-v4-flash
+export DEEPSEEK_MODEL=deepseek-flash
 # 或
 export HUNYUAN_API_KEY=your_hunyuan_api_key_here
 export HUNYUAN_MODEL=hy4-preview
@@ -489,7 +507,7 @@ export AGNES_BASE_URL=https://apihub.agnes-ai.com/v1
 
 ```text
 /model glm-5.3-flash
-/model deepseek-v4-flash
+/model deepseek-flash
 /config provider hunyuan --base-url https://tokenhub.tencentmaas.com/v1 --api-key <key> --model hy4-preview --default
 /model hy4-preview
 /config provider freellmapi --base-url http://localhost:5173/v1 --api-key <key> --model auto
@@ -647,7 +665,7 @@ OAuth 和 `sampling/createMessage` 当前未实现；远程 server 需要鉴权�
 # 编译（默认跳过测试）
 mvn clean package
 
-# 运行（需要本地 Ollama 已启动且拉取了 nomic-embed-text；grep_code 会优先使用本机 ripgrep，未安装时自动回退）
+# 运行（只有 search_code 语义检索需要本地 Ollama + nomic-embed-text；grep_code 会优先使用本机 ripgrep，未安装时自动回退）
 java -jar target/paicli-1.0-SNAPSHOT.jar
 ```
 
@@ -740,7 +758,7 @@ I
 
 - `read_file` - 读取文件内容
 - `write_file` - 写入文件内容
-- `edit_file` - 精确替换已有文件中唯一匹配的文本片段，模型无需输出整个文件
+- `edit_file` - 替换已有文件中的文本片段，模型无需输出整个文件；默认唯一匹配，`replace_all=true` 替换全部；能容忍弯引号、行尾空白和从 `read_file` 带过来的行号前缀
 - `list_dir` - 列出目录内容
 - `glob_files` - 按文件名 glob 实时查找项目内文件（只读，自动跳过常见构建/依赖目录）
 - `grep_code` - 按关键字或正则实时搜索项目内代码，优先使用 ripgrep，返回文件、行号、可选上下文、partial 状态与 suggested_reads
@@ -887,7 +905,7 @@ src/main/java/com/paicli
 │   └── PlanReviewInputParser.java  # 计划审核输入
 ├── llm/
 │   ├── GLMClient.java          # GLM API 客户端；glm-5.3/5.1 走 Coding endpoint，glm-5v-turbo 走多模态 endpoint
-│   ├── DeepSeekClient.java     # DeepSeek V4 文本客户端
+│   ├── DeepSeekClient.java     # DeepSeek V4.1 Flash 多模态 / V4 Pro 文本客户端
 │   ├── HunyuanClient.java      # 腾讯混元 TokenHub Hy4 preview 文本客户端
 │   ├── StepClient.java         # 阶跃星辰 StepFun API 客户端
 │   ├── KimiClient.java         # Kimi / Moonshot API 客户端

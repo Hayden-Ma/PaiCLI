@@ -42,9 +42,9 @@ For the primary entry point, see `/AGENTS.md`.
 
 ### Agent Loop Budget Config
 
-ReAct、Plan 单任务与 SubAgent 共用 `AgentBudget`。系统属性 > 默认值：`paicli.react.token.budget`(Integer.MAX_VALUE) / `paicli.react.stagnation.window`(3) / `paicli.react.hard.max.iterations`(不限制)。
+ReAct、Plan 单任务与 SubAgent 共用 `AgentBudget`。系统属性 > 默认值：`paicli.react.token.budget`(Integer.MAX_VALUE) / `paicli.react.stagnation.window`(5) / `paicli.react.hard.max.iterations`(不限制)。
 
-设计取舍：交互式 Agent 默认由模型在不再调用工具时自然结束，不设置固定 50 轮天花板；长上下文模型也不再以 80% x window 作为执行硬限。默认安全阀是 stagnation 检测（连续 3 轮相同工具调用）、上下文压缩、取消和 LLM 超时。CI、Runtime API、微信无人值守或严格成本控制场景可用 `-Dpaicli.react.hard.max.iterations=N` 显式设置正整数上限，也可用 `-Dpaicli.react.token.budget=N` 设置 Token 上限。任一预算命中后，执行路径都会关闭工具并额外进行一次最佳努力收尾，以“部分完成”交付已有结果；收尾调用不会重新进入 Agent 循环。Token 显示行 `📊 Token: 已用 X / Y` 的 Y 是软提示，不代表强制限制。
+设计取舍：交互式 Agent 默认由模型在不再调用工具时自然结束，不设置固定 50 轮天花板；长上下文模型也不再以 80% x window 作为执行硬限。默认先由 `RunawayGuard` 提醒：同一动作（工具名 + 按键名排序后的参数）或同一类错误（超时、限流、网络、鉴权、权限、找不到、参数、退出码等，归不进类别时按错误文本）连续 3 步出现时，在工具结果之后注入一次 `[runaway guard]` user 消息，每次任务最多一次，不拦截工具；被策略或 HITL 拒绝的调用不计数并打断连续计数。安全阀是 stagnation 检测（连续 5 轮相同工具调用，默认窗口必须大于提醒阈值）、上下文压缩、取消和 LLM 超时。CI、Runtime API、微信无人值守或严格成本控制场景可用 `-Dpaicli.react.hard.max.iterations=N` 显式设置正整数上限，也可用 `-Dpaicli.react.token.budget=N` 设置 Token 上限。任一预算命中后，执行路径都会关闭工具并额外进行一次最佳努力收尾，以“部分完成”交付已有结果；收尾调用不会重新进入 Agent 循环。Token 显示行 `📊 Token: 已用 X / Y` 的 Y 是软提示，不代表强制限制。
 
 ### LLM HTTP Timeout / Retry Config
 
@@ -53,9 +53,9 @@ ReAct、Plan 单任务与 SubAgent 共用 `AgentBudget`。系统属性 > 默认�
 SSE 流式下 readTimeout 是两次 read 间最大间隔，GLM-5.1 生成大段 reasoning 时可能长时间静默，所以放宽到 300 秒。
 统一重试默认值：`paicli.llm.retry.max-attempts`(3，含首次请求) / `paicli.llm.retry.base-delay.millis`(500) / `paicli.llm.retry.max-delay.millis`(30000)。仅重试 `408`、`429`、`500`、`502`、`503`、`504` 和瞬时连接 / 读取故障，使用指数退避 + jitter，并在上限内尊重 `Retry-After`；`400`、`401` 等确定性错误不重试。SSE 必须看到 `[DONE]` 或非空 `finish_reason` 才视为完整；没有流式消费者时可丢弃半截结果重发，真实消费者已收到 reasoning/content 后禁止自动重放，避免终端出现重复内容。
 DeepSeek 流式调用默认使用 HTTP/1.1，避免部分 HTTP/2 网关在长 SSE 响应中重置 stream，表现为 `stream was reset: INTERNAL_ERROR`。
-DeepSeek V4 的正文 DSML fallback 只接受单个结构完整的 tool block，工具名必须存在于本轮请求的 exposed tools，参数也必须通过严格解析；未知、重复、畸形或未授权调用保持普通文本。stream filter 只捕获疑似 DSML tail，普通 content 与 reasoning 继续逐 delta 传给 renderer。
-DeepSeek V4 使用 `thinking.type=enabled`、`reasoning_effort=max`、`temperature=1`、`top_p=0.95`；GLM-5.3 使用同档参数，并额外发送 `thinking.clear_thinking=false`、`tool_stream=true`、`stream_options.include_usage=true`；混元 Hy4 preview 使用 `reasoning_effort=high`、`stream_options.include_usage=true`。
-DeepSeek V4、GLM-5.3 与混元 Hy4 preview 的 thinking tool-call 续轮会回填 assistant `reasoning_content`。DeepSeek 与混元 Hy4 不发送图片输入：含图片的 `ContentPart` 会在请求序列化时替换成文本提示，避免不支持多模态的 API 收到 `image_url` block。
+DeepSeek Flash / V4 Pro 的正文 DSML fallback 只接受单个结构完整的 tool block，工具名必须存在于本轮请求的 exposed tools，参数也必须通过严格解析；未知、重复、畸形或未授权调用保持普通文本。stream filter 只捕获疑似 DSML tail，普通 content 与 reasoning 继续逐 delta 传给 renderer。
+DeepSeek Flash / V4 Pro 使用 `thinking.type=enabled`、`reasoning_effort=max`、`temperature=1`、`top_p=0.95`（官方思考模式忽略 temperature，该字段仅保留兼容）；GLM-5.3 使用同档参数，并额外发送 `thinking.clear_thinking=false`、`tool_stream=true`、`stream_options.include_usage=true`；混元 Hy4 preview 使用 `reasoning_effort=high`、`stream_options.include_usage=true`。
+DeepSeek Flash / V4 Pro、GLM-5.3 与混元 Hy4 preview 的 thinking tool-call 续轮会回填 assistant `reasoning_content`。DeepSeek Flash（`deepseek-flash` 及官方兼容旧名）支持图片输入；DeepSeek V4 Pro 与混元 Hy4 不发送图片输入：含图片的 `ContentPart` 会在请求序列化时替换成文本提示，避免不支持多模态的 API 收到 `image_url` block。
 
 ### Web Search Provider Config
 
@@ -94,7 +94,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 ### Long Context Engineering
 
 - `ContextProfile` 按模型 window 连续计算预算和自动压缩阈值，不再用 short/balanced/long 控制压缩行为
-- GLM-5.3-Flash: 1M / GLM-5.1: 200k / DeepSeek V4: 1M / 混元 Hy4 preview: 1M / Agnes: 1M / StepFun: 256k / Kimi K2.6: 256k / FreeLLMAPI: 128k
+- GLM-5.3-Flash: 1M / GLM-5.1: 200k / DeepSeek Flash / V4 Pro: 1M / 混元 Hy4 preview: 1M / Agnes: 1M / StepFun: 256k / Kimi K2.6: 256k / FreeLLMAPI: 128k
 - 大窗口模型仍启用自动摘要；window ≥ 32k 时可注入 MCP resource 索引，精确代码定位仍优先实时 glob/grep/read
 - prompt caching：能力声明 + cached usage 解析
 - 自动压缩阈值按 Claude Code 风格预留空间：`maxContextWindow - min(20k, window/4) - min(13k, window/8)`；200k 窗口约 167k 触发，1M 窗口约 967k 触发，小窗口会按比例缩小预留。
@@ -451,9 +451,19 @@ McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTr
 ### TUI Package
 TuiBootstrap / LanternaWindow / TuiSessionController / pane/ / hitl/ / history/ / highlight/
 
+### 手动模型目录与能力覆盖
+
+- `ModelCatalog` 合并内置 ID、当前配置 ID 和 `ProviderConfig.models`；`ModelCommands` 实现 list / refresh / add 与切换保存，失败恢复内存状态。
+- `ModelDiscovery` 只向当前客户端的 Chat Completions 地址对应的 `/models` 发 GET，使用相同凭证。超时 10 秒、响应最多 1MB / 2000 个 ID；不跟随重定向，不做推理探测，不重试鉴权/服务错误，不输出服务端错误正文。404/405 提示手动添加；不自动尝试其他服务地址。
+- 发现只保存新 ID，能力默认 128k 文本，保留旧 ID 和用户覆盖；供应商响应缺失旧 ID 不构成删除授权。刷新不改变默认供应商/模型。
+- `ModelProfile` 可覆盖 contextWindow / imageInput / thinking / reasoningEffort / reasoningHistory / dsml / maxOutputTokens；null 沿用客户端或 template。`--like` 从同供应商已登记模型复制覆盖字段并保存协议模板，避免新 ID 被名称前缀判断遗漏。
+- `LlmClientFactory` 根据 template 选择已有厂商处理，`ProfiledLlmClient` 提供有效能力，原客户端继续负责 HTTP、SSE、图片格式与 DSML。请求体始终发送用户选定的新 ID；覆盖只应用于经工厂创建的交互客户端，评测直接构造客户端的冻结参数不受该配置影响。
+- `PaiCliConfig.saveOrThrow` 用临时文件替换配置，管理命令只有写盘成功才报告保存/切换成功。当前会话持有独立客户端，add 更新正在使用的模型也需重新切换才生效。
+- `/model <provider>/<id>` 支持供应商限定和 ID 自带 `/`；裸 ID 匹配多个供应商时报歧义。补全读取当前配置，新添加条目无需重启即可出现。
+
 ### LLM Clients
 - GLMClient：glm-5.3-flash 为 1M Coding 模型，glm-5.1 为 200k，glm-5v 开头切多模态接口；`/model glm-5.3-flash` 明确切换
-- DeepSeekClient：deepseek-v4-flash，1M 文本模型；`/model deepseek-v4-flash` 明确切换，thinking + tool calls 带回 reasoning_content
+- DeepSeekClient：默认 deepseek-flash（V4.1 Flash），1M 多模态模型；`/model deepseek-flash` 明确切换，thinking + tool calls 带回 reasoning_content。旧名 deepseek-v4-flash / deepseek-v4-flash-vision-exp 由官方转到新版并支持图片；deepseek-v4-pro 仍按文本模型处理。显式配置模型不被默认值覆盖。
 - HunyuanClient：hy4-preview，默认 `https://tokenhub.tencentmaas.com/v1`，Bearer 鉴权、1M 文本模型、流式 tools 与 prompt cache；`/model hy4-preview` 明确切换，`/model hunyuan` 读取 provider 配置
 - StepClient：step-3.5-flash，可通过 STEP_BASE_URL 切通道
 - KimiClient：kimi-k2.6，thinking + tool calls 带回 reasoning_content
@@ -470,7 +480,7 @@ GLM_API_KEY=your_api_key_here
 # GLM_MODEL=glm-5.3-flash
 # GLM_MODEL=glm-5v-turbo
 # DEEPSEEK_API_KEY=your_deepseek_api_key_here
-# DEEPSEEK_MODEL=deepseek-v4-flash
+# DEEPSEEK_MODEL=deepseek-flash
 # HUNYUAN_API_KEY=your_hunyuan_api_key_here
 # HUNYUAN_MODEL=hy4-preview
 # HUNYUAN_BASE_URL=https://tokenhub.tencentmaas.com/v1
@@ -524,11 +534,11 @@ EMBEDDING_BASE_URL=http://localhost:11434
 
 ### Provider 协议差异
 
-DeepSeek V4、GLM-5.3、混元 Hy4 preview 与 Kimi thinking 模式下，assistant tool-call 消息的 `reasoning_content` 必须随下一轮请求历史带回；其他 provider 默认只把 reasoning 写日志 / 展示。
-三条高推理请求路径保持 provider 协议差异：DeepSeek V4 使用 `thinking.type=enabled`、`reasoning_effort=max`、`temperature=1`、`top_p=0.95`；GLM-5.3 在同档参数外还发送 `thinking.clear_thinking=false`、`tool_stream=true` 和 `stream_options.include_usage=true`；混元 Hy4 preview 使用 `reasoning_effort=high` 和 `stream_options.include_usage=true`。
+DeepSeek Flash / V4 Pro、GLM-5.3、混元 Hy4 preview 与 Kimi thinking 模式下，assistant tool-call 消息的 `reasoning_content` 必须随下一轮请求历史带回；其他 provider 默认只把 reasoning 写日志 / 展示。
+三条高推理请求路径保持 provider 协议差异：DeepSeek Flash / V4 Pro 使用 `thinking.type=enabled`、`reasoning_effort=max`、`temperature=1`、`top_p=0.95`（官方思考模式忽略 temperature，该字段仅保留兼容）；GLM-5.3 在同档参数外还发送 `thinking.clear_thinking=false`、`tool_stream=true` 和 `stream_options.include_usage=true`；混元 Hy4 preview 使用 `reasoning_effort=high` 和 `stream_options.include_usage=true`。
 DeepSeek SSE 调用默认强制 HTTP/1.1，避免部分网络/网关下 HTTP/2 长流被远端重置成 `stream was reset: INTERNAL_ERROR`。
-DeepSeek V4 若把工具调用编码为正文中的 DSML，adapter 只会把结构完整且工具名已在当前请求中暴露的单个 DSML block 转回 `tool_calls`；未知、畸形或未授权调用保持普通文本。流式监听器只暂存疑似 DSML block，普通正文与 reasoning 继续实时输出。
-DeepSeek 与混元 Hy4 当前按文本 provider 处理：`supportsImageInput()` 返回 false，历史或工具回灌里的图片 `ContentPart` 会在请求序列化时替换为文本提示，不能把 `image_url` block 发给对应 API。
+DeepSeek Flash / V4 Pro 若把工具调用编码为正文中的 DSML，adapter 只会把结构完整且工具名已在当前请求中暴露的单个 DSML block 转回 `tool_calls`；未知、畸形或未授权调用保持普通文本。流式监听器只暂存疑似 DSML block，普通正文与 reasoning 继续实时输出。
+DeepSeek Flash（含官方兼容旧名）通过 `supportsImageInput()` 开启图片输入，按 OpenAI 格式发送 `image_url`。DeepSeek V4 Pro 与混元 Hy4 当前按文本 provider 处理：`supportsImageInput()` 返回 false，历史或工具回灌里的图片 `ContentPart` 会在请求序列化时替换为文本提示，不能把 `image_url` block 发给对应 API。
 OpenAI-compatible LLM 请求统一由 `LlmRetryPolicy` 做有限重试：默认总尝试 3 次，仅覆盖 `408` / `429` / 可恢复 `5xx` 和瞬时连接 / 读取故障，指数退避 + jitter，并在等待上限内读取 `Retry-After`；`400` / `401` 等确定性错误直接失败。SSE 未出现 `[DONE]` 或非空 `finish_reason` 视为中断；尚未向 `StreamListener` 交付内容时可重发，已交付 reasoning/content 后不得自动重放，避免重复输出。相关系统属性见 `.env.example`。
 
 混元 provider 名为 `hunyuan`，默认模型 `hy4-preview`，默认 Base URL 为 `https://tokenhub.tencentmaas.com/v1`，走 Bearer 鉴权的 OpenAI-compatible Chat Completions，支持流式 tools、1M context window 和 prompt cache；可用 `/model hy4-preview` 明确切换，或用 `/model hunyuan` 读取 provider 配置。
@@ -604,7 +614,7 @@ Agnes provider 名为 `agnes`，默认 Base URL 为 `https://apihub.agnes-ai.com
 
 - 已交付 23 期（ReAct → Plan+DAG → Memory → RAG → Multi-Agent → HITL → 并行工具 → 多模型 → 联网 → MCP 核心 → MCP 高级 → 长上下文 → Chrome DevTools → CDP 会话复用 → Skill → TUI → LSP 诊断 → Side-Git 快照 → Prompt 分层 → Runtime API → 图片输入 → 微信 iLink 通道文本 MVP）
 
-核心内置工具 12 个：`read_file` / `write_file` / `edit_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn`。`edit_file` 仅精确替换已有文件中唯一匹配的 `old_text`，局部修改时模型无需输出整个文件；与 `write_file` 一样受路径限制、HITL 审批和审计约束。
+核心内置工具见 AGENTS.md 的 17 个清单。`edit_file` 默认只替换唯一匹配的 `old_text`，`replace_all=true` 时全部替换；匹配规则由 `TextEditMatcher` 实现（精确 → 逐行归一化模糊匹配 → 剥 read_file 行号前缀重试一次），多处匹配时报告出现次数和起始行，局部修改时模型无需输出整个文件；与 `write_file` 一样受路径限制、HITL 审批和审计约束。
 
 代码库理解默认走 Claude Code 式实时探索：`glob_files` 找候选文件、`grep_code` 精确定位符号或字符串、`read_file` 按需读取具体行段。`grep_code` 优先使用本机 `ripgrep`，不可用时回退到 Java 扫描；结果受 `max_results` / `head_limit` / `max_chars` 预算约束，返回 `partial: true` 或 `suggested_reads` 时应继续缩小搜索范围或按建议读取行段。`search_code` 是 RAG 语义辅助，适合模糊自然语言、关键词不明确、常规搜索无果、巨型/跨知识检索场景，不作为精确代码定位的首选。
 

@@ -12,6 +12,7 @@ final class CliCommandParser {
         COMPACT,
         HISTORY_CLEAR,
         SWITCH_MODEL,
+        MODEL_MANAGE,
         SWITCH_PLAN,
         SWITCH_TEAM,
         SWITCH_HITL,
@@ -106,7 +107,12 @@ final class CliCommandParser {
         }
 
         if (trimmed.regionMatches(true, 0, "/model ", 0, 7)) {
-            return new ParsedCommand(CommandType.SWITCH_MODEL, trimmed.substring(7).trim());
+            String payload = trimmed.substring(7).trim();
+            String verb = payload.split("\\s+", 2)[0];
+            if (java.util.Set.of("list", "refresh", "add").contains(verb.toLowerCase(java.util.Locale.ROOT))) {
+                return new ParsedCommand(CommandType.MODEL_MANAGE, payload);
+            }
+            return new ParsedCommand(CommandType.SWITCH_MODEL, payload);
         }
 
         if (trimmed.equalsIgnoreCase("/plan")) {

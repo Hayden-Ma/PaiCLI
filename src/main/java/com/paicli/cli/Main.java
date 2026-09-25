@@ -267,7 +267,7 @@ public class Main {
                     .terminal(terminal)
                     .history(new PaiCliHistory())
                     .completer(new PaiCliCompleter(mcpServerManager::resourceCandidates,
-                            () -> skillRegistryRef.get() == null ? List.of() : skillRegistryRef.get().allSkills()))
+                            () -> skillRegistryRef.get() == null ? List.of() : skillRegistryRef.get().allSkills(), () -> config))
                     .highlighter(new PaiCliHighlighter())
                     .build();
             lineReader.option(LineReader.Option.BRACKETED_PASTE, true);
@@ -609,14 +609,24 @@ public class Main {
                         }
                         input = command.payload();
                     }
+                    case MODEL_MANAGE -> {
+                        try {
+                            ui.println(ModelCommands.handle(command.payload(), config, llmClient));
+                        } catch (IOException | IllegalArgumentException e) {
+                            ui.println("❌ " + e.getMessage());
+                        }
+                        continue;
+                    }
                     case SWITCH_MODEL -> {
                         String selection = command.payload();
                         if (selection == null || selection.isEmpty()) {
                             ui.println("🤖 当前模型: " + llmClient.getModelName() + " (" + llmClient.getProviderName() + ")");
+                            ui.println("   管理模型: /model list / /model refresh <provider> / /model add");
                             ui.println("   GLM 明确模型：");
                             ui.println("   /model glm-5.3-flash - 切换到 GLM-5.3-Flash");
                             ui.println("   /model glm-5.1       - 切换到 GLM-5.1");
                             ui.println("   /model glm-5v-turbo  - 切换到 GLM-5V-Turbo 多模态");
+                            ui.println("   /model deepseek-flash - 切换到 DeepSeek V4.1 Flash 多模态");
                             ui.println("   其它 provider 使用你配置里的具体模型：");
                             ui.println("   /model deepseek      - 切换到 DeepSeek（读取配置模型）");
                             ui.println("   /model hunyuan       - 切换到混元（读取配置模型）");
@@ -627,23 +637,18 @@ public class Main {
                             ui.println("   /model xfyun         - 切换到讯飞星辰 MaaS（读取配置模型）");
                             ui.println("   /model agnes         - 切换到 Agnes 2.0 Flash（读取配置模型）\n");
                         } else {
-                            ModelSelection target = resolveModelSelection(selection);
-                            if (target.explicitModel()) {
-                                ensureProviderConfig(config, target.provider()).setModel(target.model());
-                            }
-                            LlmClient newClient = LlmClientFactory.create(target.provider(), config);
-                            if (newClient == null) {
-                                ui.println("❌ 切换失败：未配置 " + target.provider() + " 的 API Key\n");
-                            } else {
+                            try {
+                                ModelSelection target = resolveModelSelection(selection, config);
+                                LlmClient newClient = ModelCommands.switchModel(config, target);
                                 llmClient = newClient;
                                 llmClientRef.set(newClient);
-                                config.setDefaultProvider(target.provider());
-                                config.save();
                                 reactAgent.setLlmClient(llmClient);
                                 ui.println("✅ 已切换到: " + llmClient.getModelName() + " (" + llmClient.getProviderName() + ")");
                                 ui.println("   上下文策略: " + reactAgent.getMemoryManager().getContextProfile().summary());
                                 ui.println("   对话上下文已保留，使用 /clear 可清空\n");
                                 renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                            } catch (IOException | IllegalArgumentException e) {
+                                ui.println("❌ 切换失败: " + e.getMessage());
                             }
                         }
                         continue;
@@ -1687,9 +1692,13 @@ public class Main {
     static List<SlashCommandHint> slashCommandHints() {
         return List.of(
                 new SlashCommandHint("/model", "/model", "查看当前模型"),
+                new SlashCommandHint("/model list", "/model list", "查看模型列表与能力"),
+                new SlashCommandHint("/model refresh ", "/model refresh <provider>", "手动刷新模型列表"),
+                new SlashCommandHint("/model add ", "/model add <provider> <模型ID>", "添加或更新模型能力"),
                 new SlashCommandHint("/model glm-5.3-flash", "/model glm-5.3-flash", "切换到 GLM-5.3-Flash"),
                 new SlashCommandHint("/model glm-5.1", "/model glm-5.1", "切换到 GLM-5.1"),
                 new SlashCommandHint("/model glm-5v-turbo", "/model glm-5v-turbo", "切换到 GLM-5V-Turbo 多模态"),
+                new SlashCommandHint("/model deepseek-flash", "/model deepseek-flash", "切换到 DeepSeek V4.1 Flash 多模态"),
                 new SlashCommandHint("/model deepseek", "/model deepseek", "切换到 DeepSeek（读取配置模型）"),
                 new SlashCommandHint("/model hunyuan", "/model hunyuan", "切换到混元（读取配置模型）"),
                 new SlashCommandHint("/model hy4-preview", "/model hy4-preview", "切换到混元 Hy4 preview"),
@@ -2829,13 +2838,6 @@ public class Main {
         };
     }
 
-    /**
-     * 从 .env 文件加载 API Key
-     */
-    private static String loadApiKey() {
-        return loadConfigValue("GLM_API_KEY", null);
-    }
-
     private static void configureLogging() {
         configureLogProperty(LOG_DIR_PROPERTY, "PAICLI_LOG_DIR",
                 Path.of(System.getProperty("user.home"), ".paicli", "logs").toString());
@@ -2923,6 +2925,25 @@ public class Main {
             System.err.println("读取 .env 文件失败: " + e.getMessage());
         }
         return null;
+    }
+
+    static ModelSelection resolveModelSelection(String raw, PaiCliConfig config) {
+        String value = raw == null ? "" : raw.trim();
+        int slash = value.indexOf('/');
+        if (slash > 0 && com.paicli.llm.ModelCatalog.BUILTINS.containsKey(value.substring(0, slash))) {
+            String model = value.substring(slash + 1);
+            if (!com.paicli.llm.ModelCatalog.validModelId(model)) throw new IllegalArgumentException("模型 ID 无效");
+            return new ModelSelection(value.substring(0, slash), model, true);
+        }
+        if (!com.paicli.llm.ModelCatalog.BUILTINS.containsKey(value)) {
+            List<String> matches = new ArrayList<>();
+            for (String provider : com.paicli.llm.ModelCatalog.BUILTINS.keySet()) {
+                if (com.paicli.llm.ModelCatalog.entries(config, provider).containsKey(value)) matches.add(provider);
+            }
+            if (matches.size() > 1) throw new IllegalArgumentException("模型 ID 属于多个供应商，请使用 /model <provider>/<模型ID>");
+            if (matches.size() == 1) return new ModelSelection(matches.get(0), value, true);
+        }
+        return resolveModelSelection(raw);
     }
 
     static ModelSelection resolveModelSelection(String raw) {

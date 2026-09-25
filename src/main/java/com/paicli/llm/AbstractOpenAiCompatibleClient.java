@@ -34,6 +34,45 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
             .retryOnConnectionFailure(false)
             .build();
 
+    private ModelProfile modelProfile;
+    private String configuredModel;
+
+    final LlmClient withModelProfile(String model, ModelProfile profile) {
+        if (profile.maxOutputTokens() != null && profile.maxOutputTokens() >
+                (profile.contextWindow() == null ? maxContextWindow() : profile.contextWindow())) {
+            throw new IllegalArgumentException("max-output 不能超过模型上下文窗口");
+        }
+        this.modelProfile = profile;
+        this.configuredModel = model;
+        return new ProfiledLlmClient(this, model, profile);
+    }
+
+    final boolean effectiveImageInput() {
+        return modelProfile != null && modelProfile.imageInput() != null
+                ? modelProfile.imageInput() : supportsImageInput();
+    }
+
+    protected final boolean effectiveDsml(boolean fallback) {
+        return modelProfile != null && modelProfile.dsml() != null ? modelProfile.dsml() : fallback;
+    }
+
+    private boolean effectiveReasoningHistory() {
+        return modelProfile != null && modelProfile.reasoningHistory() != null
+                ? modelProfile.reasoningHistory() : shouldSendReasoningContentInRequestHistory();
+    }
+
+    private void applyModelProfile(ObjectNode body) {
+        if (modelProfile == null) return;
+        if (modelProfile.thinking() != null) {
+            ObjectNode thinking = body.has("thinking") && body.get("thinking").isObject()
+                    ? (ObjectNode) body.get("thinking") : body.putObject("thinking");
+            thinking.put("type", modelProfile.thinking());
+            if ("disabled".equals(modelProfile.thinking())) body.remove("reasoning_effort");
+        }
+        if (modelProfile.reasoningEffort() != null) body.put("reasoning_effort", modelProfile.reasoningEffort());
+        if (modelProfile.maxOutputTokens() != null) body.put("max_tokens", modelProfile.maxOutputTokens());
+    }
+
     private final AtomicBoolean cancellationRequested = new AtomicBoolean();
 
     private static long readTimeoutSeconds(String key, long defaultValue) {
@@ -386,7 +425,7 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
 
     private ObjectNode buildRequestBody(List<Message> messages, List<Tool> tools) {
         ObjectNode requestBody = mapper.createObjectNode();
-        requestBody.put("model", getModel());
+        requestBody.put("model", configuredModel == null ? getModel() : configuredModel);
         requestBody.put("stream", true);
 
         ArrayNode messagesArray = requestBody.putArray("messages");
@@ -394,7 +433,7 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
             ObjectNode msgNode = messagesArray.addObject();
             msgNode.put("role", msg.role());
             appendMessageContent(msgNode, msg);
-            if (shouldSendReasoningContentInRequestHistory()
+            if (effectiveReasoningHistory()
                     && "assistant".equals(msg.role())
                     && msg.reasoningContent() != null
                     && !msg.reasoningContent().isBlank()) {
@@ -430,6 +469,7 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
             }
         }
         customizeRequestBody(requestBody);
+        applyModelProfile(requestBody);
         return requestBody;
     }
 
@@ -463,7 +503,7 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
     }
 
     private void appendMessageContent(ObjectNode msgNode, Message msg) {
-        if (msg.hasImageContent() && !supportsImageInput()) {
+        if (msg.hasImageContent() && !effectiveImageInput()) {
             appendMessageContent(msgNode, msg.withoutImageContent(
                     "当前 provider/model 不支持图片附件，已省略 {count} 张；请基于文字工具结果继续，必要时改用支持视觉输入的模型。"));
             return;
@@ -550,14 +590,20 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
         }
 
         List<ToolCall> toolCalls = new ArrayList<>();
-        for (ToolCallAccumulator acc : accumulators) {
-            if (acc.id == null || acc.id.isBlank()) {
+        for (int index = 0; index < accumulators.size(); index++) {
+            ToolCallAccumulator acc = accumulators.get(index);
+            String name = acc.name.toString();
+            if (name.isBlank()) {
+                // 按 index 补位产生的空槽，没有真正的工具调用
                 continue;
             }
-            toolCalls.add(new ToolCall(
-                    acc.id,
-                    new ToolCall.Function(acc.name.toString(), acc.arguments.toString())
-            ));
+            String id = acc.id;
+            if (id == null || id.isBlank()) {
+                // 个别兼容接口流式返回不带 id；直接丢弃会让模型以为调用了工具却没有结果，补一个本地 id
+                id = "call_" + index;
+                log.warn("Streamed tool call {} arrived without id; assigned {}", name, id);
+            }
+            toolCalls.add(new ToolCall(id, new ToolCall.Function(name, acc.arguments.toString())));
         }
         return toolCalls.isEmpty() ? null : toolCalls;
     }

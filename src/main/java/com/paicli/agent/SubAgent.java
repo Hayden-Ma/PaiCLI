@@ -292,7 +292,8 @@ public class SubAgent {
 
         SubAgentStreamRenderer streamRenderer = new SubAgentStreamRenderer(name, role, out);
 
-        AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
+        AgentBudget budget = AgentBudget.fromSystemProperties();
+        RunawayGuard runawayGuard = new RunawayGuard();
 
         // 与 Agent.java 对称：主退出条件 = LLM 自决，默认不限制轮数；budget 只承担安全阀职责。
         while (true) {
@@ -349,6 +350,10 @@ public class SubAgent {
                     }
                     appendImageToolMessages(toolResults);
                     appendLoadedSkillMessage(toolResults);
+                    runawayGuard.observe(toolResults).ifPresent(reminder -> {
+                        appendConversationMessage(LlmClient.Message.user(reminder), "runaway_reminder");
+                        out.println(AnsiStyle.subtle("  ↻ [" + name + "] 检测到重复的工具调用，已提醒模型换个思路"));
+                    });
                     continue;
                 }
 

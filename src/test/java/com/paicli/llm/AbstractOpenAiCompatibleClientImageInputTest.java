@@ -7,6 +7,8 @@ import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
 import okhttp3.Protocol;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.io.TempDir;
 
 import javax.imageio.ImageIO;
@@ -140,8 +142,9 @@ class AbstractOpenAiCompatibleClientImageInputTest {
         }
     }
 
-    @Test
-    void deepseekClientKeepsReasoningContentForThinkingToolCalls() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"})
+    void deepseekClientKeepsReasoningContentForThinkingToolCalls(String model) throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse()
                     .setHeader("Content-Type", "text/event-stream")
@@ -151,7 +154,7 @@ class AbstractOpenAiCompatibleClientImageInputTest {
                             data: [DONE]
 
                             """));
-            DeepSeekClient client = new DeepSeekClient("test-key", "deepseek-v4-pro",
+            DeepSeekClient client = new DeepSeekClient("test-key", model,
                     server.url("/chat/completions").toString());
 
             client.chat(List.of(LlmClient.Message.assistant(
@@ -313,7 +316,7 @@ class AbstractOpenAiCompatibleClientImageInputTest {
     }
 
     @Test
-    void deepseekClientOmitsUnsupportedImageBlocks() throws Exception {
+    void deepseekProOmitsUnsupportedImageBlocks() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse()
                     .setHeader("Content-Type", "text/event-stream")
@@ -323,7 +326,7 @@ class AbstractOpenAiCompatibleClientImageInputTest {
                             data: [DONE]
 
                             """));
-            DeepSeekClient client = new DeepSeekClient("test-key", "deepseek-v4-flash",
+            DeepSeekClient client = new DeepSeekClient("test-key", "deepseek-v4-pro",
                     server.url("/chat/completions").toString());
 
             client.chat(List.of(LlmClient.Message.user(List.of(

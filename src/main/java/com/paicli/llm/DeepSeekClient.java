@@ -22,7 +22,7 @@ import java.util.stream.Collectors;
 public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
 
     private static final String API_URL = "https://api.deepseek.com/chat/completions";
-    private static final String DEFAULT_MODEL = "deepseek-v4-flash";
+    private static final String DEFAULT_MODEL = "deepseek-flash";
     private static final OkHttpClient HTTP_1_1_CLIENT = SHARED_HTTP_CLIENT.newBuilder()
             .protocols(List.of(Protocol.HTTP_1_1))
             .build();
@@ -105,7 +105,7 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
         if (benchmarkMaxOutputTokens != null) {
             requestBody.put("max_tokens", benchmarkMaxOutputTokens);
         }
-        if (!isDeepSeekV4()) {
+        if (!usesV4Protocol()) {
             return;
         }
         requestBody.put("temperature", 1.0);
@@ -141,7 +141,11 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
 
     @Override
     public boolean supportsImageInput() {
-        return false;
+        // The official API routes both retired Flash aliases to V4.1 Flash.
+        return switch (model.trim().toLowerCase(Locale.ROOT)) {
+            case "deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp" -> true;
+            default -> false;
+        };
     }
 
     @Override
@@ -174,8 +178,9 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
         return "automatic-prefix-cache";
     }
 
-    private boolean isDeepSeekV4() {
-        return model != null && model.trim().toLowerCase(Locale.ROOT).startsWith("deepseek-v4-");
+    private boolean usesV4Protocol() {
+        String normalized = model.trim().toLowerCase(Locale.ROOT);
+        return normalized.equals("deepseek-flash") || normalized.startsWith("deepseek-v4-");
     }
 
     private static int requireBenchmarkMaxOutputTokens(int value) {
@@ -187,14 +192,14 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
     }
 
     private boolean shouldFilterContentForDsml(List<Tool> tools, StreamListener listener) {
-        return isDeepSeekV4()
+        return effectiveDsml(usesV4Protocol())
                 && tools != null
                 && !tools.isEmpty()
                 && listener != StreamListener.NO_OP;
     }
 
     private ChatResponse normalizeDsml(ChatResponse response, List<Tool> tools) {
-        if (!isDeepSeekV4() || response == null || response.hasToolCalls()
+        if (!effectiveDsml(usesV4Protocol()) || response == null || response.hasToolCalls()
                 || response.content() == null || response.content().isBlank()
                 || tools == null || tools.isEmpty()) {
             return response;

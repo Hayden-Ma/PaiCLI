@@ -391,11 +391,14 @@ public class ToolRegistry {
 
         tools.put("edit_file", new Tool(
                 "edit_file",
-                "精确替换项目内已有文件的一处文本；old_text 必须恰好匹配一次，模型无需输出整个文件",
+                "精确替换项目内已有文件里的文本，无需输出整个文件。old_text 要和文件内容一致（含缩进），"
+                        + "默认必须恰好匹配一处，匹配多处时报错并给出所在行；replace_all=true 时替换全部匹配。"
+                        + "片段来自记忆或较早的读取时，先用 read_file 重新读取。新建文件用 write_file",
                 createParameters(
                         new Param("path", "string", "已有文件路径", true),
-                        new Param("old_text", "string", "要替换的原文片段，必须唯一匹配", true),
-                        new Param("new_text", "string", "替换后的文本；空字符串表示删除原文片段", true)
+                        new Param("old_text", "string", "要替换的原文片段，默认必须唯一匹配", true),
+                        new Param("new_text", "string", "替换后的文本；空字符串表示删除原文片段", true),
+                        new Param("replace_all", "boolean", "为 true 时替换 old_text 的所有匹配，默认 false", false)
                 ),
                 this::editFile
         ));
@@ -458,6 +461,7 @@ public class ToolRegistry {
         String path = args.get("path");
         String oldText = args.get("old_text");
         String newText = args.get("new_text");
+        boolean replaceAll = Boolean.parseBoolean(args.get("replace_all"));
         if (oldText == null || oldText.isEmpty() || newText == null) {
             throw new IllegalArgumentException("old_text 必须非空，new_text 必须提供");
         }
@@ -467,22 +471,11 @@ public class ToolRegistry {
         }
         try {
             String before = Files.readString(safe, StandardCharsets.UTF_8);
-            String matchText = oldText;
-            String replacement = newText;
-            int first = before.indexOf(matchText);
-            if (first < 0 && before.contains("\r\n") && oldText.contains("\n")) {
-                // 模型输出的片段通常只用 \n；CRLF 文件按 CRLF 重新匹配，替换文本也转成 CRLF，保持原换行风格
-                matchText = toCrlf(oldText);
-                replacement = toCrlf(newText);
-                first = before.indexOf(matchText);
+            TextEditMatcher.Result edit = TextEditMatcher.apply(before, oldText, newText, replaceAll, path);
+            String after = edit.content();
+            if (after.equals(before)) {
+                throw new IllegalArgumentException("替换前后内容相同，文件未修改: " + path);
             }
-            if (first < 0) {
-                throw new IllegalArgumentException("old_text 在文件中不存在: " + path);
-            }
-            if (before.indexOf(matchText, first + 1) >= 0) {
-                throw new IllegalArgumentException("old_text 在文件中出现多次，请提供更长的上下文: " + path);
-            }
-            String after = before.substring(0, first) + replacement + before.substring(first + matchText.length());
             int contentBytes = after.getBytes(StandardCharsets.UTF_8).length;
             if (contentBytes > MAX_WRITE_FILE_BYTES) {
                 throw new PolicyException("编辑后文件 " + contentBytes + " 字节超过 "
@@ -495,14 +488,10 @@ public class ToolRegistry {
                 // diff 展示失败不影响已完成的文件编辑
             }
             runPostEditLspHook(path, safe);
-            return "文件已编辑: " + path;
+            return replaceAll ? "文件已编辑: " + path + "（替换 " + edit.replacements() + " 处）" : "文件已编辑: " + path;
         } catch (IOException e) {
             throw new IllegalStateException("编辑文件失败: " + e.getMessage(), e);
         }
-    }
-
-    private static String toCrlf(String text) {
-        return text.replace("\r\n", "\n").replace("\n", "\r\n");
     }
 
     private String readFileForTool(Path file, Map<String, String> args) throws IOException {
@@ -777,7 +766,7 @@ public class ToolRegistry {
         tools.put("web_search", new Tool(
                 "web_search",
                 "搜索互联网，获取实时信息（最新版本、官方文档、技术资讯等）。" +
-                        "支持 SerpAPI（默认）和 SearXNG（自托管）两种 provider，由 SEARCH_PROVIDER 环境变量切换。",
+                        "provider 按配置自动选择：有 GLM_API_KEY 用智谱搜索，其次 SerpAPI、自托管 SearXNG，SEARCH_PROVIDER 可显式指定。",
                 createParameters(
                         new Param("query", "string", "搜索关键词，例如'Java 21 新特性'、'Spring Boot 3.3 release notes'", true),
                         new Param("top_k", "integer", "返回结果数量（默认5）", false)

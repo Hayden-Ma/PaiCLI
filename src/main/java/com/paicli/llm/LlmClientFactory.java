@@ -7,6 +7,10 @@ public class LlmClientFactory {
     private LlmClientFactory() {}
 
     public static LlmClient create(String provider, PaiCliConfig config) {
+        return create(provider, null, config);
+    }
+
+    public static LlmClient create(String provider, String selectedModel, PaiCliConfig config) {
         if (provider == null) return null;
 
         String normalized = normalizeProvider(provider);
@@ -19,14 +23,26 @@ public class LlmClientFactory {
             return null;
         }
 
-        String model = firstConfigured(config.getModel(normalized),
-                configuredProvider.equals(normalized) ? null : config.getModel(configuredProvider));
+        String model = firstConfigured(selectedModel, firstConfigured(config.getModel(normalized),
+                configuredProvider.equals(normalized) ? null : config.getModel(configuredProvider)));
         String baseUrl = firstConfigured(config.getBaseUrl(normalized),
                 configuredProvider.equals(normalized) ? null : config.getBaseUrl(configuredProvider));
         String loraId = firstConfigured(config.getLoraId(normalized),
                 configuredProvider.equals(normalized) ? null : config.getLoraId(configuredProvider));
 
-        return switch (normalized) {
+        AbstractOpenAiCompatibleClient client = createClient(normalized, apiKey, model, baseUrl, loraId);
+        if (client == null) return null;
+        String requestedModel = client.getModelName();
+        PaiCliConfig.ProviderConfig providerConfig = config.getProviders().get(normalized);
+        ModelProfile profile = providerConfig == null ? null : providerConfig.getModels().get(requestedModel);
+        if (profile == null) return client;
+        if (profile.template() != null) client = createClient(normalized, apiKey, profile.template(), baseUrl, loraId);
+        return client.withModelProfile(requestedModel, profile);
+    }
+
+    private static AbstractOpenAiCompatibleClient createClient(String provider, String apiKey, String model,
+                                                               String baseUrl, String loraId) {
+        return switch (provider) {
             case "glm" -> new GLMClient(apiKey, model);
             case "deepseek" -> new DeepSeekClient(apiKey, model);
             case "hunyuan" -> new HunyuanClient(apiKey, model, baseUrl);

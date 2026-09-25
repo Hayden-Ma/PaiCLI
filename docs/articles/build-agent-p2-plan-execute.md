@@ -14,25 +14,25 @@ date: 2026-04-19
 
 大家好，我是二哥呀。
 
+Opus 5.5 发布后我觉得真的太强大了，加上GPT-6 Astra也很牛逼，我就决定升级一下 PaiCLI 的代码和教程，感觉新的模型能力，真的，和半年前有了天差地别，太恐怖了。
+
+我们就从第二期开始，第一期审查了一下问题不大，毕竟ReAct就那么多东西。
+
+好。
+
 PaiCLI 的第 1 期我们已经实现了，一个基础的 ReAct Agent，能一步一步执行任务，一边思考一边行动。
 
 但这种方式有个问题，**复杂任务需要很多轮对话**，每一步都需要调用 LLM，走到哪算哪，用户事先也不知道它打算怎么做。
 
-比如“创建一个 Spring Boot 项目，写个 REST API，然后打包运行”这个任务。
-
-![](https://cdn.paicoding.com/paicoding/7128dac401f41d2b2ede4c193e240e9d.png)
-
-图中是 ReAct 多轮调用的示意，调用次数取决于模型是否继续使用工具，不能据此推断另一种模式只调用一次模型。
+![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924182030-166934ea.png)
 
 第 2 期，我们来实现 **Plan-and-Execute** 模式，先生成任务计划，再让执行器逐项完成。这里的“规划一次”只描述首次生成计划；执行每个任务仍会调用 LLM，任务中使用工具后还可能继续调用，失败或用户补充要求时也可能重新规划。
-
-这篇文章写于 4 月，9 月我按最新源码校正了一遍。这几个月 Plan 模式改了不少地方，计划 JSON 从“能解析就行”改成了严格校验，重新规划加了次数上限，依赖失败的下游任务会明确标成跳过，失败时的汇总也不再丢掉已经完成的结果。
 
 ## 01、Plan-and-Execute 的核心思想
 
 Plan-and-Execute 的核心是把任务规划与逐项执行分开。
 
-规划器决定任务及其依赖，执行器根据任务结果调用模型和工具；它们的调用次数不能混为一谈。
+规划器决定任务及其依赖，执行器根据任务结果调用模型和工具。
 
 ```text
 复杂目标 → Planner（首次规划：1 次 LLM 调用）→ 任务 DAG
@@ -50,8 +50,6 @@ Plan-and-Execute 的核心是把任务规划与逐项执行分开。
 4. **失败可处理**：任务失败后可以依据已完成的进度重新规划；是否需要重做步骤取决于新计划
 
 代价是规划本身增加了一次模型请求和等待时间。如果执行中发现计划有问题，还可能再次请求模型重规划；能否节省 Token 和时间，要看任务数、每个任务的执行轮数及并行程度。
-
-![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924182030-166934ea.png)
 
 ## 02、任务建模
 
@@ -94,9 +92,9 @@ public class Task {
 - `ANALYSIS`：分析结果，中间决策
 - `VERIFICATION`：验证结果，检查正确性
 
-第 6 种 `PLANNING` 是早期设计留下的，现在的解析逻辑里没有这个分支，模型写了也会被当成 `ANALYSIS`。任务类型只作为提示词变量交给执行器，不限制任务能用哪些工具。
+第 6 种 `PLANNING` 在解析逻辑里没有对应分支，模型写了也会被当成 `ANALYSIS`。任务类型只作为提示词变量交给执行器，不限制任务能用哪些工具。
 
-任务状态有 5 种，`PENDING`、`RUNNING`、`COMPLETED`、`FAILED`、`SKIPPED`。`SKIPPED` 在很长一段时间里其实用不到，依赖失败的下游任务一直停在 `PENDING`。9 月的修复补上了这一步，下文讲失败处理时再展开。
+任务状态有 5 种，`PENDING`、`RUNNING`、`COMPLETED`、`FAILED`、`SKIPPED`。`SKIPPED` 用在两种情况：依赖的任务失败了，或者重新规划达到了上限，下文讲失败处理时再展开。
 
 ### 任务的生命周期
 
@@ -221,8 +219,6 @@ private boolean topologicalSort(Task task, Set<String> visited, Set<String> visi
 }
 ```
 
-旧版文章的代码在最后多写了一行 `Collections.reverse(executionOrder)`。沿依赖方向做后序遍历，结果本来就是依赖在前，再反转一次顺序就错了，源码里也没有这一行。同一节开头还讲了“找入度为 0 的节点”，那是 Kahn 算法的思路，PaiCLI 的 Plan 模式没有用它，只有 Team 模式的计划解析用入度法检测环。
-
 ![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924182251-1c5c3b96.png)
 
 算法用两个集合来跟踪状态，`visiting` 是当前递归栈中的节点，用于检测环；`visited` 是已处理完的节点，用于避免重复处理。
@@ -270,7 +266,7 @@ public ExecutionPlan createPlan(String goal) throws IOException {
 }
 ```
 
-和 4 月的版本相比有三处变化。提示词从 Java 常量挪到了 `prompts/modes/planner.md`，由提示词组装模块拼装，并带上 PAI.md 项目记忆。规划请求不带工具，流式只显示模型的思考过程。另外开头多了一个简单任务的短路判断，第 04 节再讲。
+有三个地方值得注意。提示词放在 `prompts/modes/planner.md`，由提示词组装模块拼装，并带上 PAI.md 项目记忆。规划请求不带工具，流式只显示模型的思考过程。开头还有一个简单任务的短路判断，第 04 节再讲。
 
 ![](https://cdn.paicoding.com/paicoding/105743aeb47ee7523d8abfc4841f54c5.png)
 
@@ -291,7 +287,7 @@ public ExecutionPlan createPlan(String goal) throws IOException {
 
 **第二，定义任务类型**。列出 5 种可用类型和用途，让 LLM 知道什么场景用什么类型。
 
-**第三，给出约束规则**。现在的规则有 8 条：
+**第三，给出约束规则**。一共 8 条：
 
 ```
 1. 每个任务必须有唯一 id，如 task_1、task_2
@@ -304,15 +300,13 @@ public ExecutionPlan createPlan(String goal) throws IOException {
 8. 如果一个任务一步就能完成，就保持最短计划
 ```
 
-第 5、7、8 条是后来加的，针对的是简单任务被拆得过细、为了保存中间结果额外建读写任务这两种情况。
+第 5、7、8 条专门用来防过度规划，一种是简单任务被拆得过细，另一种是为了保存中间结果额外建读写任务。
 
 ![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924182401-d5181230.png)
 
 ### 解析 LLM 输出
 
-旧版文章写的是“LLM 生成的任务 ID 可能重复或格式不统一，我们需要重新映射”。当时的代码遇到重复 id 会直接覆盖，依赖里引用了不存在的 id 也会悄悄丢掉这条边，计划看起来能跑，其实已经不是模型原本的意思了。
-
-9 月 23 日这部分改成了严格校验，任何一项不合格都直接失败。
+模型输出的计划要经过严格校验，任何一项不合格都直接失败，不做静默修补。比如依赖里引用了一个不存在的 id，如果悄悄丢掉这条边，计划看起来能跑，执行顺序却已经不是模型本来的意思了。
 
 ````java
 String cleaned = planJson.replaceAll("```json\\s*", "")
@@ -344,7 +338,7 @@ if (!plan.computeExecutionOrder()) {
 }
 ````
 
-两遍扫描保留了下来。LLM 可能先定义 task_2，再定义 task_1，而 task_2 依赖 task_1。第一遍先登记所有 id，第二遍再建立依赖，前向引用就不会出问题。不管模型给的 id 叫什么，最终都按数组顺序重新编号成 `task_1` 到 `task_N`。
+解析分两遍扫描。LLM 可能先定义 task_2，再定义 task_1，而 task_2 依赖 task_1。第一遍先登记所有 id，第二遍再建立依赖，前向引用就不会出问题。不管模型给的 id 叫什么，最终都按数组顺序重新编号成 `task_1` 到 `task_N`。
 
 ![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924182549-5438f8da.png)
 
@@ -371,7 +365,7 @@ return createPlan(context.toString());
 
 上下文里只有已完成任务的 id 和描述，没有它们的执行结果。新生成的计划是一份全新的 `ExecutionPlan`，**不会继承**旧计划的完成状态或执行产物，所以不能保证失败后只重做失败的那一步，执行前仍要检查新计划有没有重复操作。
 
-这里原来还有一个隐患，重新规划没有次数上限。新计划只要又在完成一半之前失败，就会再规划一次，一直递归下去。9 月 24 日加了上限，默认最多重新规划 2 次，可以用 `PAICLI_PLAN_MAX_REPLANS` 调整。
+重新规划有次数上限。如果不设上限，新计划只要又在完成一半之前失败，就会再规划一次，一直递归下去。默认最多重新规划 2 次，可以用 `PAICLI_PLAN_MAX_REPLANS` 调整。
 
 ```java
 if (!stopAfterBatch && plan.getProgress() < 0.5) {
@@ -392,10 +386,10 @@ if (!stopAfterBatch && plan.getProgress() < 0.5) {
 
 ## 04、PlanExecuteAgent
 
-现在把规划器和执行器整合起来。4 月的版本是“显示计划，再按拓扑序一个个执行”，现在的主流程多了审阅和按轮并行。
+现在把规划器和执行器整合起来。主流程分两步：先让用户审阅计划，再按轮找出可执行的任务并行执行。
 
 ```java
-while (true) {
+while (!stopAfterBatch) {
     if (CancellationContext.isCancelled()) {
         return "⏹️ 已取消当前计划执行。";
     }
@@ -450,7 +444,7 @@ context.append("请执行此任务。如果是ANALYSIS或VERIFICATION类型，�
 
 联网权限也按依赖关系传递。每个任务从本轮的工具策略复制一份自己的副本，并行的兄弟任务之间不共享新发现的 URL。上游任务通过 `web_search` 拿到的可信 URL，只会传给 DAG 里声明依赖它的下游；上游回复正文里写的网址不算数，下游想抓取也会被拒绝。这样一个任务读到的网页内容再怎么诱导，也没法让另一个分支去访问它指定的地址。
 
-旧版任务循环写死了最多 5 轮，复杂一点的任务可能还没做完就被截断。现在改成循环预算机制，默认不限轮数，只开停滞检测，连续 3 轮工具调用完全相同就判定原地打转。预算触发后，程序关掉工具再调一次模型，让它基于已有结果收尾，任务结果标“⚠️ 部分完成”。
+任务循环不设固定轮数上限，写死轮数的话，复杂一点的任务可能还没做完就被截断。兜底靠循环预算，默认只开停滞检测，连续 3 轮工具调用完全相同就判定原地打转。预算触发后，程序关掉工具再调一次模型，让它基于已有结果收尾，任务结果标“⚠️ 部分完成”。
 
 什么才算任务失败？只有任务执行过程中抛出异常，比如模型调用失败。工具报错、预算触发、用户取消都不算失败，它们会作为结果正常交给后续任务。
 
@@ -460,7 +454,7 @@ context.append("请执行此任务。如果是ANALYSIS或VERIFICATION类型，�
 
 用户输入 `/plan <任务>` 时，PaiCLI 会进入 Plan-and-Execute 模式。规划器内部有一个简单任务判断，三个条件同时满足才跳过 LLM 规划。
 
-- 不含“然后、并且、再、最后、同时、先、之后、接着、以及”这类多步提示词
+- 不含“然后、并且、并、再、最后、同时、先、之后、接着、以及”这类多步提示词
 - 去掉首尾空白后不超过 30 个字符
 - 含“列出、查看、读取、显示、执行、运行、搜索、当前目录、文件”之一
 
@@ -482,7 +476,7 @@ context.append("请执行此任务。如果是ANALYSIS或VERIFICATION类型，�
    - I：输入补充要求后重新规划
 ```
 
-Ctrl+O 展开的是带状态图标的完整任务图。旧版文章说“执行过程中实时更新状态图标”，现在的代码没有这个功能，执行期间只有逐行日志，比如“▶️ 执行任务”“⚡ 本轮并行执行 N 个任务”“✅ 完成”“❌ 失败”。
+Ctrl+O 展开的是带状态图标的完整任务图。执行期间不会刷新这张图，只输出逐行日志，比如“▶️ 执行任务”“⚡ 本轮并行执行 N 个任务”“✅ 完成”“❌ 失败”。
 
 ![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924182939-aa5b4d92.png)
 
@@ -505,17 +499,13 @@ java -jar target/paicli-1.0-SNAPSHOT.jar
 
 ![](https://cdn.paicoding.com/paicoding/5350cd11f2aba24ef9f3ed20a0588f96.png)
 
+计划生成后会先停在审阅环节，回车确认之后才开始执行。
+
+![](https://cdn.paicoding.com/paicoding/598c7bbdfce39dc87a1e0b05280e2439.jpg)
+
 然后开始执行计划。
 
 ![](https://cdn.paicoding.com/paicoding/fc0313d703fbfa1dc8858be32217b52e.jpg)
-
-第 2 期刚上线时，计划一生成就直接执行，用户没有机会插话。后来加了上一节讲的审阅环节，这部分当时是让 Codex 帮忙补全的。
-
-![](https://cdn.paicoding.com/paicoding/e9dd603e9c4a1aad1f2b52cba8ebd46e.png)
-
-加上审阅之后的效果。
-
-![](https://cdn.paicoding.com/paicoding/598c7bbdfce39dc87a1e0b05280e2439.jpg)
 
 整个流程清晰可见，每一步都知道在做什么。
 
@@ -566,7 +556,7 @@ ExecutorService executor = Executors.newFixedThreadPool(Math.min(executableTasks
 
 ![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924183208-2fe0d6d3.png)
 
-写入冲突分两层看。计划层面，两个并行任务写同一个文件目前没有专门的锁，要靠规划时把它们设计成有依赖关系。工具层面，9 月 24 日修了一个更常见的问题，同一轮模型返回多个 `edit_file`，旧代码会并行执行，它们各自读文件、改一处、整文件写回，后写的会把先写的改动盖掉。代码审查时实测过同一个文件的并发编辑，50 轮里有 49 轮丢了改动，工具却都报告成功。现在只有读文件、搜索这类只读工具才并行，写文件、执行命令、MCP 调用一律按模型给出的顺序串行。
+写入冲突分两层看。计划层面，两个并行任务写同一个文件目前没有专门的锁，要靠规划时把它们设计成有依赖关系。工具层面，同一轮模型可能返回多个 `edit_file`，每次编辑都是读文件、改一处、整文件写回，如果并行执行，后写的会把先写的改动盖掉，工具却都报告成功。所以只有读文件、搜索这类只读工具才并行，写文件、执行命令、MCP 调用一律按模型给出的顺序串行。
 
 失败处理见下一小节。
 
@@ -596,9 +586,7 @@ ExecutorService executor = Executors.newFixedThreadPool(Math.min(executableTasks
 
 一个任务失败后，执行器先看完成度。低于一半且没到重规划上限，就重新规划；否则继续执行不受影响的任务。
 
-9 月 24 日之前，这里有两个问题。依赖失败任务的下游一直停在 `PENDING`，最后的汇总也看不出它们为什么没执行；只要有任务失败，最终返回就只剩“任务 X 失败”这几行，前面已经完成的结果一条都不给。
-
-现在失败任务的直接和间接下游都会标成 `SKIPPED`，汇总先列已完成任务的结果，再列失败和跳过的原因。格式如下，内容为示意。
+失败任务的直接和间接下游都会标成 `SKIPPED`，不会一直停在 `PENDING`，汇总里能看到它们为什么没执行。汇总先列已完成任务的结果，再列失败和跳过的原因，已经做完的工作不会因为某个任务失败就丢掉。格式如下，内容为示意。
 
 ```
 ⚠️ 计划部分完成，有任务失败。
@@ -629,8 +617,6 @@ ExecutorService executor = Executors.newFixedThreadPool(Math.min(executableTasks
 ```
 
 分层规划的好处是高层计划稳定，低层计划可以灵活调整。某个阶段的详细计划有问题，只需要重规划这个阶段，不影响整体。
-
-旧版文章在这里还画了一个 `validatePlan` 做规划验证。重复 id、依赖是否存在、循环依赖这三项，现在都已经放进解析阶段直接校验了；任务类型是否合法这一项没有校验，写错就按分析任务处理。
 
 ## PaiCLI 如何写到简历上？
 

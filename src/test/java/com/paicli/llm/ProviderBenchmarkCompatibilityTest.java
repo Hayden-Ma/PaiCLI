@@ -6,6 +6,8 @@ import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -73,17 +75,18 @@ class ProviderBenchmarkCompatibilityTest {
         }
     }
 
-    @Test
-    void deepSeekV4UsesHighReasoningBenchmarkSettings() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"})
+    void deepSeekV4UsesHighReasoningBenchmarkSettings(String model) throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             enqueueTextResponse(server);
             DeepSeekClient client = new DeepSeekClient(
-                    "test-key", "deepseek-v4-flash", server.url("/chat/completions").toString());
+                    "test-key", model, server.url("/chat/completions").toString());
 
             client.chat(List.of(LlmClient.Message.user("你好")), null);
 
             JsonNode root = requestBody(server.takeRequest());
-            assertEquals("deepseek-v4-flash", root.path("model").asText());
+            assertEquals(model, root.path("model").asText());
             assertEquals(1.0, root.path("temperature").asDouble());
             assertEquals(0.95, root.path("top_p").asDouble());
             assertEquals("max", root.path("reasoning_effort").asText());
@@ -110,8 +113,9 @@ class ProviderBenchmarkCompatibilityTest {
         }
     }
 
-    @Test
-    void deepSeekV4StreamsOrdinaryMultiDeltaContentExactlyOnce() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"})
+    void deepSeekV4StreamsOrdinaryMultiDeltaContentExactlyOnce(String model) throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             List<String> contentDeltas = List.of(
                     "第一段普通正文会立即到达监听器。",
@@ -119,7 +123,7 @@ class ProviderBenchmarkCompatibilityTest {
                     "第三段只在末尾完成剩余内容。");
             enqueueAssistantDeltas(server, List.of(), contentDeltas);
             DeepSeekClient client = new DeepSeekClient(
-                    "test-key", "deepseek-v4-flash", server.url("/chat/completions").toString());
+                    "test-key", model, server.url("/chat/completions").toString());
             List<String> streamedDeltas = new ArrayList<>();
 
             LlmClient.ChatResponse response = client.chat(
@@ -139,8 +143,9 @@ class ProviderBenchmarkCompatibilityTest {
         }
     }
 
-    @Test
-    void deepSeekV4ConvertsExposedDsmlToolCallAndCleansContent() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"})
+    void deepSeekV4ConvertsExposedDsmlToolCallAndCleansContent(String model) throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             List<String> dsmlDeltas = List.of(
                     "准备检索。\n<｜｜DS",
@@ -158,7 +163,7 @@ class ProviderBenchmarkCompatibilityTest {
             List<String> reasoningDeltas = List.of("先分析任务。", "再调用工具。");
             enqueueAssistantDeltas(server, reasoningDeltas, dsmlDeltas);
             DeepSeekClient client = new DeepSeekClient(
-                    "test-key", "deepseek-v4-flash", server.url("/chat/completions").toString());
+                    "test-key", model, server.url("/chat/completions").toString());
             StringBuilder streamedContent = new StringBuilder();
             List<String> streamedReasoning = new ArrayList<>();
 
@@ -203,8 +208,9 @@ class ProviderBenchmarkCompatibilityTest {
         }
     }
 
-    @Test
-    void deepSeekV4RejectsDsmlJsonWithTrailingTokens() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"})
+    void deepSeekV4RejectsDsmlJsonWithTrailingTokens(String model) throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             String dsmlContent = """
                     <｜｜DSML｜｜tool_calls>
@@ -214,7 +220,7 @@ class ProviderBenchmarkCompatibilityTest {
                     </｜｜DSML｜｜tool_calls>""";
             enqueueAssistantContent(server, dsmlContent);
             DeepSeekClient client = new DeepSeekClient(
-                    "test-key", "deepseek-v4-flash", server.url("/chat/completions").toString());
+                    "test-key", model, server.url("/chat/completions").toString());
             List<String> streamedDeltas = new ArrayList<>();
 
             LlmClient.ChatResponse response = client.chat(
@@ -234,8 +240,9 @@ class ProviderBenchmarkCompatibilityTest {
         }
     }
 
-    @Test
-    void deepSeekV4KeepsUnknownDsmlToolAsPlainText() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"})
+    void deepSeekV4KeepsUnknownDsmlToolAsPlainText(String model) throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             String unknownBlock = """
                     <｜｜DSML｜｜tool_calls>
@@ -246,7 +253,7 @@ class ProviderBenchmarkCompatibilityTest {
             String dsmlContent = "安全前缀。\n" + unknownBlock + "\n安全后缀。";
             enqueueAssistantContent(server, dsmlContent);
             DeepSeekClient client = new DeepSeekClient(
-                    "test-key", "deepseek-v4-flash", server.url("/chat/completions").toString());
+                    "test-key", model, server.url("/chat/completions").toString());
             List<String> streamedDeltas = new ArrayList<>();
 
             LlmClient.ChatResponse response = client.chat(
@@ -268,12 +275,13 @@ class ProviderBenchmarkCompatibilityTest {
         }
     }
 
-    @Test
-    void deepSeekV4LeavesNativeToolCallsUnchanged() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"})
+    void deepSeekV4LeavesNativeToolCallsUnchanged(String model) throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             enqueueNativeToolCallResponse(server);
             DeepSeekClient client = new DeepSeekClient(
-                    "test-key", "deepseek-v4-flash", server.url("/chat/completions").toString());
+                    "test-key", model, server.url("/chat/completions").toString());
             List<String> streamedDeltas = new ArrayList<>();
 
             LlmClient.ChatResponse response = client.chat(

@@ -17,7 +17,6 @@ import com.paicli.llm.LlmClient;
  */
 public record ContextProfile(
         int maxContextWindow,
-        int agentTokenBudget,
         double compressionTriggerRatio,
         int memoryContextTokens,
         boolean mcpResourceIndexEnabled,
@@ -34,7 +33,6 @@ public record ContextProfile(
         int window = Math.max(MIN_WINDOW, llmClient == null ? 128_000 : llmClient.maxContextWindow());
         return new ContextProfile(
                 window,
-                agentBudget(window),
                 compressionTriggerRatio(window),
                 memoryContextTokens(window),
                 window >= MCP_RESOURCE_INDEX_MIN_WINDOW,
@@ -47,7 +45,6 @@ public record ContextProfile(
         int window = Math.max(MIN_WINDOW, contextWindow);
         return new ContextProfile(
                 window,
-                agentBudget(window),
                 compressionTriggerRatio(window),
                 memoryContextTokens(window),
                 window >= MCP_RESOURCE_INDEX_MIN_WINDOW,
@@ -72,11 +69,6 @@ public record ContextProfile(
                 + " | 压缩阈值: " + (int) (compressionTriggerRatio * 100) + "% (" + compressionTriggerTokens() + " tokens)"
                 + " | MCP resource 索引: " + (mcpResourceIndexEnabled ? "on" : "off")
                 + " | prompt cache: " + promptCacheMode;
-    }
-
-    private static int agentBudget(int window) {
-        // Agent 单次 run 的 token 上限（input + output 累计），保 20% 余量给响应突发
-        return Math.max(4_000, (int) Math.floor(window * 0.8));
     }
 
     private static int memoryContextTokens(int window) {

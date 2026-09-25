@@ -1,7 +1,6 @@
 package com.paicli.agent;
 
 import com.paicli.llm.LlmClient;
-import com.paicli.context.ContextProfile;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -18,12 +17,14 @@ import java.util.Locale;
  * 2. 停滞检测：连续 N 次工具调用使用完全相同的工具名 + 参数，判定为死循环
  * 3. 可选硬轮数兜底：只有显式配置 hardMaxIterations 时才限制迭代轮数
  *
- * 这三个条件按"先到先触发"判定，任何一个命中都会让循环结束。
+ * 这三个条件按"先到先触发"判定。命中后调用方关闭工具，再请求一次模型做部分完成收尾。
+ * 停滞检测是兜底：重复达到 {@link RunawayGuard} 的提醒阈值时会先提醒模型换思路，
+ * 默认窗口比提醒阈值大，提醒之后仍原样重复才会触发这里。
  *
  * 配置读取顺序（以 {@link #fromSystemProperties()} 为准）：
  * 1. 系统属性：{@code paicli.react.token.budget} / {@code paicli.react.stagnation.window} /
  *    {@code paicli.react.hard.max.iterations}
- * 2. 默认值：token 预算 = Integer.MAX_VALUE（实质不限）/ 连续 3 次相同工具调用 / 不限制轮数
+ * 2. 默认值：token 预算 = Integer.MAX_VALUE（实质不限）/ 连续 5 次相同工具调用 / 不限制轮数
  *
  * 设计取舍：长上下文模型（GLM-5.1 200k / DeepSeek V4 1M）配合套餐用户的"无限 token"诉求，
  * 默认不再以 80% × window 为硬限——让 LLM 自然停在它该停的地方。需要严格成本控制的
@@ -41,7 +42,7 @@ public class AgentBudget {
         HARD_ITERATION_LIMIT
     }
 
-    private static final int DEFAULT_STAGNATION_WINDOW = 3;
+    static final int DEFAULT_STAGNATION_WINDOW = 5;
     public static final int UNLIMITED_ITERATIONS = Integer.MAX_VALUE;
     private static final int DEFAULT_HARD_MAX_ITERATIONS = UNLIMITED_ITERATIONS;
 
@@ -72,12 +73,7 @@ public class AgentBudget {
     }
 
     public static AgentBudget fromSystemProperties() {
-        return fromLlmClient(null);
-    }
-
-    public static AgentBudget fromLlmClient(LlmClient llmClient) {
-        // ContextProfile 仍按 80% × window 计算 agentTokenBudget，用于 /context 与 token stats 的"软提示"显示；
-        // AgentBudget 默认不限制轮数，避免长上下文 + 套餐用户被固定轮数墙卡住。
+        // 默认不限制 token 和轮数，避免长上下文 + 套餐用户被固定轮数墙卡住。
         // 显式 -Dpaicli.react.token.budget=N / -Dpaicli.react.hard.max.iterations=N
         // 仍可为无人值守或成本敏感场景启用硬预算。
         return new AgentBudget(

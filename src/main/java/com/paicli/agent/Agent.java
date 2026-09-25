@@ -192,7 +192,8 @@ public class Agent {
         StreamRenderer streamRenderer = new StreamRenderer(renderer());
 
         long startNanos = System.nanoTime();
-        AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
+        AgentBudget budget = AgentBudget.fromSystemProperties();
+        RunawayGuard runawayGuard = new RunawayGuard();
         pushStatus(budget, startNanos, "running");
 
         // 主退出条件 = LLM 自己决定（不再调用工具就返回）；
@@ -266,6 +267,7 @@ public class Agent {
                     }
                     appendImageToolMessages(toolResults);
                     appendLoadedSkillMessage(toolResults);
+                    runawayGuard.observe(toolResults).ifPresent(this::appendRunawayReminder);
                     pushStatus(budget, startNanos, "running");
 
                     // 继续循环，让 LLM 根据工具结果继续思考
@@ -517,6 +519,12 @@ public class Agent {
             log.warn("Failed to build skill index", e);
             return "";
         }
+    }
+
+    /** 重复检测命中时提醒模型换思路；只提醒，不拦截工具。 */
+    private void appendRunawayReminder(String reminder) {
+        appendConversationMessage(LlmClient.Message.user(reminder), "runaway_reminder");
+        renderer().stream().println(AnsiStyle.subtle("  ↻ 检测到重复的工具调用，已提醒模型换个思路"));
     }
 
     /** load_skill 成功后，同一轮下一次 LLM 请求前就把 Skill 正文追加进历史。 */
@@ -846,7 +854,7 @@ public class Agent {
         }
 
         if (invocations.size() > 1) {
-            log.info("Executing {} tool calls in parallel (iteration={})", invocations.size(), iteration);
+            log.info("Executing {} tool calls; read-only calls run in parallel (iteration={})", invocations.size(), iteration);
         }
         List<ToolExecutionResult> results = turnToolPolicy.execute(toolRegistry, invocations, toolExposure);
         for (ToolExecutionResult result : results) {
@@ -1040,11 +1048,6 @@ public class Agent {
         StreamRenderer() {
             this.renderer = null;
             this.boundOut = null;
-        }
-
-        StreamRenderer(PrintStream out) {
-            this.renderer = null;
-            this.boundOut = out;
         }
 
         StreamRenderer(Renderer renderer) {

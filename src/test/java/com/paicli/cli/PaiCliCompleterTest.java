@@ -15,6 +15,30 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class PaiCliCompleterTest {
 
     @Test
+    void completesManagementProvidersAndNewlyRegisteredModels() {
+        var config = new com.paicli.config.PaiCliConfig();
+        var settings = new com.paicli.config.PaiCliConfig.ProviderConfig();
+        settings.getModels().put("next", com.paicli.llm.ModelProfile.discovered());
+        config.getProviders().put("deepseek", settings);
+        PaiCliCompleter completer = new PaiCliCompleter(List::of, List::of, () -> config);
+        List<Candidate> models = new ArrayList<>();
+        completer.complete(null, parsed("/model deepseek/n", "deepseek/n"), models);
+        assertTrue(models.stream().anyMatch(c -> c.value().equals("deepseek/next")));
+        List<Candidate> providers = new ArrayList<>();
+        completer.complete(null, parsed("/model refresh dee", "dee"), providers);
+        assertTrue(providers.stream().anyMatch(c -> c.value().equals("deepseek")));
+    }
+
+    @Test
+    void suggestsDeepSeekFlashModel() {
+        PaiCliCompleter completer = new PaiCliCompleter(List::of);
+        List<Candidate> candidates = new ArrayList<>();
+        completer.complete(null, parsed("/model deep", "deep"), candidates);
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("deepseek-flash")));
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("deepseek")));
+    }
+
+    @Test
     void suggestsSlashCommandsWhenInputStartsWithSlash() {
         PaiCliCompleter completer = new PaiCliCompleter(List::of);
         List<Candidate> candidates = new ArrayList<>();

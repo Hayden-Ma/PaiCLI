@@ -3,6 +3,8 @@ package com.paicli.cli;
 import com.paicli.mcp.mention.AtMentionCompleter;
 import com.paicli.mcp.resources.McpResourceDescriptor;
 import com.paicli.skill.Skill;
+import com.paicli.config.PaiCliConfig;
+import com.paicli.llm.ModelCatalog;
 import org.jline.reader.Candidate;
 import org.jline.reader.Completer;
 import org.jline.reader.LineReader;
@@ -15,6 +17,7 @@ import java.util.function.Supplier;
 final class PaiCliCompleter implements Completer {
     private final Supplier<List<McpResourceDescriptor>> resourceSupplier;
     private final Supplier<List<Skill>> skillSupplier;
+    private final Supplier<PaiCliConfig> configSupplier;
 
     PaiCliCompleter(Supplier<List<McpResourceDescriptor>> resourceSupplier) {
         this(resourceSupplier, List::of);
@@ -22,6 +25,12 @@ final class PaiCliCompleter implements Completer {
 
     PaiCliCompleter(Supplier<List<McpResourceDescriptor>> resourceSupplier,
                     Supplier<List<Skill>> skillSupplier) {
+        this(resourceSupplier, skillSupplier, () -> null);
+    }
+
+    PaiCliCompleter(Supplier<List<McpResourceDescriptor>> resourceSupplier,
+                    Supplier<List<Skill>> skillSupplier, Supplier<PaiCliConfig> configSupplier) {
+        this.configSupplier = configSupplier;
         this.resourceSupplier = resourceSupplier;
         this.skillSupplier = skillSupplier == null ? List::of : skillSupplier;
     }
@@ -88,10 +97,29 @@ final class PaiCliCompleter implements Completer {
             return false;
         }
         String value = input.length() <= 7 ? "" : input.substring(7);
+        String[] parts = value.split("\\s+", -1);
+        if (parts.length == 2 && List.of("list", "refresh", "add").contains(parts[0])) {
+            for (String provider : ModelCatalog.BUILTINS.keySet()) {
+                addMatching(candidates, "供应商", parts[1], option(provider, "模型供应商"));
+            }
+            return true;
+        }
+        PaiCliConfig config = configSupplier.get();
+        if (config != null && parts.length == 1) {
+            for (String provider : ModelCatalog.BUILTINS.keySet()) {
+                for (String id : ModelCatalog.entries(config, provider).keySet()) {
+                    addMatching(candidates, "已登记模型", value, option(provider + "/" + id, "切换并保存"));
+                }
+            }
+        }
         addMatching(candidates, "模型", value,
+                option("list", "查看模型列表与能力"),
+                option("refresh ", "手动刷新模型列表"),
+                option("add ", "添加或更新模型能力"),
                 option("glm-5.3-flash", "GLM-5.3-Flash 1M 长上下文"),
                 option("glm-5.1", "GLM-5.1 长上下文"),
                 option("glm-5v-turbo", "GLM-5V 多模态"),
+                option("deepseek-flash", "DeepSeek V4.1 Flash 多模态"),
                 option("deepseek", "DeepSeek，读取配置模型"),
                 option("hunyuan", "混元，读取配置模型"),
                 option("hy4-preview", "混元 Hy4 preview"),

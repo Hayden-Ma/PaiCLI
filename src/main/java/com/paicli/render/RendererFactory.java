@@ -12,7 +12,7 @@ import org.jline.terminal.Terminal;
  *   <li>{@code -Dpaicli.renderer} > {@code PAICLI_RENDERER} 环境变量 > 默认 inline</li>
  *   <li>{@code lanterna} → Lanterna 全屏 TUI（由 {@code TuiBootstrap} 在 CLI 循环前接管）</li>
  *   <li>{@code plain} → {@link PlainRenderer}</li>
- *   <li>{@code inline}（默认）→ Inline 流式（Day 2 落地，先返回 plain 占位）</li>
+ *   <li>{@code inline}（默认）→ {@link InlineRenderer}，终端不支持 ANSI 时回退 plain</li>
  *   <li>兼容：{@code PAICLI_TUI=true} → 等价 {@code lanterna}，打 deprecation 提示</li>
  * </ul>
  *
@@ -76,7 +76,7 @@ public final class RendererFactory {
                 System.err.println("⚠️ 终端不支持 ANSI，inline 模式回退到 plain");
                 yield new PlainRenderer();
             }
-            case LANTERNA -> new PlainRenderer();    // Day 5 后替换为 LanternaRenderer
+            case LANTERNA -> new PlainRenderer();    // Lanterna 由 TuiBootstrap 接管，这里只是兜底
         };
     }
 }

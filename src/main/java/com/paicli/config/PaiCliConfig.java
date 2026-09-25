@@ -1,6 +1,7 @@
 package com.paicli.config;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.paicli.llm.ModelProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 
@@ -32,6 +33,7 @@ public class PaiCliConfig {
         private String baseUrl;
         private String model;
         private String loraId;
+        private Map<String, ModelProfile> models = new LinkedHashMap<>();
         private double temperature = 0.7;  // 默认温度
         private int maxTokens = 8192;      // 默认最大 token 数
 
@@ -41,6 +43,11 @@ public class PaiCliConfig {
             this.apiKey = apiKey;
             this.baseUrl = baseUrl;
             this.model = model;
+        }
+
+        public Map<String, ModelProfile> getModels() { return models; }
+        public void setModels(Map<String, ModelProfile> models) {
+            this.models = models == null ? new LinkedHashMap<>() : new LinkedHashMap<>(models);
         }
 
         public String getApiKey() { return apiKey; }
@@ -111,6 +118,28 @@ public class PaiCliConfig {
             mapper.writeValue(CONFIG_FILE.toFile(), this);
         } catch (IOException e) {
             System.err.println("⚠️ 配置保存失败: " + e.getMessage());
+        }
+    }
+
+    /** Model management only reports success after an atomic config replacement. */
+    public void saveOrThrow() throws IOException {
+        saveOrThrow(CONFIG_FILE);
+    }
+
+    void saveOrThrow(Path destination) throws IOException {
+        Path parent = destination.toAbsolutePath().getParent();
+        Files.createDirectories(parent);
+        Path temporary = Files.createTempFile(parent, ".config-", ".tmp");
+        try {
+            mapper.writeValue(temporary.toFile(), this);
+            try {
+                Files.move(temporary, destination, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(temporary, destination, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temporary);
         }
     }
 

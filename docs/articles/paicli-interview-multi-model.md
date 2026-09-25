@@ -12,6 +12,10 @@ author: 沉默王二
 date: 2026-05-11
 ---
 
+> 2026-09-25 更新：PaiCLI 的 DeepSeek 默认模型已升级为 `deepseek-flash`（V4.1 Flash），支持 1M 上下文、思考模式、工具调用和图片输入。已有配置可用 `/model deepseek-flash` 切换并保存；旧 Flash 别名继续兼容。正文中的 V4 发布数据和运行记录保留为历史背景，当前模型与价格以[官方文档](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)为准。
+
+当前版本还支持手动维护模型：`/model list deepseek` 查看列表，`/model refresh deepseek` 从供应商获取并追加新 ID；没有列表接口时，可以用 `/model add deepseek <新模型ID> --like deepseek-flash` 沿用已有协议，再通过 `--context`、`--vision` 等选项覆盖能力。添加和刷新不会自动切换，执行 `/model deepseek/<新模型ID>` 后才生效。新发现模型只登记 ID，默认按 128k 文本处理，实际能力需要核实后配置。
+
 老王这次没废话，直接开问：“PaiCLI 接了几家大模型？”
 
 “目前支持 GLM、DeepSeek、Kimi、StepFun。”
@@ -72,7 +76,7 @@ public interface LlmClient {
 ```java
 // DeepSeek 的实现，继承基类后只需覆盖差异点
 protected String getApiUrl() { return "https://api.deepseek.com/chat/completions"; }
-protected String getModel()  { return "deepseek-v4-flash"; }
+protected String getModel()  { return "deepseek-flash"; }
 protected String getApiKey() { return apiKey; }
 public int maxContextWindow()   { return 1_000_000; }
 public boolean supportsPromptCaching() { return true; }

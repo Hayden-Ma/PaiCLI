@@ -369,6 +369,20 @@ class ToolRegistryTest {
     }
 
     @Test
+    void editFileReplaceAllReportsReplacementCount(@TempDir Path tempDir) throws Exception {
+        Path file = tempDir.resolve("Log.java");
+        Files.writeString(file, "log(a);\nlog(b);\n");
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        ToolOutput result = registry.executeToolOutput("edit_file", MAPPER.writeValueAsString(Map.of(
+                "path", "Log.java", "old_text", "log(", "new_text", "logger.info(", "replace_all", true)));
+
+        assertEquals("文件已编辑: Log.java（替换 2 处）", result.text());
+        assertEquals("logger.info(a);\nlogger.info(b);\n", Files.readString(file));
+    }
+
+    @Test
     void editFileRejectsPathOutsideProject(@TempDir Path tempDir) throws Exception {
         Path workspace = Files.createDirectory(tempDir.resolve("workspace"));
         Path outside = tempDir.resolve("outside.txt");

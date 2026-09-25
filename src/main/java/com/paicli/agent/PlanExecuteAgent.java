@@ -695,7 +695,8 @@ public class PlanExecuteAgent {
 
         StringBuilder allResults = new StringBuilder();
         TaskStreamRenderer streamRenderer = new TaskStreamRenderer(task.getId(), streamState, out);
-        AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
+        AgentBudget budget = AgentBudget.fromSystemProperties();
+        RunawayGuard runawayGuard = new RunawayGuard();
 
         while (true) {
             if (CancellationContext.isCancelled()) {
@@ -795,6 +796,10 @@ public class PlanExecuteAgent {
             }
             appendImageToolMessages(messages, toolResults, actor);
             appendLoadedSkillMessage(messages, toolResults, actor);
+            runawayGuard.observe(toolResults).ifPresent(reminder -> {
+                appendTaskMessage(messages, actor, "runaway_reminder", LlmClient.Message.user(reminder));
+                out.println(AnsiStyle.subtle("  ↻ [" + task.getId() + "] 检测到重复的工具调用，已提醒模型换个思路"));
+            });
         }
     }
 

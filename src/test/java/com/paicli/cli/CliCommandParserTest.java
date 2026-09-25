@@ -8,6 +8,14 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 class CliCommandParserTest {
 
     @Test
+    void resolvesDeepSeekFlashAsExplicitModel() {
+        Main.ModelSelection selection = Main.resolveModelSelection("deepseek-flash");
+        assertEquals("deepseek", selection.provider());
+        assertEquals("deepseek-flash", selection.model());
+        assertEquals(true, selection.explicitModel());
+    }
+
+    @Test
     void parsesPlanSlashCommandWithoutPayload() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/plan");
 
