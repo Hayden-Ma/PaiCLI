@@ -194,6 +194,28 @@ class McpServerManagerTest {
 
     // ---- helpers ----
 
+    @Test
+    void statusTableKeepsErrorsReadableInNarrowTerminal() throws Exception {
+        loadServersFromMap(Map.of("mock", httpConfig(webServer)));
+        manager.server("mock").status(McpServerStatus.ERROR);
+        manager.server("mock").errorMessage("连接失败，请检查服务地址和本地网络配置");
+        String previous = System.getProperty("paicli.render.columns");
+        try {
+            System.setProperty("paicli.render.columns", "40");
+            String output = manager.formatStatus();
+            assertTrue(output.contains("mock"));
+            assertTrue(output.contains("失败"));
+            assertTrue(output.contains("/mcp logs <name>"));
+            for (String line : output.split("\n")) {
+                assertTrue(com.paicli.util.TerminalTable.width(line) <= 40, line);
+            }
+            assertEquals(0, webServer.getRequestCount(), "查看列表不会启动连接");
+        } finally {
+            if (previous == null) System.clearProperty("paicli.render.columns");
+            else System.setProperty("paicli.render.columns", previous);
+        }
+    }
+
     private void enqueueInitialize() {
         enqueueInitialize(null);
     }

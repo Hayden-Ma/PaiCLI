@@ -26,6 +26,52 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class InlineRendererTest {
 
     @Test
+    void codeFoldingAndTranscriptRedrawPreserveExistingDock() {
+        int columns = 120;
+        int rows = 40;
+        Terminal terminal = Mockito.mock(Terminal.class);
+        Mockito.when(terminal.getType()).thenReturn("xterm-256color");
+        Mockito.when(terminal.getSize()).thenReturn(new Size(columns, rows));
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        org.jline.builtins.ScreenTerminal screen = new org.jline.builtins.ScreenTerminal(columns, rows);
+        // Seed the screen with the dock that JLine's diff cache believes is already present.
+        screen.write(AnsiSeq.moveCursor(38, 1) + "-- dock border --"
+                + AnsiSeq.moveCursor(39, 1) + "YOLO Ctrl+Y to enable HITL"
+                + AnsiSeq.moveCursor(40, 1) + "Auto Model · DeepSeek V4.1 Flash  idle  ctx 2%"
+                + AnsiSeq.setScrollRegion(1, 37) + AnsiSeq.moveCursor(35, 1));
+        InlineRenderer renderer = new InlineRenderer(terminal,
+                new PrintStream(sink, true, StandardCharsets.UTF_8));
+        try {
+            renderer.beginTurn();
+            renderer.stream().println("完成了。最终文件内容：");
+            renderer.stream().println("┌─ code: java");
+            renderer.stream().println("    System.out.println(\"Hello PaiCLI\");");
+            renderer.stream().println("└─ end");
+            renderer.stream().println("验证通过。");
+            replayAndAssertDock(screen, sink);
+            for (int i = 0; i < 4; i++) {
+                assertTrue(renderer.toggleLastBlock());
+                replayAndAssertDock(screen, sink);
+                assertEquals(i % 2 == 0, screen.toString().contains("System.out.println"));
+            }
+        } finally {
+            renderer.close();
+        }
+    }
+
+    private static void replayAndAssertDock(org.jline.builtins.ScreenTerminal screen,
+                                            ByteArrayOutputStream sink) {
+        String emitted = sink.toString(StandardCharsets.UTF_8);
+        assertFalse(emitted.contains(AnsiSeq.CLEAR_TO_EOS), "local repaint must not erase the dock");
+        screen.write(emitted.replace("\n", "\r\n"));
+        sink.reset();
+        String visible = screen.toString();
+        assertTrue(visible.contains("-- dock border --"), visible);
+        assertTrue(visible.contains("YOLO Ctrl+Y to enable HITL"), visible);
+        assertTrue(visible.contains("Auto Model · DeepSeek V4.1 Flash"), visible);
+    }
+
+    @Test
     void onAnsiTerminalEnablesStatusBar() {
         Terminal terminal = Mockito.mock(Terminal.class);
         Mockito.when(terminal.getType()).thenReturn("xterm-256color");
@@ -281,7 +327,8 @@ class InlineRendererTest {
             assertTrue(emitted.contains("README.md"), emitted);
             assertTrue(emitted.contains("after"), emitted);
             assertTrue(emitted.contains("collapse"), emitted);
-            assertTrue(emitted.contains(AnsiSeq.CLEAR_TO_EOS), emitted);
+            assertFalse(emitted.contains(AnsiSeq.CLEAR_TO_EOS), emitted);
+            assertTrue(emitted.contains(AnsiSeq.CLEAR_LINE), emitted);
         } finally {
             renderer.close();
         }
@@ -357,10 +404,7 @@ class InlineRendererTest {
             assertTrue(emitted.contains("code: java"), emitted);
             assertTrue(emitted.contains("2 行"), "应统计 body 行数: " + emitted);
             assertTrue(emitted.contains("ctrl+o"), emitted);
-            // body 行不应直接显示在 delegate 上（被吞掉了）—— 验证：last occurrence 不包含 "public class"
-            // 但因为 delegate.print(line) 还是会先写 body？让我们再确认：检查 final state。
-            // 注意：进入代码块后 body 走 codeBodyLines 缓冲，不写 delegate；end 触发 move-up + clear-to-eos
-            // 所以 emitted 里包含 ANSI 序列但**不**包含原 body 文本
+            // body 暂存在 codeBodyLines，结束时只替换 header，不触碰底部 dock。
             assertFalse(emitted.contains("public class Main {"),
                     "代码体应被折叠后不再可见: " + emitted);
         } finally {

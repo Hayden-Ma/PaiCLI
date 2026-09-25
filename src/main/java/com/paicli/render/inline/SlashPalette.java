@@ -11,7 +11,7 @@ import java.util.List;
  * 临时浮起的命令选择列表。
  *
  * <p>渲染策略：在当前光标位置直接打印列表（占 N+2 行），用 raw mode 读单键
- * 处理 {@code ↑↓Enter}/数字/Esc。结束后用 {@code [<n>A[J} 把列表清掉，
+ * 处理 {@code ↑↓Enter}/数字/Esc。结束后逐行清除列表，保留底部状态栏，
  * 不留痕迹（行内 palette 风格，类似 Claude Code 的 slash command 展开）。
  *
  * <p>不支持光标动画 / 模糊搜索（留作后续增强）。
@@ -86,9 +86,7 @@ public final class SlashPalette {
     private void erase(int lines) {
         if (lines <= 0) return;
         synchronized (out) {
-            out.print(AnsiSeq.moveUp(lines));
-            out.print("\r");
-            out.print(AnsiSeq.CLEAR_TO_EOS);
+            out.print(AnsiSeq.erasePreviousLines(lines));
             out.flush();
         }
     }

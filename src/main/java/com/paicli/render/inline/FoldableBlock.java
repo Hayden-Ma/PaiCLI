@@ -10,7 +10,7 @@ import java.util.List;
  * 展开时多行原始内容 + 末行 {@code ⏷ collapse}。
  *
  * <p>实现方式：保存渲染后占用的行数，toggle 时通过 ANSI 序列
- * （{@code [<n>A} 上移 + {@code [J} 清屏到底）覆盖原内容再重新渲染。
+ * 上移并逐行清除原内容，再重新渲染，不影响底部状态栏。
  *
  * <p>约束：toggle 前不能有其它输出滚走本块——否则 {@code renderedLineCount}
  * 不再可信，块会被 {@link BlockRegistry} 标记为 frozen。
@@ -74,9 +74,7 @@ public final class FoldableBlock {
         }
         synchronized (out) {
             // 上移 N 行覆盖原渲染
-            out.print(AnsiSeq.moveUp(renderedLineCount));
-            out.print("\r");
-            out.print(AnsiSeq.CLEAR_TO_EOS);
+            out.print(AnsiSeq.erasePreviousLines(renderedLineCount));
             if (expanded) {
                 out.println(collapsedHeader);
                 renderedLineCount = 1;

@@ -16,10 +16,11 @@ import java.util.Locale;
  *   <li>有 {@code GLM_API_KEY} → zhipu（智谱 Web Search，与 GLM 推理共用 Key，国内首选）</li>
  *   <li>有 {@code SERPAPI_KEY} → serpapi（国际通用，付费即开即用）</li>
  *   <li>有 {@code SEARXNG_URL} → searxng（开源自托管，免费）</li>
+ *   <li>有 {@code DEEPSEEK_API_KEY} → deepseek（原生搜索，包含一次独立模型调用）</li>
  *   <li>都没有 → 占位 zhipu provider，isReady() 为 false，由调用方提示用户</li>
  * </ol>
  *
- * 显式 {@code SEARCH_PROVIDER}（zhipu / serpapi / searxng）会跳过自动判断。
+ * 显式 {@code SEARCH_PROVIDER}（zhipu / serpapi / searxng / deepseek）会跳过自动判断。
  *
  * 这里不做单例缓存，由调用方按需缓存（如 ToolRegistry 的 webSearchProvider 字段）。
  */
@@ -35,18 +36,21 @@ public final class SearchProviderFactory {
         String zhipuEngine = readEnv("ZHIPU_SEARCH_ENGINE");
         String serpKey = readEnv("SERPAPI_KEY");
         String searxngUrl = readEnv("SEARXNG_URL");
+        String deepseekKey = readEnv("DEEPSEEK_API_KEY");
 
-        String chosen = pickProvider(provider, glmKey, serpKey, searxngUrl);
+        String chosen = pickProvider(provider, glmKey, serpKey, searxngUrl, deepseekKey);
         log.info("SearchProvider chosen: {}", chosen);
 
         return switch (chosen) {
+            case "deepseek" -> new DeepSeekSearchProvider(deepseekKey, readEnv("DEEPSEEK_SEARCH_MODEL"));
             case "searxng" -> new SearxngSearchProvider(searxngUrl);
             case "serpapi" -> new SerpApiSearchProvider(serpKey);
             default -> new ZhipuSearchProvider(glmKey, zhipuEngine);
         };
     }
 
-    static String pickProvider(String explicit, String glmKey, String serpKey, String searxngUrl) {
+    static String pickProvider(String explicit, String glmKey, String serpKey, String searxngUrl,
+                               String deepseekKey) {
         if (explicit != null && !explicit.isBlank()) {
             return explicit.trim().toLowerCase(Locale.ROOT);
         }
@@ -59,7 +63,10 @@ public final class SearchProviderFactory {
         if (searxngUrl != null && !searxngUrl.isBlank()) {
             return "searxng";
         }
-        return "zhipu"; // 默认占位（PaiCLI 主要面向 GLM 用户），isReady() 会为 false
+        if (deepseekKey != null && !deepseekKey.isBlank()) {
+            return "deepseek";
+        }
+        return "zhipu"; // 默认占位，isReady() 会为 false
     }
 
     private static String readEnv(String key) {

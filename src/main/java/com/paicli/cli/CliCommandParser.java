@@ -109,7 +109,7 @@ final class CliCommandParser {
         if (trimmed.regionMatches(true, 0, "/model ", 0, 7)) {
             String payload = trimmed.substring(7).trim();
             String verb = payload.split("\\s+", 2)[0];
-            if (java.util.Set.of("list", "refresh", "add").contains(verb.toLowerCase(java.util.Locale.ROOT))) {
+            if (java.util.Set.of("list", "info", "refresh", "add").contains(verb.toLowerCase(java.util.Locale.ROOT))) {
                 return new ParsedCommand(CommandType.MODEL_MANAGE, payload);
             }
             return new ParsedCommand(CommandType.SWITCH_MODEL, payload);

@@ -429,11 +429,10 @@ public final class InlineRenderer implements Renderer {
                 inCodeBlock = false;
 
                 if (codeHeaderEmitted) {
-                    // 用 ANSI move-up + clear-to-eos 覆盖原 header 行。这里必须直写
+                    // 只擦除原 header 占用的行，不能清屏到底，否则会擦掉 JLine dock。
+                    // 这里必须直写
                     // 底层输出，因为 printAbove 是追加式输出，不适合承载光标回退。
-                    out.print(AnsiSeq.moveUp(1));
-                    out.print("\r");
-                    out.print(AnsiSeq.CLEAR_TO_EOS);
+                    out.print(AnsiSeq.erasePreviousLines(estimateRows(codeHeaderLine + "\n")));
                 }
 
                 String label = codeLanguage.isEmpty() ? "code" : "code: " + codeLanguage;
@@ -629,13 +628,9 @@ public final class InlineRenderer implements Renderer {
             redrawing = true;
             try {
                 int rows = TerminalCapabilities.safeSize(terminal).getRows();
-                int maxMove = Math.max(1, rows - (statusBar == null ? 1 : 2));
+                int maxMove = Math.max(1, rows - (statusBar == null ? 1 : 4));
                 int move = Math.min(renderedRows, maxMove);
-                if (move > 0) {
-                    out.print(AnsiSeq.moveUp(move));
-                }
-                out.print("\r");
-                out.print(AnsiSeq.CLEAR_TO_EOS);
+                out.print(AnsiSeq.erasePreviousLines(move));
                 int rowsAfter = 0;
                 for (TranscriptEntry entry : transcript) {
                     String rendered = entry.render();

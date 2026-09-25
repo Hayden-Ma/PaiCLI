@@ -35,6 +35,21 @@ class TurnToolPolicyMemoryGuardTest {
     }
 
     @Test
+    void continuationDoesNotInheritPreviousRememberAuthorization() {
+        TurnToolPolicy previous = TurnToolPolicy.fromUserInput("读取网页并记住 https://example.com/article");
+        TurnToolPolicy next = TurnToolPolicy.fromConversationReply(
+                "1", "1. 创建文件\n2. 取消", previous, false, false);
+        FakeRegistry registry = new FakeRegistry();
+        registry.getExternalContextTracker().record("web_fetch");
+
+        List<ToolExecutionResult> results = next.execute(
+                registry, List.of(saveMemory()), next.expose(definitions()));
+
+        assertTrue(results.get(0).result().contains("[MEMORY_EXTERNAL_CONTEXT]"));
+        assertTrue(registry.executedNames().isEmpty());
+    }
+
+    @Test
     void saveMemoryIsRefusedAfterWebFetchWhenUserDidNotAskToRemember() {
         TurnToolPolicy policy = TurnToolPolicy.fromUserInput("打开并总结 https://example.com/article");
         FakeRegistry registry = new FakeRegistry();

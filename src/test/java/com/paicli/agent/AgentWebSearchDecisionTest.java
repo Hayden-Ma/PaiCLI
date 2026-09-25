@@ -18,6 +18,20 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AgentWebSearchDecisionTest {
+    @Test
+    void clearHistoryRemovesFollowUpContext(@TempDir Path tempDir) {
+        RecordingClient llm = new RecordingClient(List.of(
+                new LlmClient.ChatResponse("assistant", "1. 创建 Hello.java\n2. 取消", null, 20, 5),
+                new LlmClient.ChatResponse("assistant", "请说明任务。", null, 20, 5)));
+        RecordingToolRegistry registry = new RecordingToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        Agent agent = new Agent(llm, registry);
+        agent.run("创建 Hello.java");
+        agent.clearHistory();
+        agent.run("1");
+        assertTrue(llm.toolSnapshots.get(1).isEmpty());
+    }
+
 
     private static final String BARE_ARTICLE_TITLE =
             "阿里员工：作为一名合格的375员工，老板在的时候9点走，老板不在的时候6点半走，老板9点前走了那就跟着走（附Agent面试题）";

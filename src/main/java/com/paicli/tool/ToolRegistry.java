@@ -766,7 +766,7 @@ public class ToolRegistry {
         tools.put("web_search", new Tool(
                 "web_search",
                 "搜索互联网，获取实时信息（最新版本、官方文档、技术资讯等）。" +
-                        "provider 按配置自动选择：有 GLM_API_KEY 用智谱搜索，其次 SerpAPI、自托管 SearXNG，SEARCH_PROVIDER 可显式指定。",
+                        "provider 按配置自动选择：智谱、SerpAPI、自托管 SearXNG、DeepSeek（包含独立模型调用），SEARCH_PROVIDER 可显式指定。",
                 createParameters(
                         new Param("query", "string", "搜索关键词，例如'Java 21 新特性'、'Spring Boot 3.3 release notes'", true),
                         new Param("top_k", "integer", "返回结果数量（默认5）", false)

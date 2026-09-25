@@ -19,6 +19,7 @@ import com.paicli.history.ConversationLedger;
 import com.paicli.harness.BetterHarnessOptions;
 import com.paicli.harness.BetterHarnessRunner;
 import com.paicli.llm.LlmClient;
+import com.paicli.llm.ModelCatalog;
 import com.paicli.llm.LlmClientFactory;
 import com.paicli.memory.LongTermMemory;
 import com.paicli.memory.MemoryCommandArgs;
@@ -54,6 +55,7 @@ import com.paicli.snapshot.TurnSnapshot;
 import com.paicli.skill.SkillRegistry;
 import com.paicli.tool.ToolRegistry;
 import com.paicli.util.AnsiStyle;
+import com.paicli.util.TerminalTable;
 import com.paicli.util.TerminalMarkdownRenderer;
 import com.paicli.wechat.IlinkClient;
 import com.paicli.wechat.WechatAccount;
@@ -620,8 +622,8 @@ public class Main {
                     case SWITCH_MODEL -> {
                         String selection = command.payload();
                         if (selection == null || selection.isEmpty()) {
-                            ui.println("🤖 当前模型: " + llmClient.getModelName() + " (" + llmClient.getProviderName() + ")");
-                            ui.println("   管理模型: /model list / /model refresh <provider> / /model add");
+                            ui.println("🤖 当前模型: " + ModelCatalog.displayName(llmClient.getProviderName(), llmClient.getModelName()) + " (" + llmClient.getProviderName() + ")");
+                            ui.println("   管理模型: /model list / /model info / /model refresh <provider> / /model add");
                             ui.println("   明确模型：");
                             ui.println("   /model deepseek-flash - 切换到 DeepSeek V4.1 Flash（默认，支持图片）");
                             ui.println("   /model glm-5.3-flash - 切换到 GLM-5.3-Flash");
@@ -643,9 +645,8 @@ public class Main {
                                 llmClient = newClient;
                                 llmClientRef.set(newClient);
                                 reactAgent.setLlmClient(llmClient);
-                                ui.println("✅ 已切换到: " + llmClient.getModelName() + " (" + llmClient.getProviderName() + ")");
-                                ui.println("   上下文策略: " + reactAgent.getMemoryManager().getContextProfile().summary());
-                                ui.println("   对话上下文已保留，使用 /clear 可清空\n");
+                                ui.println(ModelCommands.switchSummary(llmClient));
+                                ui.println();
                                 renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                             } catch (IOException | IllegalArgumentException e) {
                                 ui.println("❌ 切换失败: " + e.getMessage());
@@ -1450,14 +1451,14 @@ public class Main {
         String configured = System.getProperty("paicli.render.columns");
         if (configured != null && !configured.isBlank()) {
             try {
-                return Math.max(40, Integer.parseInt(configured.trim()));
+                return Math.max(20, Integer.parseInt(configured.trim()));
             } catch (NumberFormatException ignored) {
             }
         }
         String columns = System.getenv("COLUMNS");
         if (columns != null && !columns.isBlank()) {
             try {
-                return Math.max(40, Integer.parseInt(columns.trim()));
+                return Math.max(20, Integer.parseInt(columns.trim()));
             } catch (NumberFormatException ignored) {
             }
         }
@@ -1468,7 +1469,7 @@ public class Main {
         if (terminal == null || terminal.getSize() == null || terminal.getSize().getColumns() <= 0) {
             return;
         }
-        System.setProperty("paicli.render.columns", String.valueOf(Math.max(40, terminal.getSize().getColumns())));
+        System.setProperty("paicli.render.columns", String.valueOf(Math.max(20, terminal.getSize().getColumns())));
     }
 
     static void configureAwtForCli() {
@@ -1693,6 +1694,7 @@ public class Main {
         return List.of(
                 new SlashCommandHint("/model", "/model", "查看当前模型"),
                 new SlashCommandHint("/model list", "/model list", "查看模型列表与能力"),
+                new SlashCommandHint("/model info ", "/model info [模型ID]", "查看模型详细配置"),
                 new SlashCommandHint("/model refresh ", "/model refresh <provider>", "手动刷新模型列表"),
                 new SlashCommandHint("/model add ", "/model add <provider> <模型ID>", "添加或更新模型能力"),
                 new SlashCommandHint("/model deepseek-flash", "/model deepseek-flash", "切换到 DeepSeek V4.1 Flash（默认，支持图片）"),
@@ -2606,14 +2608,15 @@ public class Main {
         int skillTotal = skillRegistry.allSkills().size();
         int skillEnabled = skillRegistry.enabledSkills().size();
         return new StartupScreenInfo(
-                llmClient.getModelName(),
+                ModelCatalog.statusName(llmClient.getProviderName(), llmClient.getModelName()),
                 llmClient.getProviderName(),
                 ready,
                 total,
                 tools,
                 skillEnabled,
                 skillTotal,
-                note == null ? "" : note.trim()
+                (note == null ? "" : note.trim())
+                        + ModelCommands.aliasHint(llmClient.getProviderName(), llmClient.getModelName())
         );
     }
 
@@ -2624,8 +2627,8 @@ public class Main {
                                          SkillRegistry skillRegistry) {
         String normalizedPhase = phase == null || phase.isBlank() ? "idle" : phase;
         StatusInfo base = "idle".equals(normalizedPhase)
-                ? StatusInfo.idle(llmClient.getModelName(), llmClient.maxContextWindow(), hitlHandler.isEnabled())
-                : StatusInfo.active(llmClient.getModelName(), llmClient.maxContextWindow(),
+                ? StatusInfo.idle(ModelCatalog.statusName(llmClient.getProviderName(), llmClient.getModelName()), llmClient.maxContextWindow(), hitlHandler.isEnabled())
+                : StatusInfo.active(ModelCatalog.statusName(llmClient.getProviderName(), llmClient.getModelName()), llmClient.maxContextWindow(),
                 hitlHandler.isEnabled(), normalizedPhase);
         return base.withEnvironment(mcpStatusSummary(mcpServerManager), skillStatusSummary(skillRegistry));
     }
@@ -3044,7 +3047,9 @@ public class Main {
         ));
         if (info.note() != null && !info.note().isBlank()) {
             lines.add("");
-            lines.add(AnsiStyle.subtle(info.note().replace('\n', ' ')));
+            for (String line : TerminalTable.wrap(info.note().strip(), terminalColumns()).split("\n")) {
+                lines.add(AnsiStyle.subtle(line));
+            }
         }
         return lines;
     }

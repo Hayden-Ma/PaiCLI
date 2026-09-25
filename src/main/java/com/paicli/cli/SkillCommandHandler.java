@@ -5,6 +5,9 @@ import com.paicli.skill.SkillRegistry;
 import com.paicli.skill.SkillStateStore;
 
 import java.util.List;
+import java.util.ArrayList;
+import com.paicli.util.AnsiStyle;
+import com.paicli.util.TerminalTable;
 
 /**
  * /skill 命令组的展示与状态切换逻辑。
@@ -30,22 +33,18 @@ final class SkillCommandHandler {
             return "📚 Skills: 未发现可用 skill\n   /skill reload 重新扫描";
         }
         List<Skill> enabled = registry.enabledSkills();
-        StringBuilder sb = new StringBuilder("📚 Skills（" + all.size() + " 个）\n");
+        List<List<String>> rows = new ArrayList<>();
         for (Skill skill : all) {
             boolean isEnabled = enabled.contains(skill);
-            sb.append(String.format("  %s %-16s %-8s %-8s %s%n",
-                    isEnabled ? "●" : "○",
-                    skill.name(),
-                    skill.displaySource(),
-                    skill.version() == null ? "" : "v" + skill.version(),
-                    abbreviate(skill.description(), 80)));
+            String name = (isEnabled ? "● " : "○ ") + skill.name();
+            rows.add(List.of(isEnabled ? AnsiStyle.section(name) : AnsiStyle.subtle(name),
+                    skill.displaySource(), skill.version() == null ? "—" : skill.version(),
+                    abbreviate(skill.description(), 48)));
         }
-        sb.append('\n')
-                .append("提示：\n")
-                .append("  /skill show <name> 看完整 SKILL.md\n")
-                .append("  /skill on/off <name> 切换启用状态\n")
-                .append("  /skill reload 重新扫描");
-        return sb.toString();
+        return AnsiStyle.emphasis("Skills · " + enabled.size() + "/" + all.size() + " 启用") + "\n\n"
+                + TerminalTable.render(List.of("Skill", "来源", "版本", "摘要"), rows, TerminalTable.columns())
+                + "\n\n" + AnsiStyle.subtle("● 启用 · ○ 停用") + "\n"
+                + TerminalTable.wrap("详情：/skill show <name>\n启停：/skill on/off <name>", TerminalTable.columns());
     }
 
     static String show(SkillRegistry registry, String name) {

@@ -64,4 +64,22 @@ public final class AnsiSeq {
     public static String moveDown(int n) {
         return ESC + "[" + n + "B";
     }
+
+    /** Erase only the preceding rows and leave the cursor at their start, preserving the dock. */
+    public static String erasePreviousLines(int rows) {
+        if (rows <= 0) {
+            return "";
+        }
+        StringBuilder sequence = new StringBuilder(moveUp(rows)).append('\r');
+        for (int i = 0; i < rows; i++) {
+            sequence.append(CLEAR_LINE);
+            if (i < rows - 1) {
+                sequence.append(moveDown(1));
+            }
+        }
+        if (rows > 1) {
+            sequence.append(moveUp(rows - 1));
+        }
+        return sequence.toString();
+    }
 }

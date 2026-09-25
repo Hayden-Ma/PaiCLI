@@ -27,14 +27,13 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
             .protocols(List.of(Protocol.HTTP_1_1))
             .build();
     private static final String DSML_TAG = "｜｜DSML｜｜";
-    private static final String DSML_TOOL_BLOCK_OPEN = "<" + DSML_TAG + "tool_calls>";
-    private static final String DSML_TOOL_BLOCK_CLOSE = "</" + DSML_TAG + "tool_calls>";
+    private static final String DSML_OPEN_PREFIX = "<" + DSML_TAG;
     private static final Pattern DSML_TOOL_BLOCK = Pattern.compile(
-            "(?s)" + DSML_TOOL_BLOCK_OPEN + "\\s*(.*?)\\s*" + DSML_TOOL_BLOCK_CLOSE);
+            "(?s)<" + DSML_TAG + "\\s*(tool_calls|calls)>\\s*(.*?)\\s*</" + DSML_TAG + "\\s*\\1>");
     private static final Pattern DSML_INVOKE = Pattern.compile(
-            "(?s)<" + DSML_TAG + "invoke\\s+([^>]*)>(.*?)</" + DSML_TAG + "invoke>");
+            "(?s)<" + DSML_TAG + "\\s*invoke\\s+([^>]*)>(.*?)</" + DSML_TAG + "\\s*invoke>");
     private static final Pattern DSML_PARAMETER = Pattern.compile(
-            "(?s)<" + DSML_TAG + "parameter\\s+([^>]*)>(.*?)</" + DSML_TAG + "parameter>");
+            "(?s)<" + DSML_TAG + "\\s*parameter\\s+([^>]*)>(.*?)</" + DSML_TAG + "\\s*parameter>");
     private static final Pattern DSML_ATTRIBUTE = Pattern.compile(
             "([A-Za-z][A-Za-z0-9_-]{0,63})=\"([^\"\\r\\n]{0,256})\"");
     private static final Pattern SAFE_TOOL_OR_PARAMETER_NAME = Pattern.compile(
@@ -235,7 +234,7 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
         }
         int blockStart = block.start();
         int blockEnd = block.end();
-        String body = block.group(1);
+        String body = block.group(2);
         if (block.find()) {
             return null;
         }
@@ -354,7 +353,7 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
     }
 
     /**
-     * Streams text until an exact DSML tool block begins. The candidate block and everything after
+     * Streams text until a DSML tag begins. The candidate block and everything after
      * it stay ordered in {@code pendingTail}; completion either drops the block after a successful
      * strict parse or replays the untouched tail when the payload is malformed or unauthorized.
      */
@@ -382,7 +381,7 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
                 return;
             }
 
-            int openingTag = pendingTail.indexOf(DSML_TOOL_BLOCK_OPEN);
+            int openingTag = pendingTail.indexOf(DSML_OPEN_PREFIX);
             if (openingTag >= 0) {
                 emit(pendingTail.substring(0, openingTag));
                 pendingTail.delete(0, openingTag);
@@ -405,10 +404,9 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
                 return;
             }
 
-            int closingTag = pendingTail.indexOf(DSML_TOOL_BLOCK_CLOSE);
-            if (closingTag >= 0) {
-                int suffixStart = closingTag + DSML_TOOL_BLOCK_CLOSE.length();
-                emit(pendingTail.substring(suffixStart));
+            Matcher block = DSML_TOOL_BLOCK.matcher(pendingTail);
+            if (block.find()) {
+                emit(pendingTail.substring(block.end()));
             } else {
                 // normalizeDsml() currently cannot convert without a closing tag. Keep this
                 // fail-safe in case the parser evolves independently from the stream filter.
@@ -424,12 +422,12 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
         }
 
         private static int longestOpeningTagPrefixSuffix(CharSequence value) {
-            int maximum = Math.min(value.length(), DSML_TOOL_BLOCK_OPEN.length() - 1);
+            int maximum = Math.min(value.length(), DSML_OPEN_PREFIX.length() - 1);
             for (int length = maximum; length > 0; length--) {
                 int valueStart = value.length() - length;
                 boolean matches = true;
                 for (int index = 0; index < length; index++) {
-                    if (value.charAt(valueStart + index) != DSML_TOOL_BLOCK_OPEN.charAt(index)) {
+                    if (value.charAt(valueStart + index) != DSML_OPEN_PREFIX.charAt(index)) {
                         matches = false;
                         break;
                     }

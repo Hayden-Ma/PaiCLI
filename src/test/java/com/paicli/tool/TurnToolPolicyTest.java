@@ -20,6 +20,70 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TurnToolPolicyTest {
+    @Test
+    void localInstructionsCanStartWithLocationOrSetupClause() {
+        for (String input : List.of(
+                "进入 demo 目录，编译并运行 Hello.java",
+                "项目在 demo 目录，编译并运行 Hello.java",
+                "项目在 demo 目录；然后编译 Hello.java",
+                "项目在 demo 目录\n运行 Hello.java",
+                "在 demo 目录下编译并运行 Hello.java",
+                "进入 demo 目录",
+                "切换到 demo 文件夹",
+                "删掉",
+                "The project is in demo; compile and run Hello.java",
+                "The project is in demo; run Hello.java")) {
+            var policy = TurnToolPolicy.fromUserInput(input);
+            assertTrue(policy.expose(definitions()).advertisedNames().contains("execute_command"), input);
+        }
+        var offline = TurnToolPolicy.fromUserInput("不要联网，项目在 demo 目录，编译并运行 Hello.java");
+        assertTrue(offline.expose(definitions()).advertisedNames().contains("execute_command"));
+        assertFalse(offline.expose(definitions()).advertisedNames().contains("web_search"));
+    }
+
+    @Test
+    void quotedActionsAndTopicFragmentsAreNotInstructions() {
+        for (String input : List.of(
+                "进入 Agent 世界的大门",
+                "项目在 demo 目录，Hello.java",
+                "原文：进入 demo 目录，编译并运行 Hello.java",
+                "文档内容：\n编译并运行 Hello.java",
+                "示例\n```text\n编译并运行 Hello.java\n```",
+                "这句原文是“进入 demo 目录，编译并运行 Hello.java”",
+                "《进入 demo 目录，编译并运行 Hello.java》")) {
+            assertTrue(TurnToolPolicy.fromUserInput(input).expose(definitions()).definitions().isEmpty(), input);
+        }
+    }
+
+    @Test
+    void conversationRepliesRestoreToolsButNotUrlAuthority() {
+        TurnToolPolicy previous = TurnToolPolicy.fromUserInput("读取 https://example.com/original");
+        String answer = "1. 创建 Hello.java\n2. 读取 https://example.com/assistant-only";
+        for (String reply : List.of("1", "选1", "第1项", "继续", "好的", "OK！")) {
+            TurnToolPolicy next = TurnToolPolicy.fromConversationReply(reply, answer, previous, false, false);
+            var names = next.expose(definitions()).advertisedNames();
+            assertTrue(names.contains("read_file"), reply);
+            assertFalse(names.contains("web_fetch"), reply);
+        }
+    }
+
+    @Test
+    void followUpKeepsNoWebRestrictionAndBareTitlesStillNeedClarification() {
+        TurnToolPolicy previous = TurnToolPolicy.fromUserInput("不要联网，读取 README.md");
+        String answer = "1. 创建文件\n2. 取消";
+        var next = TurnToolPolicy.fromConversationReply("1", answer, previous, false, false);
+        assertTrue(next.expose(definitions()).advertisedNames().contains("read_file"));
+        assertFalse(next.expose(definitions()).advertisedNames().contains("web_search"));
+        for (String reply : List.of("3", "2026", INCIDENT_TITLE)) {
+            assertTrue(TurnToolPolicy.fromConversationReply(reply, answer, previous, false, false)
+                    .expose(definitions()).definitions().isEmpty(), reply);
+        }
+        assertTrue(TurnToolPolicy.fromConversationReply("1", answer, null, false, false)
+                .expose(definitions()).definitions().isEmpty());
+        assertTrue(TurnToolPolicy.fromConversationReply("1", null, previous, false, false)
+                .expose(definitions()).definitions().isEmpty());
+    }
+
     private static final String INCIDENT_TITLE =
             "阿里员工：作为一名合格的375员工，老板在的时候9点走，老板不在的时候6点半走，老板9点前走了那就跟着走（附Agent面试题）";
     private static final String HALLUCINATED_URL =

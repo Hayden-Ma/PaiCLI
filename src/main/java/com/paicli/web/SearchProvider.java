@@ -7,6 +7,8 @@ import java.util.List;
  * 搜索引擎抽象。
  *
  * 当前实现：
+ * - {@link ZhipuSearchProvider}：智谱独立搜索 API，复用 GLM Key
+ * - {@link DeepSeekSearchProvider}：DeepSeek 原生搜索，复用 DeepSeek Key，包含一次模型调用
  * - {@link SerpApiSearchProvider}：商业聚合 API，需 API Key，开箱即用
  * - {@link SearxngSearchProvider}：开源元搜索引擎，需要本地或可访问的 SearXNG 实例，免费
  *

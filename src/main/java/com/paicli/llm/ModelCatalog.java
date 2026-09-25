@@ -6,10 +6,13 @@ import java.util.*;
 
 /** Builtin IDs plus user-owned entries. Discovery never replaces an existing profile. */
 public final class ModelCatalog {
+    private static final Map<String, String> DEEPSEEK_ALIASES = Map.of(
+            "deepseek-v4-flash", "deepseek-flash",
+            "deepseek-v4-flash-vision-exp", "deepseek-flash");
     public static final Map<String, List<String>> BUILTINS;
     static {
         Map<String, List<String>> models = new LinkedHashMap<>();
-        models.put("deepseek", List.of("deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"));
+        models.put("deepseek", List.of("deepseek-flash", "deepseek-v4-pro"));
         models.put("glm", List.of("glm-5.1", "glm-5.3-flash", "glm-5v-turbo"));
         models.put("hunyuan", List.of("hy4-preview"));
         models.put("step", List.of("step-3.5-flash"));
@@ -20,6 +23,23 @@ public final class ModelCatalog {
         BUILTINS = Collections.unmodifiableMap(models);
     }
     private ModelCatalog() {}
+
+    /** Official legacy names remain callable, but are not separate current models. */
+    public static String aliasTarget(String provider, String model) {
+        return "deepseek".equals(provider) && model != null ? DEEPSEEK_ALIASES.get(model) : null;
+    }
+
+    public static String displayName(String provider, String model) {
+        String target = aliasTarget(provider, model);
+        return target == null ? model : model + "（兼容旧名 → " + target + "）";
+    }
+
+    /** Human-readable UI label only; request IDs, saved configuration and audit data stay unchanged. */
+    public static String statusName(String provider, String model) {
+        if (!"deepseek".equals(provider) || model == null) return model;
+        if (model.equals("deepseek-flash") || aliasTarget(provider, model) != null) return "DeepSeek V4.1 Flash";
+        return model.equals("deepseek-v4-pro") ? "DeepSeek V4 Pro" : model;
+    }
 
     public static void requireProvider(String provider) {
         if (!BUILTINS.containsKey(provider)) throw new IllegalArgumentException("不支持的供应商: " + provider);
@@ -62,6 +82,8 @@ public final class ModelCatalog {
         Map<String, ModelProfile> additions = new LinkedHashMap<>();
         for (String model : discovered) {
             if (!validModelId(model)) throw new IllegalArgumentException("模型 ID 无效");
+            // 服务端仍可能列出兼容入口，不能重新登记为独立的 128k 文本模型。
+            if (aliasTarget(provider, model) != null) continue;
             if (!existing.containsKey(model)) additions.putIfAbsent(model, ModelProfile.discovered());
         }
         if (!additions.isEmpty()) persist(config, provider, additions);

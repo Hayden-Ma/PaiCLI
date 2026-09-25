@@ -3,10 +3,7 @@ name: better-harness
 description: 审查 PaiCLI 编码 Agent 的任务理解、受控执行、变更验证、可靠交付与经验沉淀；只通过 /better-harness 原生命令调用。
 version: 0.1.0
 author: PaiCLI
-tags:
-  - harness
-  - review
-  - workflow
+tags: [harness, review, workflow]
 ---
 
 # PaiCLI Better Harness

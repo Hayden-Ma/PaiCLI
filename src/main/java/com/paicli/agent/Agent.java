@@ -58,6 +58,7 @@ public class Agent {
     private Renderer renderer;
     private Supplier<Boolean> hitlEnabledSupplier = () -> false;
     private boolean returnFinalResponseWhenStreamed;
+    private TurnToolPolicy previousTurnPolicy;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
 
     public Agent(LlmClient llmClient) {
@@ -172,10 +173,13 @@ public class Agent {
                         submittedUserInput,
                         toolRegistry.isSharedBrowserSession(),
                         toolRegistry.hasAgentOwnedCurrentBrowserPage())
-                : TurnToolPolicy.fromUserInput(
+                : TurnToolPolicy.fromConversationReply(
                         submittedUserInput,
+                        lastAssistantReply(),
+                        previousTurnPolicy,
                         toolRegistry.isSharedBrowserSession(),
                         toolRegistry.hasAgentOwnedCurrentBrowserPage());
+        previousTurnPolicy = turnToolPolicy;
         pruneHistoricalImagePayloads();
         recordExpandedMcpResources(userInput, submittedUserInput);
         storeExplicitBrowserMemoryHint(userInput);
@@ -381,6 +385,7 @@ public class Agent {
      * 清空对话历史并重建基础系统提示，不影响长期记忆条目
      */
     public void clearHistory() {
+        previousTurnPolicy = null;
         autoCompactionManager.clear(conversationHistory);
         memoryManager.getExternalContextTracker().reset();
         conversationLedger.appendEvent(
@@ -393,6 +398,14 @@ public class Agent {
         appendConversationMessage(
                 LlmClient.Message.system(buildSystemPrompt("")),
                 "history_reset");
+    }
+
+    private String lastAssistantReply() {
+        if (conversationHistory.isEmpty()) {
+            return null;
+        }
+        LlmClient.Message last = conversationHistory.get(conversationHistory.size() - 1);
+        return "assistant".equals(last.role()) ? last.content() : null;
     }
 
     /**
@@ -419,7 +432,7 @@ public class Agent {
     /** 当前状态栏快照：ctx 表示下一轮请求仍会携带的上下文估算，不含累计 in/out 用量。 */
     public StatusInfo currentStatus(String phase) {
         String normalizedPhase = phase == null || phase.isBlank() ? "idle" : phase;
-        String model = llmClient == null ? "—" : llmClient.getModelName();
+        String model = llmClient == null ? "—" : com.paicli.llm.ModelCatalog.statusName(llmClient.getProviderName(), llmClient.getModelName());
         long contextWindow = llmClient == null ? 0L : llmClient.maxContextWindow();
         boolean hitl = Boolean.TRUE.equals(hitlEnabledSupplier.get());
         long contextTokens = estimateCurrentContextTokens();
@@ -801,7 +814,7 @@ public class Agent {
     /** 把当前预算/耗时/HITL 状态推送给 renderer 状态栏。 */
     private void pushStatus(AgentBudget budget, long startNanos, String phase) {
         try {
-            String model = llmClient == null ? "—" : llmClient.getModelName();
+            String model = llmClient == null ? "—" : com.paicli.llm.ModelCatalog.statusName(llmClient.getProviderName(), llmClient.getModelName());
             long totalTokens = budget == null ? 0L
                     : (long) (budget.totalInputTokens() + budget.totalOutputTokens());
             long contextWindow = llmClient == null ? 0L : llmClient.maxContextWindow();

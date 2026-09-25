@@ -10,6 +10,8 @@ import com.paicli.mcp.resources.McpResourceDescriptor;
 import com.paicli.mcp.resources.McpResourceTool;
 import com.paicli.policy.AuditLog;
 import com.paicli.mcp.transport.McpTransport;
+import com.paicli.util.AnsiStyle;
+import com.paicli.util.TerminalTable;
 import com.paicli.mcp.transport.StdioTransport;
 import com.paicli.mcp.transport.StreamableHttpTransport;
 import com.paicli.tool.ToolOutput;
@@ -246,30 +248,32 @@ public class McpServerManager implements AutoCloseable {
     }
 
     public String formatStatus() {
-        StringBuilder sb = new StringBuilder("🔌 MCP Servers\n");
         if (servers.isEmpty()) {
-            sb.append("  未配置 MCP server。配置文件: ~/.paicli/mcp.json 或 .paicli/mcp.json");
-            return sb.toString();
+            return TerminalTable.wrap("MCP · 未配置\n配置文件：~/.paicli/mcp.json 或 .paicli/mcp.json", TerminalTable.columns());
         }
+        List<List<String>> rows = new java.util.ArrayList<>();
+        List<String> errors = new java.util.ArrayList<>();
+        long ready = 0;
         for (McpServer server : servers()) {
             String status = switch (server.status()) {
-                case READY -> "● ready";
-                case STARTING -> "… starting";
-                case DISABLED -> "○ disabled";
-                case ERROR -> "✗ error";
+                case READY -> AnsiStyle.section("● 就绪");
+                case STARTING -> "… 启动中";
+                case DISABLED -> AnsiStyle.subtle("○ 停用");
+                case ERROR -> AnsiStyle.error("✗ 失败");
             };
-            String tools = server.status() == McpServerStatus.READY
-                    ? server.tools().size() + (server.tools().size() == 1 ? " tool" : " tools")
-                    : "—";
-            String uptime = server.status() == McpServerStatus.READY ? "uptime " + formatDuration(server.uptime()) : "";
-            String pid = server.processId() == null ? "" : "pid " + server.processId();
-            String error = server.status() == McpServerStatus.ERROR && server.errorMessage() != null
-                    ? server.errorMessage()
-                    : "";
-            sb.append(String.format("  %-14s %-11s %-6s %-9s %-10s %s %s%n",
-                    server.name(), status, server.transportName(), tools, uptime, pid, error));
+            boolean isReady = server.status() == McpServerStatus.READY;
+            if (isReady) ready++;
+            String runtime = isReady ? formatDuration(server.uptime()) : "—";
+            if (server.processId() != null) runtime += " · PID " + server.processId();
+            rows.add(List.of(server.name(), status, server.transportName(),
+                    isReady ? Integer.toString(server.tools().size()) : "—", runtime));
+            if (server.status() == McpServerStatus.ERROR && server.errorMessage() != null)
+                errors.add(server.name() + "：" + server.errorMessage());
         }
-        return sb.toString().trim();
+        String out = AnsiStyle.emphasis("MCP · " + ready + "/" + servers.size() + " 就绪") + "\n\n"
+                + TerminalTable.render(List.of("服务", "状态", "连接", "工具数", "运行"), rows, TerminalTable.columns());
+        if (!errors.isEmpty()) out += "\n\n" + TerminalTable.wrap(String.join("\n", errors), TerminalTable.columns());
+        return out + "\n\n" + TerminalTable.wrap("日志：/mcp logs <name>", TerminalTable.columns());
     }
 
     public String startupSummary() {

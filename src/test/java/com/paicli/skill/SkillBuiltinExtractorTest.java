@@ -6,10 +6,42 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class SkillBuiltinExtractorTest {
+
+    @Test
+    void everyBuiltinHasValidFrontmatterAndHarnessTags(@TempDir Path tempDir) throws IOException {
+        SkillBuiltinExtractor extractor = new SkillBuiltinExtractor(tempDir);
+        extractor.extractAll();
+        for (String name : extractor.builtinSkillNames()) {
+            var parsed = SkillFrontmatterParser.parse(Files.readString(
+                    extractor.skillCacheDir(name).resolve("SKILL.md")));
+            assertTrue(parsed.warnings().isEmpty(), name + ": " + parsed.warnings());
+            assertEquals(name, parsed.frontmatter().get("name"));
+            if (name.equals("better-harness")) {
+                assertEquals(List.of("harness", "review", "workflow"), parsed.frontmatter().get("tags"));
+            }
+        }
+    }
+
+    @Test
+    void upgradesOldHarnessCacheToSupportedFrontmatter(@TempDir Path tempDir) throws IOException {
+        Path harness = tempDir.resolve("better-harness");
+        Files.createDirectories(harness);
+        Files.writeString(harness.resolve(".version"), "1.1.0");
+        Files.writeString(harness.resolve("SKILL.md"),
+                "---\nname: better-harness\ntags:\n  - harness\n---\nold body\n");
+
+        new SkillBuiltinExtractor(tempDir).extractAll();
+
+        var parsed = SkillFrontmatterParser.parse(Files.readString(harness.resolve("SKILL.md")));
+        assertTrue(parsed.warnings().isEmpty(), parsed.warnings().toString());
+        assertEquals(List.of("harness", "review", "workflow"), parsed.frontmatter().get("tags"));
+        assertTrue(parsed.body().contains("# PaiCLI Better Harness"));
+    }
 
     @Test
     void extractsBuiltinSkillFromClasspath(@TempDir Path tempDir) throws IOException {

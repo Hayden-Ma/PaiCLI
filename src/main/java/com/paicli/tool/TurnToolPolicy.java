@@ -49,8 +49,16 @@ public final class TurnToolPolicy {
     private static final Pattern STRONG_LOCAL_ACTION = Pattern.compile(
             "^(?:先|再|然后|接着|顺便|同时|并且?)?(?:读一下|读取|阅读|列出|查看|看看|检查|验证|核对|"
                     + "分析|总结|概括|解释|介绍|改写|润色|翻译|修改|修复|修正|实现|开发|新增|添加|"
-                    + "删除|去掉|替换|创建|构建|编译|执行|运行|测试|调试|排查|定位|生成|写入|写|"
+                    + "删除|删掉|移除|移动|重命名|去掉|替换|创建|构建|编译|执行|运行|测试|调试|排查|定位|生成|写入|写|"
                     + "提取|对比|推荐|告诉我|重构|配置|安装|升级|更新|部署|启动|停止|提交|保存|完成|记住|记一下)");
+    private static final Pattern DIRECTORY_ACTION = Pattern.compile(
+            "^(?:进入|切换到|切到)\\s*.{1,160}?(?:目录|文件夹)(?:\\s|$|[，,；;。])");
+    private static final Pattern LOCATION_PREFIX = Pattern.compile(
+            "^(?:在|到)\\s*.{1,160}?(?:目录|文件夹)(?:中|下|里)?\\s*");
+    private static final Pattern QUOTED_INPUT = Pattern.compile(
+            "(?s)```.*?```|~~~.*?~~~|\"[^\"]*\"|'[^']*'|“[^”]*”|‘[^’]*’|《[^》]*》|`[^`]*`");
+    private static final Pattern EXCERPT_PREFIX = Pattern.compile(
+            "^(?:标题|主题|摘录|原文|引用|例句|示例|文章|文档|日志)(?:内容)?[：:]");
     private static final Pattern CHINESE_WEB_ACTION = Pattern.compile(
             "^(?:先|再|然后|接着|顺便|同时|并且?)?(?:"
                     + "(?:搜索|搜)(?:一下|下|这个|这篇|该|标题|原文|资料|最新|关于|关键词|\\s|：|:|$)"
@@ -65,7 +73,7 @@ public final class TurnToolPolicy {
             "(?i)^(?:please\\b|can\\s+you\\b|could\\s+you\\b|would\\s+you\\b|help\\s+me\\b|"
                     + "i\\s+(?:want|need)\\s+you\\s+to\\b|read\\b|list\\b|check\\b|verify\\b|"
                     + "analy[sz]e\\b|summari[sz]e\\b|explain\\b|rewrite\\b|edit\\b|translate\\b|fix\\b|"
-                    + "implement\\b|add\\b|remove\\b|create\\b|run\\b|generate\\b|build\\b|test\\b|debug\\b|"
+                    + "implement\\b|add\\b|remove\\b|create\\b|run\\b|generate\\b|build\\b|compile\\b|test\\b|debug\\b|"
                     + "search(?:\\s+the\\s+web)?\\s+for\\b|find\\s+(?:the\\s+)?(?:original|source|article)\\b|"
                     + "look\\s+up\\b|open\\s+(?:this|the|https?://)|visit\\b|fetch\\s+https?://|browse\\s+https?://|"
                     + "(?:what|why|how|when|who|where|which)\\s+(?:is|are|do|does|did|has|have|can|should|would)\\b)" );
@@ -157,11 +165,19 @@ public final class TurnToolPolicy {
 
     private TurnToolPolicy(String submittedUserInput, boolean forceActionable,
                            boolean sharedBrowserSession, boolean agentOwnedCurrentPage) {
+        this(submittedUserInput, forceActionable, sharedBrowserSession, agentOwnedCurrentPage, null);
+    }
+
+    private TurnToolPolicy(String submittedUserInput, boolean forceActionable,
+                           boolean sharedBrowserSession, boolean agentOwnedCurrentPage,
+                           TurnToolPolicy continuation) {
         String input = submittedUserInput == null ? "" : submittedUserInput.trim();
-        this.explicitNoWeb = EXPLICIT_NO_WEB.matcher(input).find();
+        this.explicitNoWeb = EXPLICIT_NO_WEB.matcher(input).find()
+                || (continuation != null && continuation.explicitNoWeb);
         String actionableInput = explicitNoWeb ? stripNoWebConstraints(input) : input;
         this.actionable = forceActionable || looksActionable(actionableInput);
-        this.webForbidden = explicitNoWeb || looksLikeLocalTextTransform(input);
+        this.webForbidden = explicitNoWeb || looksLikeLocalTextTransform(input)
+                || (continuation != null && continuation.webForbidden);
         this.browserIntent = detectBrowserIntent(input);
         this.browserTabManagementRequested = BROWSER_TAB_REQUEST.matcher(input).find();
         this.existingBrowserContextRequested = EXISTING_BROWSER_CONTEXT.matcher(input).find()
@@ -208,6 +224,34 @@ public final class TurnToolPolicy {
                                                boolean agentOwnedCurrentPage) {
         return new TurnToolPolicy(
                 submittedUserInput, false, sharedBrowserSession, agentOwnedCurrentPage);
+    }
+
+    /**
+     * A short reply can select the previous assistant's numbered option or continue an explicit
+     * task. Only actionability and restrictive web flags carry over; URLs, browser permissions,
+     * and memory authority must still come from the current submitted text.
+     */
+    public static TurnToolPolicy fromConversationReply(String submittedUserInput,
+                                                       String previousAssistant,
+                                                       TurnToolPolicy previousPolicy,
+                                                       boolean sharedBrowserSession,
+                                                       boolean agentOwnedCurrentPage) {
+        String reply = submittedUserInput == null ? "" : submittedUserInput.trim()
+                .replaceFirst("[。！!，,]+$", "").trim();
+        boolean continuation = false;
+        if (previousPolicy != null && previousAssistant != null && !previousAssistant.isBlank()) {
+            Matcher option = Pattern.compile("(?:选|选择|第)?\\s*([1-9][0-9]?)\\s*(?:项|个)?").matcher(reply);
+            if (option.matches()) {
+                continuation = Pattern.compile("(?m)^\\s*(?:\\*\\*)?" + option.group(1)
+                        + "[.、)）]\\s*\\S").matcher(previousAssistant).find();
+            } else if (previousPolicy.actionable) {
+                continuation = Pattern.compile(
+                        "(?i)(?:继续|继续吧|继续执行|接着做|开始吧|可以|好的?|行|同意|确认|没问题|"
+                                + "就这样|按这个来|ok|yes|continue|go ahead|do it)").matcher(reply).matches();
+            }
+        }
+        return new TurnToolPolicy(submittedUserInput, continuation, sharedBrowserSession,
+                agentOwnedCurrentPage, continuation ? previousPolicy : null);
     }
 
     /** Use for an already explicit task envelope while retaining no-web and URL rules. */
@@ -596,8 +640,33 @@ public final class TurnToolPolicy {
         if (input.indexOf('?') >= 0 || input.indexOf('？') >= 0) {
             return true;
         }
+        if (hasActionInInstructionClauses(input)) {
+            return true;
+        }
         return input.matches("^(?:把|将).{1,240}(?:改|写|删|去掉|替换|翻译|总结|整理).*$")
                 || input.matches("^给.{1,160}(?:打分|评价|点评).*$");
+    }
+
+    private static boolean hasActionInInstructionClauses(String input) {
+        // A command may start with a location or setup clause. Inspect later clauses too, but
+        // never promote quoted examples, code blocks, or explicitly labelled excerpts to tasks.
+        if (EXCERPT_PREFIX.matcher(input).find()) {
+            return false;
+        }
+        String instructions = QUOTED_INPUT.matcher(input).replaceAll(" ");
+        for (String clause : instructions.split("[，,；;。\\n]+")) {
+            String body = stripCommandLead(clause);
+            if (DIRECTORY_ACTION.matcher(body).find()) {
+                return true;
+            }
+            body = LOCATION_PREFIX.matcher(body).replaceFirst("");
+            if (STRONG_LOCAL_ACTION.matcher(body).find()
+                    || CHINESE_WEB_ACTION.matcher(body).find()
+                    || ENGLISH_ACTION.matcher(body).find()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String stripNoWebConstraints(String input) {

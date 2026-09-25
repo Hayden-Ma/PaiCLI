@@ -61,7 +61,9 @@ src/main/java/com/paicli/
 - MCP 配置合并 `~/.paicli/mcp.json` 与项目 `.paicli/mcp.json`；检测到 `STEP_API_KEY` 自动内置 `step_search`
 - 思考模型（DeepSeek Flash / V4 Pro、GLM-5.3、混元 Hy4、Kimi thinking）的 `reasoning_content` 必须随下一轮带回；各 provider 协议差异、重试策略见 `docs/agents-reference.md`
 - 手动模型管理：`/model list [provider]` / `/model refresh <provider>` / `/model add <provider> <id> [--like <同供应商模型>]`；模型能力保存在 `providers.<provider>.models`。刷新只追加、添加不切换、未知能力按 128k 文本处理；用户显式切换后才应用，保存失败保留旧选择，不用推理请求探测能力
-- DeepSeek 是默认 provider（`PaiCliConfig.defaultProvider`，Key 回退顺序 deepseek 在前），默认模型 DeepSeek V4.1 Flash（模型 ID `deepseek-flash`），支持图片；官方兼容旧名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 同样支持图片，`deepseek-v4-pro` 仍为文本模型。历史评测合同的模型标识不随交互默认值改写
+- DeepSeek 是默认 provider（`PaiCliConfig.defaultProvider`，Key 回退顺序 deepseek 在前），默认模型 DeepSeek V4.1 Flash（模型 ID `deepseek-flash`），支持图片；官方兼容旧名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 由 V4.1 Flash 提供服务，同样支持图片；只列为兼容说明，不作为独立内置模型或刷新新增项，已有选择/手动配置保留并标注映射，`deepseek-v4-pro` 仍为文本模型。历史评测合同的模型标识不随交互默认值改写
+- 模型 / MCP / Skill 列表统一使用 `TerminalTable`，按显示列宽处理中文和 ANSI，窄屏下移末列或转纵向条目，不省略模型 ID；列表只保留比较字段，模型配置详情走 `/model info`
+- 启动模型：环境变量 → 项目 `.env` → 用户 `.env` → 保存的模型 → 默认值（`getStartupModel`）；会话内 `/model` 显式选择仍优先。显示名只用于启动页和状态栏，不能改写 API 请求、工具策略或历史评测 ID
 - 交互期输出走 `Renderer.stream()`，主路径不要新增裸 `System.out.println`；inline 渲染约定见 `docs/agents-reference.md`
 
 ## 关键行为约束
@@ -91,9 +93,13 @@ src/main/java/com/paicli/
 
 ### Web 与浏览器
 
+- 搜索 provider 显式 `SEARCH_PROVIDER` 优先；自动选择顺序为 GLM Key → SerpAPI Key → SearXNG URL → DeepSeek Key，保留已有配置优先级。DeepSeek 搜索走独立 Anthropic Messages 请求，模型由 `DEEPSEEK_SEARCH_MODEL` 指定（默认 `deepseek-flash`）；URL 只从结构化搜索结果提取，缺少结果块或工具报错直接失败，不从模型正文提取链接
+
 - `web_fetch` 和浏览器导航的 URL 只能来自用户顶层原文或本分支 `web_search` 的结构化 `discoveredUrls`；工具正文、模型输出都不能扩充授权，被拒绝的调用不能换工具绕过
 - Plan 并行任务和 Team worker 各用独立策略副本，只有 DAG 声明的依赖才继承上游 `web_search` URL
 - 只给裸标题或主题、没有动作时先澄清，本轮不调用工具；“当前项目/文件”类问题优先本地工具
+- 多步骤输入检查各个非引用分句的动作，支持“进入 demo 目录，编译并运行”等目录前缀；引文、代码块和明确标注的摘录不作为新增动作依据
+- ReAct 的简短续接回复按上一条助手正文识别：编号须对应上一条选项，“继续/好的”等须有上一轮任务；续接保留禁网限制，不继承旧 URL 或记忆写入授权，`/clear` 清除续接状态
 - 已知 URL 先 `web_fetch`，SPA / 防爬再用 Chrome DevTools MCP；读取优先 `take_snapshot`；公开页面不提前切 shared 模式
 
 ### Plan 与 Team

@@ -93,17 +93,20 @@ mvn test -DskipTests=false
 - `/model glm-5.3-flash` / `/model glm-5.1` / `/model glm-5v-turbo` 明确切 GLM 模型；`/model hy4-preview` 明确切混元 Hy4；`/model deepseek` / `/model hunyuan` / `/model step` / `/model kimi` / `/model freellmapi` / `/model xfyun` / `/model agnes` 切 provider 并读取配置里的具体模型
 - 配置持久化到 `~/.paicli/config.json`，API Key 可从配置、环境变量或 `.env` 读取
 - DeepSeek V4.1 Flash / V4 Pro 使用 `thinking.type=enabled`、`reasoning_effort=max`、`temperature=1`、`top_p=0.95`（DeepSeek 思考模式忽略 temperature，仅保留兼容）；GLM-5.3 还启用持续思考、流式工具与 usage；混元 Hy4 使用 `reasoning_effort=high` 并请求流式 usage。三者在 thinking tool-call 续轮都会带回 assistant `reasoning_content`
-- DeepSeek 是默认 provider：未保存默认 provider 时优先使用，找不到 Key 时按 deepseek → glm → hunyuan → step → kimi → freellmapi → xfyun → agnes 顺序回退。默认模型 DeepSeek V4.1 Flash（模型 ID `deepseek-flash`），支持图片输入；旧名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 由官方转到新版，同样启用图片能力。`deepseek-v4-pro` 仍按文本模型处理。升级已有配置可执行 `/model deepseek-flash`；保存的 provider 模型优先于环境变量和 `.env`。
-- DeepSeek V4.1 Flash / V4 Pro 对正文 DSML 工具调用提供 fail-closed 兼容：只转换当前请求已暴露的工具，未知或畸形块保持文本；普通正文与 reasoning 仍保持流式输出
+- DeepSeek 是默认 provider：未保存默认 provider 时优先使用，找不到 Key 时按 deepseek → glm → hunyuan → step → kimi → freellmapi → xfyun → agnes 顺序回退。默认模型 DeepSeek V4.1 Flash（模型 ID `deepseek-flash`），支持图片输入；旧名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 由官方转到新版，同样启用图片能力。`deepseek-v4-pro` 仍按文本模型处理。升级已有配置可执行 `/model deepseek-flash`；启动模型按环境变量 → 项目 `.env` → 用户 `.env` → 已保存模型 → 客户端默认值选择；会话内显式 `/model <模型ID>` 立即生效并保存，下次启动如果仍有环境配置则优先环境配置。启动页与底部状态栏把 `deepseek-flash` 显示为 `DeepSeek V4.1 Flash`，请求仍使用原始模型 ID。
+- DeepSeek V4.1 Flash / V4 Pro 对正文 DSML 工具调用提供 fail-closed 兼容：支持 `tool_calls` / `calls` 容器及标记后的空白，只转换当前请求已暴露的工具，未知或畸形块保持文本；普通正文与 reasoning 仍保持流式输出
+- ReAct 支持用 `1` / `选1` 回复上一条编号选项，以及用“继续”“好的”续接上一轮任务；不会再因回复过短而漏发工具定义。续接保留禁网限制，不自动继承旧 URL 或记忆写入授权，`/clear` 后重新判断
+- 多步骤任务会检查逗号、分号和换行后的动作，支持“进入 demo 目录，编译并运行 Hello.java”和“在 demo 目录下运行 Hello.java”等表达；引用文字、代码块与明确标注的摘录不会因此触发工具
 - OpenAI-compatible provider 共用有限重试：`408` / `429` / 可恢复 `5xx` 与瞬时连接故障默认总尝试 3 次，采用指数退避 + jitter 并读取 `Retry-After`；确定性 `4xx` 直接失败。SSE 尚未交付输出时可安全重发，已经流给终端的半截内容不会自动重放
 
 #### 手动维护模型
 
-`/model list [provider]` 查看内置、已配置和新发现的模型，以及上下文窗口和图片能力。`/model refresh <provider>` 使用该供应商当前 API 地址和凭证请求模型列表，只追加新 ID，保留已有配置和当前选择；不会发送对话或执行推理测试。供应商没有模型列表接口时，可以手动添加：
+`/model list [provider]` 按供应商分组，用终端表格展示模型、上下文、输入能力和状态；`●` 标记当前选择，上下文简写为 `1M` / `128k`。`/model info [模型ID]` 查看精确上下文和手动配置的模板、思考模式、推理强度等字段，不带 ID 时查看当前模型。`/model refresh <provider>` 使用该供应商当前 API 地址和凭证请求模型列表，只追加新 ID，保留已有配置和当前选择；不会发送对话或执行推理测试。供应商没有模型列表接口时，可以手动添加：
 
 ```text
 /model refresh deepseek
 /model list deepseek
+/model info deepseek-flash
 /model add deepseek <新模型ID> --like deepseek-flash
 /model deepseek/<新模型ID>
 ```
@@ -114,10 +117,15 @@ mvn test -DskipTests=false
 
 新发现或未指定模板的新模型默认按 **128k、仅文本** 保守处理，列表标注发现条目的能力待配置；这不代表供应商实际能力已核实。刷新失败不删除旧条目，也不会猜测哪个模型是“最新版”。
 
+DeepSeek 的当前内置列表按[官方文档](https://api-docs.deepseek.com/zh-cn/)列出 `deepseek-flash`（V4.1 Flash）和 `deepseek-v4-pro`。`deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 是兼容旧名，原模型已下线，官方将请求转到 V4.1 Flash；不再作为独立内置模型列出，也不会在刷新时重新登记成 128k 文本模型。已有选择或手动配置中的旧名保留，列表、启动信息和 `/model` 提示会标注对应关系，明确执行 `/model deepseek-flash` 后才保存新名称。刷新结果区分接口返回 ID 数、兼容旧名数和新增模型数；新增为 0 时不再提示配置新模型能力。
+
+模型、MCP（`/mcp`）、Skill（`/skill list`）列表共用轻分隔线表格：按终端显示列宽对齐中文和 ANSI 文本，宽度不足时先下移最后一列，再切成纵向条目；完整名称保留，极窄屏幕只折行、不省略模型 ID。可通过 `NO_COLOR` 或 `-Dpaicli.render.color=false` 关闭颜色。刷新、切换显示简短结果；旧模型名的映射提示在表格或启动栏下方独立显示。
+
 ### 第九期：联网能力 + Web 工具
 
 - AgentBench D4 已接离线原生 Web、relay v9、私有 recipe、冻结源绑定与独立 Python 计分。正式请求仅开放精确 D4/REACT/MOCK_WEB，凭证读取前核验源、README 基线和完整题面；envelope v4 交叉核对模型批次、实际观察到的工具结果、宿主网页响应及答案/引用。源/证据不一致不评分，错误调用、引用或答案仍严格失败。HOST/dev Coordinator 仍拒绝未冻结的 Web 请求；脚本控制不是模型成绩，不改变交互式联网配置。旧审计勘误见运行手册第 23 节，正式接入见第 24 节。
-- `web_search` 抽象成 `SearchProvider` 接口，内置三个实现：智谱 Web Search（默认，与 GLM 共用 Key，0.01–0.05 元/次）、SerpAPI（国际通用付费）、SearXNG（开源自托管免费）
+- `web_search` 抽象成 `SearchProvider` 接口，内置四个实现：智谱 Web Search（与 GLM 共用 Key）、SerpAPI（国际通用付费）、SearXNG（开源自托管免费）、DeepSeek 原生搜索（与 DeepSeek 对话共用 Key）。未指定 `SEARCH_PROVIDER` 时按 GLM Key → SerpAPI Key → SearXNG URL → DeepSeek Key 自动选择，保留已有搜索配置的优先级
+- 仅配置 `DEEPSEEK_API_KEY` 即可启用 DeepSeek 搜索；同时配置了其他搜索服务时，用 `SEARCH_PROVIDER=deepseek` 指定。可用 `DEEPSEEK_SEARCH_MODEL` 单独设置搜索模型，默认 `deepseek-flash`，不随 `/model` 切换。每次搜索通过 Anthropic Messages API 发起独立模型请求（最多 4096 输出 Token、5 次服务端搜索、120 秒总超时），会产生额外 Token 费用；不自动重试或跟随重定向。只提取结构化搜索结果中的 URL，引用摘要按 URL 匹配，缺少搜索结果块或搜索工具报错会明确失败。`top_k` 在本地去重后截断，不保证减少服务端调用。
 - `web_fetch` 新工具：有可信来源的 URL → OkHttp 抓取 → Jsoup 解析 → 简易 readability → Markdown 正文
 - 联网不再对“最新/当前/今天/趋势/新闻/版本”等关键词做自动 freshness 预检。顶层用户输入只是标题、主题或摘录而没有任务目标时，PaiCLI 会先询问用户，本轮不调用工具；用户明确要求不要联网时始终优先遵从。
 - 模型不得根据标题猜测 URL。明确要求查找但没有 URL 时先 `web_search`；`web_fetch` 和浏览器导航只接受用户实际提交的顶层原文（不含 `@path` / MCP resource 展开正文）中的 URL，或当前执行分支由搜索 provider 返回的结构化 `discoveredUrls`。搜索正文/snippet/query 回显/错误提示、`web_fetch` 正文、浏览器结果和普通文件/命令输出里的链接不会自动取得访问授权；StepSearch MCP 的非结构化结果文本也不会生成 URL 凭据。
@@ -263,6 +271,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 - 兼容旧设置：`PAICLI_TUI=true` 自动映射为 `PAICLI_RENDERER=lanterna`（已 deprecated）
 - `PAICLI_NO_STATUSBAR=true` 在 inline 模式下禁用 JLine 底部 dock（不适合 ANSI 光标控制的终端）
 - `NO_COLOR=1` 禁用所有 ANSI 颜色，保留布局
+- 代码块折叠、Ctrl+O 重绘和命令选择列表只清理自身占用的行，保留底部模式、模型名与统计数据，避免局部刷新擦掉状态栏
 
 ### 第十七期：LSP 诊断注入（MVP）
 
@@ -450,7 +459,7 @@ Plan/FILE_ONLY 配置；题面、两份 CSV、runtime 与逐题合同由同一�
 
 ### 第九期
 
-- 🌐 `web_search` 工具支持四条路：Step 3.7 Flash + StepSearch MCP 优先、智谱 Web Search（与 GLM 共用 Key默认推荐）、SerpAPI（国际通用付费）、SearXNG（开源自托管免费）
+- 🌐 `web_search` 工具支持五条路：Step 3.7 Flash + StepSearch MCP 优先、智谱 Web Search、SerpAPI、SearXNG、DeepSeek 原生搜索（复用 DeepSeek Key；可通过 `SEARCH_PROVIDER=deepseek` 指定普通搜索 provider，StepSearch 优先规则仍适用）
 - 📰 `web_fetch` 工具：抓 URL → readability 提取 → 返回 Markdown 正文
 - 🛡️ 内置网络访问策略：屏蔽内网、loopback、`file://`；5MB 响应上限；每分钟 30 次限流
 - 🚧 边界明确：SPA / 防爬墙返回空正文 + 已知边界提示，不重试

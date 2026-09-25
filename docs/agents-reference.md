@@ -53,7 +53,7 @@ ReAct、Plan 单任务与 SubAgent 共用 `AgentBudget`。系统属性 > 默认�
 SSE 流式下 readTimeout 是两次 read 间最大间隔，GLM-5.1 生成大段 reasoning 时可能长时间静默，所以放宽到 300 秒。
 统一重试默认值：`paicli.llm.retry.max-attempts`(3，含首次请求) / `paicli.llm.retry.base-delay.millis`(500) / `paicli.llm.retry.max-delay.millis`(30000)。仅重试 `408`、`429`、`500`、`502`、`503`、`504` 和瞬时连接 / 读取故障，使用指数退避 + jitter，并在上限内尊重 `Retry-After`；`400`、`401` 等确定性错误不重试。SSE 必须看到 `[DONE]` 或非空 `finish_reason` 才视为完整；没有流式消费者时可丢弃半截结果重发，真实消费者已收到 reasoning/content 后禁止自动重放，避免终端出现重复内容。
 DeepSeek 流式调用默认使用 HTTP/1.1，避免部分 HTTP/2 网关在长 SSE 响应中重置 stream，表现为 `stream was reset: INTERNAL_ERROR`。
-DeepSeek Flash / V4 Pro 的正文 DSML fallback 只接受单个结构完整的 tool block，工具名必须存在于本轮请求的 exposed tools，参数也必须通过严格解析；未知、重复、畸形或未授权调用保持普通文本。stream filter 只捕获疑似 DSML tail，普通 content 与 reasoning 继续逐 delta 传给 renderer。
+DeepSeek Flash / V4 Pro 的正文 DSML fallback 只接受单个结构完整的 tool block，支持 `tool_calls` / `calls` 容器及 DSML 标记后的空白，首尾容器名必须一致；工具名必须存在于本轮请求的 exposed tools，参数也必须通过严格解析，不猜测或重命名工具。未知、重复、畸形或未授权调用保持普通文本。stream filter 只捕获疑似 DSML tail，普通 content 与 reasoning 继续逐 delta 传给 renderer。
 DeepSeek Flash / V4 Pro 使用 `thinking.type=enabled`、`reasoning_effort=max`、`temperature=1`、`top_p=0.95`（官方思考模式忽略 temperature，该字段仅保留兼容）；GLM-5.3 使用同档参数，并额外发送 `thinking.clear_thinking=false`、`tool_stream=true`、`stream_options.include_usage=true`；混元 Hy4 preview 使用 `reasoning_effort=high`、`stream_options.include_usage=true`。
 DeepSeek Flash / V4 Pro、GLM-5.3 与混元 Hy4 preview 的 thinking tool-call 续轮会回填 assistant `reasoning_content`。DeepSeek Flash（`deepseek-flash` 及官方兼容旧名）支持图片输入；DeepSeek V4 Pro 与混元 Hy4 不发送图片输入：含图片的 `ContentPart` 会在请求序列化时替换成文本提示，避免不支持多模态的 API 收到 `image_url` block。
 
@@ -162,6 +162,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `web_fetch`：NetworkPolicy → WebFetcher → HtmlExtractor，SPA/防爬墙返回空正文 + 边界提示
 - Prompt 不包含 Freshness Policy，也不对“最新/当前/今天”等关键词做自动 `web_search` 预检。模型只能在顶层用户目标明确时主动选择联网工具；明确“不要联网”始终优先。
 - 顶层输入只是裸标题、主题或摘录，且无动作、问题或目标时，当前轮只做澄清，不调用任何工具。模型不得根据标题、记忆或自己的 reasoning 猜测 URL。
+- ReAct 使用当前 `conversationHistory` 的末条助手正文判断简短续接：`1` / `选1` / `第1项` 必须匹配上一条编号选项；“继续”“好的”等要求上一轮已是任务。只恢复 actionability 并保留上一轮禁网限制，不继承旧 URL、浏览器操作或记忆写入授权；文件/MCP 展开内容不能充当用户选项回复。`/clear` 同时清除续接策略状态。
+- `TurnToolPolicy` 的动作判断还检查用户原文中逗号、分号、句号和换行分隔的指令，识别目录操作与“在 … 目录下”前缀，避免首个分句是位置说明时丢掉后续“编译/运行”等动作。该补充判断先排除引文、代码块和明确标注的摘录；禁网、URL 来源、工具审批仍单独检查。
 - 用户明确要求查找但没有 URL 时，先 `web_search`；`web_fetch` 或 Chrome / MCP 导航 URL 只能来自用户实际提交的顶层原文（不能是 `@path` / MCP resource 展开正文），或同一执行分支由搜索 provider 返回的结构化 `discoveredUrls`。搜索正文、snippet、query 回显、错误提示、`web_fetch` 正文、浏览器导航/快照/网络列表、普通本地工具结果、assistant reasoning、回复文本和 tool arguments 都不能建立 URL provenance；当前 StepSearch MCP 的非结构化文本不会生成凭据。
 - `TurnToolPolicy` 是运行时确定性边界：ReAct / Plan / Team 都必须单独传入用户提交原文与展开后的执行内容，不能让 planner / worker 派生的“搜索”子任务自行获得联网授权。Plan 审阅补充会重建策略；Plan 并行任务和 Team worker 使用 fork 后的独立 URL 集合，避免跨分支扩权。只有 DAG 中声明的后继依赖会继承前置分支不可伪造的 `TrustedUrlContext`；任务结果文本不作为授权来源。grounded URL 先只曝光导航，成功导航只建立当前页读取上下文，读取结果不产生新 URL 授权；交互工具必须有顶层原文明确授权。shared Chrome 的真实模式与 PaiCLI-owned 当前页从 `BrowserSession` 跨轮注入策略；非 owned 标签页只在用户明确要求时开放只读，导航/写入/关闭会硬拒绝，导航结果的全量 `# Pages` 会在回灌模型前裁成单页回执。策略在 StepSearch、内置 SearchProvider / WebFetcher 和 Chrome / MCP 路由之前执行，拒绝结果不得用 fallback 绕过。
 - StepSearch 优先级：通过 `TurnToolPolicy` 后，当前模型 provider=`step` 且 model 以 `step-3.7-flash` 开头，并且自动/显式 `mcp__step_search__web_search` / `mcp__step_search__web_fetch` 已注册时，内置 `web_search` / `web_fetch` 会先代理到 StepSearch MCP；MCP 未就绪或返回不可用结果时回退原实现。
@@ -222,6 +224,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `/export` 导出当前 ReAct conversationHistory 为 Markdown 到 `~/.paicli/exports/session-*.md`；包含完整 system prompt，便于检查 LLM 实际接收前的指令，命令不接受路径参数。
 - 普通任务和斜杠命令提交后都会以 `>` 暗色整行块回写原始输入，避免 JLine accept 后清掉编辑行导致结果区看不到刚执行的命令
 - InlineRenderer 不使用独立 JLine `Display.update()` 维护 thinking 临时区；真实终端验证发现独立 Display 会在 transcript/status 输出后从错误位置向上清屏。当前实现用固定高度 live 区重写自身行，content/tool 边界先清理 live 区再追加 transcript。
+- CLI 列表使用 `util/TerminalTable`：读取 `paicli.render.columns` / `COLUMNS`，通过 JLine 计算中文与 ANSI 显示宽度；整表过宽先下移末列，仍过宽转纵向条目。名称不省略，极窄终端按列宽折行。样式沿用 `AnsiStyle` 的颜色开关。`/model info [模型ID]` 展示完整手动配置；刷新 / 切换结果与旧名映射分行输出。
 - 交互期输出优先走 `Renderer.stream()`；`Main`、`PlanExecuteAgent`、`Planner`、`AgentOrchestrator` 都可接收同一个 renderer 输出流，避免绕过 inline renderer 直接写 stdout
 - `CodeIndex` 通过 `ProgressListener` 上报索引开始 / 文件数量 / 进度 / 完成或失败，`/index` 绑定当前 renderer 输出流；内部异常细节写 logger
 
@@ -546,6 +549,8 @@ OpenAI-compatible LLM 请求统一由 `LlmRetryPolicy` 做有限重试：默认�
 Agnes provider 名为 `agnes`，默认 Base URL 为 `https://apihub.agnes-ai.com/v1`，默认模型 `agnes-2.0-flash`，走 OpenAI-compatible Chat Completions，默认 1M context window，支持流式输出和 tools。
 
 ### 启动与 inline 渲染约定
+
+- 代码块自动折叠、Ctrl+O transcript 重绘、FoldableBlock 与 SlashPalette 的局部擦除统一使用逐行清理，不得用 `CLEAR_TO_EOS` 擦到 JLine dock。JLine 会缓存上次绘制内容，外部清屏后仅更新变化字段会留下模式、模型名等空白；应约束清理范围，而不是依赖下一次 token 刷新修复。transcript 上移范围须扣除两行状态和分隔线。
 
 - 开屏 Banner 使用无右边框的简洁布局，避免 CJK/ANSI 字宽导致右侧竖线错位；Phase 22 后默认是 π 主题彩色 logo + Qoder 风格首屏，只展示模型、MCP、Skill、ReAct 状态和三条 getting-started tips，不再把 MCP server 明细刷成启动日志。
 - inline 模式使用 JLine 4 的 LineReader 编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`。

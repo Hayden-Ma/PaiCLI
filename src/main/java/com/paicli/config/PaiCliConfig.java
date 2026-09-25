@@ -85,6 +85,13 @@ public class PaiCliConfig {
         return loadModelFromEnv(provider);
     }
 
+    /** Explicit launch configuration wins over the last model saved by /model. */
+    public String getStartupModel(String provider) {
+        if (provider == null) return null;
+        String explicit = loadModelFromEnv(provider);
+        return explicit == null || explicit.isBlank() ? getModel(provider) : explicit;
+    }
+
     public String getBaseUrl(String provider) {
         ProviderConfig providerConfig = providers.get(provider);
         if (providerConfig != null && providerConfig.getBaseUrl() != null && !providerConfig.getBaseUrl().isBlank()) {
@@ -143,7 +150,7 @@ public class PaiCliConfig {
         }
     }
 
-    private static String loadModelFromEnv(String provider) {
+    protected String loadModelFromEnv(String provider) {
         String envKey = switch (provider.toLowerCase()) {
             case "glm" -> "GLM_MODEL";
             case "deepseek" -> "DEEPSEEK_MODEL";

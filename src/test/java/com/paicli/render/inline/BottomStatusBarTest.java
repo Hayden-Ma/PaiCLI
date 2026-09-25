@@ -20,6 +20,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class BottomStatusBarTest {
 
     @Test
+    void deepseekStatusUsesCurrentProductNameInsteadOfRequestId() {
+        var agent = new com.paicli.agent.Agent(new com.paicli.llm.DeepSeekClient("synthetic-key", "deepseek-flash"));
+        String line = BottomStatusBar.formatStatusLines(agent.currentStatus("idle"), 180).get(1).toString();
+        assertTrue(line.contains("DeepSeek V4.1 Flash"));
+        assertFalse(line.contains("deepseek-v4-flash"));
+    }
+
+    @Test
     void formatStatusLineIncludesAllFields() {
         StatusInfo info = StatusInfo.tokens("glm-5.1", 200_000L, 1200L, 1000L, 234L, 100L, "¥0.0123",
                 true, 1500L, "running");

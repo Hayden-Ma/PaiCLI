@@ -2,32 +2,47 @@ package com.paicli.cli;
 
 import com.paicli.config.PaiCliConfig;
 import com.paicli.llm.*;
+import com.paicli.util.AnsiStyle;
+import com.paicli.util.TerminalTable;
 import java.io.IOException;
 import java.util.*;
 
 final class ModelCommands {
     private ModelCommands() {}
 
-    static String handle(String payload, PaiCliConfig config, LlmClient current) throws IOException {
-        return handle(payload, config, current, new ModelDiscovery());
+    @FunctionalInterface
+    interface ModelLookup {
+        List<String> discover(LlmClient client) throws IOException;
     }
 
-    static String handle(String payload, PaiCliConfig config, LlmClient current, ModelDiscovery discovery) throws IOException {
+    static String handle(String payload, PaiCliConfig config, LlmClient current) throws IOException {
+        return handle(payload, config, current, new ModelDiscovery()::discover);
+    }
+
+    static String handle(String payload, PaiCliConfig config, LlmClient current, ModelLookup discovery) throws IOException {
         String[] args = payload.trim().split("\\s+");
         return switch (args[0].toLowerCase(Locale.ROOT)) {
             case "list" -> {
                 if (args.length > 2) throw new IllegalArgumentException("用法: /model list [provider]");
                 yield list(config, current, args.length == 2 ? args[1] : null);
             }
+            case "info" -> info(config, current, args);
             case "refresh" -> {
                 if (args.length != 2) throw new IllegalArgumentException("用法: /model refresh <provider>");
                 String provider = args[1].toLowerCase(Locale.ROOT);
                 ModelCatalog.requireProvider(provider);
                 LlmClient client = LlmClientFactory.create(provider, config);
                 if (client == null) throw new IllegalArgumentException("未配置 " + provider + " 的 API Key");
-                int count = ModelCatalog.mergeDiscovered(config, provider, discovery.discover(client));
-                yield "已刷新 " + provider + "：新增 " + count + " 个模型，当前模型未切换。\n"
-                        + "新发现模型的能力待配置，默认按 128k 文本处理。用 /model add 补充，/model list " + provider + " 查看。";
+                List<String> discovered = discovery.discover(client);
+                int count = ModelCatalog.mergeDiscovered(config, provider, discovered);
+                long aliases = discovered.stream().filter(id -> ModelCatalog.aliasTarget(provider, id) != null).count();
+                String message = AnsiStyle.section("✓ " + providerName(provider) + " 模型列表已更新")
+                        + "\n  返回 " + discovered.size() + " 个 · 新增 " + count + " 个 · 当前选择未变";
+                if (aliases > 0) message += "\n  兼容旧名 " + aliases + " 个，不计入新增模型";
+                if (count > 0) message += "\n  新模型按 128k 文本登记，能力待配置：/model add";
+                String currentModel = current != null && provider.equals(current.getProviderName())
+                        ? current.getModelName() : config.getModel(provider);
+                yield TerminalTable.wrap(message + aliasHint(provider, currentModel), TerminalTable.columns());
             }
             case "add" -> add(config, args);
             default -> throw new IllegalArgumentException(usage());
@@ -36,25 +51,94 @@ final class ModelCommands {
 
     private static String list(PaiCliConfig config, LlmClient current, String onlyProvider) {
         if (onlyProvider != null) ModelCatalog.requireProvider(onlyProvider);
-        StringBuilder out = new StringBuilder("模型列表（* 为当前会话模型）\n");
+        int columns = TerminalTable.columns();
+        StringBuilder out = new StringBuilder();
         for (String provider : onlyProvider == null ? ModelCatalog.BUILTINS.keySet() : List.of(onlyProvider)) {
-            for (var entry : ModelCatalog.entries(config, provider).entrySet()) {
+            var entries = ModelCatalog.entries(config, provider);
+            if (current != null && provider.equals(current.getProviderName()))
+                entries.putIfAbsent(current.getModelName(), null);
+            long aliases = entries.keySet().stream().filter(id -> ModelCatalog.aliasTarget(provider, id) != null).count();
+            String title = providerName(provider) + " · " + (entries.size() - aliases) + " 个模型"
+                    + (aliases == 0 ? "" : "，" + aliases + " 个兼容旧名");
+            out.append(TerminalTable.wrap(AnsiStyle.emphasis(title), columns)).append("\n\n");
+            List<List<String>> rows = new ArrayList<>();
+            for (var entry : entries.entrySet()) {
                 String model = entry.getKey();
                 ModelProfile profile = entry.getValue();
                 LlmClient preview = ModelCatalog.preview(config, provider, model);
                 boolean selected = current != null && current.getProviderName().equals(provider) && current.getModelName().equals(model);
-                out.append(selected ? "* " : "  ").append(provider).append('/').append(model)
-                        .append(" | context=").append(preview.maxContextWindow())
-                        .append(" | vision=").append(preview.supportsImageInput())
-                        .append(" | ").append(profile == null ? "内置/已有配置" :
-                                "discovered".equals(profile.source()) ? "发现，能力待配置" : "手动配置");
-                if (profile != null && profile.template() != null) out.append(" | like=").append(profile.template());
-                if (profile != null && profile.thinking() != null) out.append(" | thinking=").append(profile.thinking());
-                if (profile != null && profile.reasoningEffort() != null) out.append(" | effort=").append(profile.reasoningEffort());
-                out.append('\n');
+                String status = ModelCatalog.aliasTarget(provider, model) != null ? "兼容旧名"
+                        : profile != null && "discovered".equals(profile.source()) ? "待配置"
+                        : profile == null ? "可用" : "自定义";
+                String name = (selected ? "● " : "  ") + model;
+                if (selected) name = AnsiStyle.section(name);
+                if (status.equals("兼容旧名") || status.equals("待配置")) status = AnsiStyle.codeLabel(status);
+                rows.add(List.of(name, compactTokens(preview.maxContextWindow()),
+                        preview.supportsImageInput() ? "文本·图片" : "文本", status));
             }
+            out.append(TerminalTable.render(List.of("  模型", "上下文", "输入", "状态"), rows, columns)).append("\n\n");
         }
-        return out.append("切换: /model <provider>/<模型ID>；添加或更新能力: /model add，查看用法。").toString();
+        boolean currentVisible = current != null && (onlyProvider == null || onlyProvider.equals(current.getProviderName()));
+        if (currentVisible) out.append(AnsiStyle.subtle("● 当前选择")).append('\n');
+        String hint = !currentVisible ? "" : aliasHint(current.getProviderName(), current.getModelName());
+        if (!hint.isEmpty()) out.append(TerminalTable.wrap(hint.stripLeading(), columns));
+        else out.append(TerminalTable.wrap("切换：/model <模型ID>\n详情：/model info <模型ID>", columns));
+        return out.toString().stripTrailing();
+    }
+
+    static String aliasHint(String provider, String model) {
+        String target = ModelCatalog.aliasTarget(provider, model);
+        return target == null ? "" : "\n旧名映射：" + model + " → " + target
+                + "\n使用推荐名称：/model " + target;
+    }
+
+    static String switchSummary(LlmClient client) {
+        return TerminalTable.wrap(AnsiStyle.section("✓ 已切换到 " + client.getModelName())
+                + "\n  " + providerName(client.getProviderName()) + " · 上下文 " + compactTokens(client.maxContextWindow())
+                + " · 对话已保留" + aliasHint(client.getProviderName(), client.getModelName()), TerminalTable.columns());
+    }
+
+    static String compactTokens(int tokens) {
+        if (tokens >= 1_000_000 && tokens % 100_000 == 0)
+            return java.math.BigDecimal.valueOf(tokens, 6).stripTrailingZeros().toPlainString() + "M";
+        if (tokens >= 1_000 && tokens % 100 == 0)
+            return java.math.BigDecimal.valueOf(tokens, 3).stripTrailingZeros().toPlainString() + "k";
+        return Integer.toString(tokens);
+    }
+
+    private static String providerName(String provider) {
+        return "deepseek".equals(provider) ? "DeepSeek" : provider;
+    }
+
+    private static String info(PaiCliConfig config, LlmClient current, String[] args) {
+        if (args.length > 2 || (args.length == 1 && current == null))
+            throw new IllegalArgumentException("用法: /model info <模型ID>");
+        Main.ModelSelection selection = args.length == 1
+                ? new Main.ModelSelection(current.getProviderName(), current.getModelName(), true)
+                : Main.resolveModelSelection(args[1], config);
+        String provider = selection.provider();
+        ModelCatalog.requireProvider(provider);
+        String requested = selection.model() == null ? config.getModel(provider) : selection.model();
+        LlmClient preview = ModelCatalog.preview(config, provider, requested);
+        String model = preview.getModelName();
+        var settings = config.getProviders().get(provider);
+        ModelProfile profile = settings == null ? null : settings.getModels().get(model);
+        StringBuilder out = new StringBuilder(AnsiStyle.emphasis(model)).append("\n\n")
+                .append("供应商：").append(providerName(provider))
+                .append("\n上下文：").append(compactTokens(preview.maxContextWindow()))
+                .append("（").append(preview.maxContextWindow()).append(" tokens）")
+                .append("\n输入：").append(preview.supportsImageInput() ? "文本·图片" : "文本");
+        if (profile != null) {
+            out.append("\n配置来源：").append("discovered".equals(profile.source()) ? "发现，能力待配置" : "手动配置");
+            if (profile.template() != null) out.append("\n能力模板：").append(profile.template());
+            if (profile.thinking() != null) out.append("\n思考模式：").append(profile.thinking());
+            if (profile.reasoningEffort() != null) out.append("\n推理强度：").append(profile.reasoningEffort());
+            if (profile.maxOutputTokens() != null) out.append("\n输出上限：").append(profile.maxOutputTokens());
+            if (profile.reasoningHistory() != null) out.append("\n保留思考历史：").append(profile.reasoningHistory());
+            if (profile.dsml() != null) out.append("\nDSML 兼容：").append(profile.dsml());
+        }
+        out.append(aliasHint(provider, model));
+        return TerminalTable.wrap(out.toString(), TerminalTable.columns());
     }
 
     private static String add(PaiCliConfig config, String[] args) throws IOException {
@@ -84,11 +168,12 @@ final class ModelCommands {
         String template = base == null ? null : base.template();
         if (options.containsKey("like")) {
             String like = options.get("like");
-            if (!entries.containsKey(like)) throw new IllegalArgumentException("找不到同供应商的模板模型: " + like);
+            if (!entries.containsKey(like) && ModelCatalog.aliasTarget(provider, like) == null)
+                throw new IllegalArgumentException("找不到同供应商的模板模型: " + like);
             base = entries.get(like);
             template = base != null && base.template() != null ? base.template() : like;
         }
-        if (base == null) base = entries.containsKey(model) || template != null
+        if (base == null) base = entries.containsKey(model) || template != null || ModelCatalog.aliasTarget(provider, model) != null
                 ? new ModelProfile(null, null, null, null, null, null, null, null, "manual") : ModelProfile.discovered();
         Integer context = integer(options, "context", base.contextWindow());
         Boolean vision = bool(options, "vision", base.imageInput());
@@ -143,6 +228,7 @@ final class ModelCommands {
         return """
                 用法:
                   /model list [provider]
+                  /model info [模型ID]
                   /model refresh <provider>
                   /model add <provider> <模型ID> [--like <已有模型ID>]
                     [--context <tokens>] [--vision true|false] [--max-output <tokens>]

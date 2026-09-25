@@ -56,13 +56,13 @@ public class LlmClientFactory {
     }
 
     public static LlmClient createFromConfig(PaiCliConfig config) {
-        LlmClient client = create(config.getDefaultProvider(), config);
+        LlmClient client = create(config.getDefaultProvider(), config.getStartupModel(config.getDefaultProvider()), config);
         if (client != null) {
             return client;
         }
 
         for (String provider : new String[]{"deepseek", "glm", "hunyuan", "step", "kimi", "freellmapi", "xfyun", "agnes"}) {
-            client = create(provider, config);
+            client = create(provider, config.getStartupModel(provider), config);
             if (client != null) {
                 return client;
             }
