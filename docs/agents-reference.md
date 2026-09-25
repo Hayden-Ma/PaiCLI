@@ -192,8 +192,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 三层加载：jar 内置 < 用户级 ~/.paicli/skills/ < 项目级 .paicli/skills/
 - frontmatter：name(必填) / description(必填,<=500) / version / author / tags
 - system prompt 索引段注入到三处提示词末尾，上限 20 个 / 4KB
-- load_skill 工具把 SKILL.md 正文(5KB 截断)写入 SkillContextBuffer
-- buffer 一次性消费，最多 3 个 skill body
+- load_skill 工具只返回确认；ReAct / Plan 任务 / Team worker 在工具结果之后、同一轮下一次 LLM 请求前，由 `LoadedSkillMessages` 把成功加载的 SKILL.md 正文(5KB 截断)拼成独立 user 消息注入
+- 正文不放进工具结果（会被 `ToolResultBoundary` 包成 untrusted-data），也不改 system prompt（保留 prompt cache）；无共享待注入状态，并行任务互不串；同批重复加载只注入一次
 
 ### Better Harness
 
@@ -217,8 +217,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 当前开屏 Banner 是无右侧盒线边框的简洁布局，避免 ANSI/CJK 字宽导致竖线错位
 - InlineRenderer 复用 JLine 4 的编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`
 - BottomStatusBar 是 JLine `Status` 托管的底部 dock：由 JLine 负责滚动区域和状态行位置，不再手写 `\n`、`moveUp`、`CLEAR_TO_EOS` 或绝对光标行号；dock 上层展示 YOLO/HITL 与 MCP/Skill 摘要，下层展示 model、phase、ctx、token、cost、elapsed 与 cwd。关键字段可用 JLine `AttributedString` 做克制彩色高亮，但纯文本格式和列宽裁剪仍要稳定。`ctx` 只表示当前仍会带入下一轮请求的上下文估算，`in/out/cache` 表示最近任务调用统计。
-- `/clear` 清空当前 ReAct conversationHistory、对应的 Session Memory 预计算状态和待注入 SkillContextBuffer，并重建不含上一轮检索记忆的 system prompt；长期记忆条目保留，后续只会按新查询重新检索注入。
-- `/compact` 手动以完整摘要压缩当前 ReAct conversationHistory，压缩期间显示动态 activity 面板，成功后刷新底部 ctx；不会清空长期记忆或待注入 SkillContextBuffer。
+- `/clear` 清空当前 ReAct conversationHistory（含已注入的 Skill 正文）和对应的 Session Memory 预计算状态，并重建不含上一轮检索记忆的 system prompt；长期记忆条目保留，后续只会按新查询重新检索注入。
+- `/compact` 手动以完整摘要压缩当前 ReAct conversationHistory，压缩期间显示动态 activity 面板，成功后刷新底部 ctx；不会清空长期记忆。
 - `/export` 导出当前 ReAct conversationHistory 为 Markdown 到 `~/.paicli/exports/session-*.md`；包含完整 system prompt，便于检查 LLM 实际接收前的指令，命令不接受路径参数。
 - 普通任务和斜杠命令提交后都会以 `>` 暗色整行块回写原始输入，避免 JLine accept 后清掉编辑行导致结果区看不到刚执行的命令
 - InlineRenderer 不使用独立 JLine `Display.update()` 维护 thinking 临时区；真实终端验证发现独立 Display 会在 transcript/status 输出后从错误位置向上清屏。当前实现用固定高度 live 区重写自身行，content/tool 边界先清理 live 区再追加 transcript。
@@ -516,7 +516,7 @@ EMBEDDING_BASE_URL=http://localhost:11434
 
 不覆盖：真实 LLM 联调、真实 Embedding API、真实 MCP server 联调、终端完整手工体验。
 
-完整测试类列表：CliCommandParserTest / MainBrowserCommandTest / PlanReviewInputParserTest / MainInputNormalizationTest / ExecutionPlanTest / MemoryEntryTest / SessionMemoryCompactorTest / AutoCompactionManagerTest / ToolResultClearerTest / ExternalContextTrackerTest / ConversationHistoryCompactorTest / LongTermMemoryTest / MemoryRetrieverTest / MemoryManagerTest / ExplicitMemoryHintsTest / ContextProfileTest / PlanExecuteAgentTest / AgentMemoryHintTest / AgentWebSearchDecisionTest / AgentRoleTest / AgentMessageTest / AgentOrchestratorTest / EmbeddingClientTest / SearchResultTest / NetworkPolicyTest / HtmlExtractorTest / WebFetcherTest / SearchProviderFactoryTest / ZhipuSearchProviderTest / VectorStoreTest / CodeChunkerTest / CodeAnalyzerTest / CodeIndexTest / ApprovalPolicyTest / ApprovalResultTest / HitlToolRegistryTest / TerminalHitlHandlerTest / ToolRegistryTest / TurnToolPolicyTest / TurnToolPolicyMemoryGuardTest / CommandSandboxDetectorTest / BubblewrapArgumentsTest / BrowserSessionTest / BrowserConnectivityCheckTest / SensitivePagePolicyTest / BrowserGuardTest / McpSchemaSanitizerTest / McpConfigLoaderTest / JsonRpcClientTest / McpToolBridgeTest / McpResourceCacheTest / AtMentionParserTest / AtMentionExpanderTest / AtMentionCompleterTest / NotificationRouterTest / PathGuardTest / CommandGuardTest / AuditLogTest / SkillFrontmatterParserTest / SkillRegistryTest / SkillStateStoreTest / SkillBuiltinExtractorTest / SkillContextBufferTest / SkillIndexFormatterTest / LoadSkillToolTest / SkillCommandHandlerTest / BetterHarnessOptionsTest / BetterHarnessEvidenceCollectorTest / BetterHarnessRunnerTest
+完整测试类列表：CliCommandParserTest / MainBrowserCommandTest / PlanReviewInputParserTest / MainInputNormalizationTest / ExecutionPlanTest / MemoryEntryTest / SessionMemoryCompactorTest / AutoCompactionManagerTest / ToolResultClearerTest / ExternalContextTrackerTest / ConversationHistoryCompactorTest / LongTermMemoryTest / MemoryRetrieverTest / MemoryManagerTest / ExplicitMemoryHintsTest / ContextProfileTest / PlanExecuteAgentTest / AgentMemoryHintTest / AgentWebSearchDecisionTest / AgentRoleTest / AgentMessageTest / AgentOrchestratorTest / EmbeddingClientTest / SearchResultTest / NetworkPolicyTest / HtmlExtractorTest / WebFetcherTest / SearchProviderFactoryTest / ZhipuSearchProviderTest / VectorStoreTest / CodeChunkerTest / CodeAnalyzerTest / CodeIndexTest / ApprovalPolicyTest / ApprovalResultTest / HitlToolRegistryTest / TerminalHitlHandlerTest / ToolRegistryTest / TurnToolPolicyTest / TurnToolPolicyMemoryGuardTest / CommandSandboxDetectorTest / BubblewrapArgumentsTest / BrowserSessionTest / BrowserConnectivityCheckTest / SensitivePagePolicyTest / BrowserGuardTest / McpSchemaSanitizerTest / McpConfigLoaderTest / JsonRpcClientTest / McpToolBridgeTest / McpResourceCacheTest / AtMentionParserTest / AtMentionExpanderTest / AtMentionCompleterTest / NotificationRouterTest / PathGuardTest / CommandGuardTest / AuditLogTest / SkillFrontmatterParserTest / SkillRegistryTest / SkillStateStoreTest / SkillBuiltinExtractorTest / SkillIndexFormatterTest / LoadSkillToolTest / LoadSkillSameTurnTest / SkillCommandHandlerTest / BetterHarnessOptionsTest / BetterHarnessEvidenceCollectorTest / BetterHarnessRunnerTest
 
 ## 从 AGENTS.md 迁入的细节（2026-09-24）
 

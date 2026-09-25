@@ -24,7 +24,6 @@ import com.paicli.runtime.CancellationContext;
 import com.paicli.snapshot.RestoreResult;
 import com.paicli.snapshot.SnapshotService;
 import com.paicli.skill.Skill;
-import com.paicli.skill.SkillContextBuffer;
 import com.paicli.skill.SkillRegistry;
 import com.paicli.web.FetchResult;
 import com.paicli.web.HtmlExtractor;
@@ -100,7 +99,6 @@ public class ToolRegistry {
     private MemoryWriter memoryWriter;
     private final ExternalContextTracker externalContextTracker = ExternalContextTracker.fromConfiguration();
     private SkillRegistry skillRegistry;
-    private SkillContextBuffer skillContextBuffer;
     private java.util.function.BiConsumer<String, String[]> writeFileObserver = (p, ba) -> {};
     private LspManager lspManager = new LspManager(projectPath);
     private SnapshotService snapshotService = SnapshotService.forProject(Path.of(projectPath));
@@ -283,14 +281,6 @@ public class ToolRegistry {
 
     public SkillRegistry getSkillRegistry() {
         return skillRegistry;
-    }
-
-    public void setSkillContextBuffer(SkillContextBuffer skillContextBuffer) {
-        this.skillContextBuffer = skillContextBuffer;
-    }
-
-    public SkillContextBuffer getSkillContextBuffer() {
-        return skillContextBuffer;
     }
 
     /**
@@ -837,7 +827,7 @@ public class ToolRegistry {
     private void registerSkillTools() {
         tools.put("load_skill", new Tool(
                 "load_skill",
-                "Load full SKILL.md instructions for a skill the system has indexed (see the \"可用 Skills\" section in this system prompt). Call this when a skill's description matches the current task. Pass the exact kebab-case skill name. The full body will appear at the start of your next user message under \"## 已加载 Skill：<name>\". Don't reload the same skill twice in one session.",
+                "Load full SKILL.md instructions for a skill the system has indexed (see the \"可用 Skills\" section in this system prompt). Call this when a skill's description matches the current task. Pass the exact kebab-case skill name. The full body is appended right after this tool result, before your next step in the same turn, under \"## 已加载 Skill：<name>\". Don't reload the same skill twice in one session.",
                 createParameters(new Param("name", "string", "the exact kebab-case skill name (e.g. web-access)", true)),
                 args -> {
                     String name = args.get("name");
@@ -855,19 +845,10 @@ public class ToolRegistry {
                         }
                         return "Skill '" + name + "' 已被禁用，可用 /skill on " + name + " 启用";
                     }
-                    String body = skill.body();
-                    int originalLen = body == null ? 0 : body.length();
-                    int max = 5 * 1024;
-                    String injected = body == null ? "" : body;
-                    if (injected.length() > max) {
-                        injected = injected.substring(0, max)
-                                + "\n\n...(skill body truncated, full content via /skill show " + name + ")";
-                    }
-                    if (skillContextBuffer != null) {
-                        skillContextBuffer.push(name, injected);
-                    }
+                    // 正文由调用方通过 LoadedSkillMessages 紧跟在本结果之后注入，这里只返回确认
+                    int originalLen = skill.body() == null ? 0 : skill.body().length();
                     return "已加载 skill '" + name + "' 的完整指引（" + originalLen
-                            + " bytes），将在下一轮上下文中以 \"## 已加载 Skill：" + name + "\" 段出现。";
+                            + " 字符），正文紧跟在本工具结果之后，以 \"## 已加载 Skill：" + name + "\" 段出现。";
                 }
         ));
     }

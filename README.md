@@ -159,7 +159,7 @@ mvn test -DskipTests=false
 
 - 三层加载位置（按优先级，后者整体覆盖同名 skill）：jar 内置 < 用户级 `~/.paicli/skills/<name>/` < 项目级 `<project>/.paicli/skills/<name>/`
 - 启动期把启用 skill 的 `name` + `description` 注入三处 Agent 系统提示词索引段（启用上限 20 个，索引段 ≤ 4KB）
-- 内置工具 `load_skill(name)`：LLM 在 system prompt 看到匹配 description 时主动调用，PaiCLI 把 SKILL.md 正文（5KB 截断）写入 `SkillContextBuffer`，下一轮 user message 自动前置注入
+- 内置工具 `load_skill(name)`：LLM 在 system prompt 看到匹配 description 时主动调用，工具结果之后、同一轮下一次 LLM 请求之前，PaiCLI 把 SKILL.md 正文（5KB 截断）作为独立 user 消息注入（不进入 untrusted 工具结果，也不改 system prompt）
 - 内置 web-access skill：决策手册（浏览哲学四步法 + 工具选择表 + 浏览器优先级 + Jina 兜底说明）+ 6 个站点经验文件（mp.weixin / zhuanlan.zhihu / x.com / xiaohongshu / github / juejin）+ cdp-cheatsheet
 - frontmatter 走手写 YAML 子集解析，不引 SnakeYAML；解析失败 stderr 警告但不阻塞启动
 - CLI 命令：`/skill list` / `/skill show <name>` / `/skill on <name>` / `/skill off <name>` / `/skill reload`

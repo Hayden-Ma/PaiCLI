@@ -14,10 +14,10 @@ import com.paicli.prompt.PromptContext;
 import com.paicli.prompt.PromptMode;
 import com.paicli.prompt.ProjectMemoryLoader;
 import com.paicli.runtime.CancellationContext;
-import com.paicli.skill.SkillContextBuffer;
 import com.paicli.skill.SkillIndexFormatter;
 import com.paicli.skill.SkillRegistry;
 import com.paicli.util.AnsiStyle;
+import com.paicli.tool.LoadedSkillMessages;
 import com.paicli.tool.ToolRegistry;
 import com.paicli.tool.ToolResultBoundary;
 import com.paicli.tool.ToolRegistry.ToolExecutionResult;
@@ -123,7 +123,6 @@ public class PlanExecuteAgent {
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private Supplier<String> externalContextSupplier = () -> "";
     private SkillRegistry skillRegistry;
-    private SkillContextBuffer skillContextBuffer;
     private TurnToolPolicy turnToolPolicy = TurnToolPolicy.forExplicitTask("");
     private String submittedPolicyInput = "";
     private volatile PlanExecutionObserver executionObserver;
@@ -197,10 +196,6 @@ public class PlanExecuteAgent {
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
         this.skillRegistry = skillRegistry;
-    }
-
-    public void setSkillContextBuffer(SkillContextBuffer skillContextBuffer) {
-        this.skillContextBuffer = skillContextBuffer;
     }
 
     public void setConversationLedger(ConversationLedger conversationLedger) {
@@ -301,15 +296,6 @@ public class PlanExecuteAgent {
             log.warn("Failed to build skill index", e);
             return "";
         }
-    }
-
-    private String prependSkillBodies(String content) {
-        if (skillContextBuffer == null || skillContextBuffer.isEmpty()) {
-            return content;
-        }
-        String drained = skillContextBuffer.drain();
-        if (drained.isEmpty()) return content;
-        return drained + "\n" + content;
     }
 
     /**
@@ -688,7 +674,6 @@ public class PlanExecuteAgent {
         if (!memoryContext.isEmpty()) {
             taskInput = taskInput + "\n\n" + memoryContext;
         }
-        taskInput = prependSkillBodies(taskInput);
 
         String actor = "task:" + task.getId();
         List<LlmClient.Message> messages = new ArrayList<>();
@@ -809,6 +794,17 @@ public class PlanExecuteAgent {
                         LlmClient.Message.tool(toolResult.id(), ToolResultBoundary.wrap(toolResult)));
             }
             appendImageToolMessages(messages, toolResults, actor);
+            appendLoadedSkillMessage(messages, toolResults, actor);
+        }
+    }
+
+    /** load_skill 成功后，本任务的下一次 LLM 请求前就把 Skill 正文追加进任务消息。 */
+    private void appendLoadedSkillMessage(List<LlmClient.Message> messages,
+                                          List<ToolExecutionResult> toolResults,
+                                          String actor) {
+        String skills = LoadedSkillMessages.from(toolResults, toolRegistry.getSkillRegistry());
+        if (!skills.isEmpty()) {
+            appendTaskMessage(messages, actor, "skill_injection", LlmClient.Message.user(skills));
         }
     }
 

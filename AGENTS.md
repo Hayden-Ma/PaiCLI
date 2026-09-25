@@ -105,7 +105,7 @@ src/main/java/com/paicli/
 ### 输出与 Skill
 
 - 共享 `prompts/handoff.md` 要求遵守用户的严格输出格式（只要 JSON/CSV/值时不加围栏和总结），但这不是确定性保证
-- Skill 索引注入 system prompt（上限 20 个 / 4KB）；`load_skill` → SkillContextBuffer → 下一轮 user message 前置注入
+- Skill 索引注入 system prompt（上限 20 个 / 4KB）；`load_skill` 成功后同一轮在工具结果之后以独立 user 消息注入正文（`LoadedSkillMessages`），不要改回等下一条用户消息
 
 ## 修改联动
 

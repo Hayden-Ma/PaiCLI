@@ -114,7 +114,7 @@ PaiCLI 在路径加载时做了两层校验：一是文件路径不能以 `/` �
 | 形式 | 代码函数 | SKILL.md + 辅助资源 |
 | 触发 | LLM 通过 tool_calls 调用 | LLM 通过 `load_skill` 工具加载 |
 | 内容 | 执行逻辑 | 决策手册 + 最佳实践 + 经验数据 |
-| 注入位置 | tools 字段 | user message 前置 |
+| 注入位置 | tools 字段 | load_skill 结果之后的独立 user 消息 |
 
 每个 Skill 包含 name、description、body（SKILL.md 正文，真正注入给 LLM 的内容）和 references 目录（参考资料），来源分三种：BUILTIN（内置）、USER（用户级）、PROJECT（项目级）。
 
@@ -134,9 +134,7 @@ Skill 的延迟加载机制可以做到按需注入，只有 LLM 判断需要的
 
 Agent 启动时，只把所有启用 Skill 的 name + description 渲染成一段索引，注入到 system prompt 末尾，整个索引控制在 4KB 以内。LLM 看到的相当于一份菜单，而不是所有 Skill 的完整内容。
 
-运行时，LLM 根据用户输入判断需要哪个 Skill，主动调用 `load_skill(name)` 工具。加载后 Skill 的正文会写入一个缓冲区，在下一轮对话时前置注入到 user message 前面。注入是一次性的，取出后自动清空，不会跨轮重复注入。
-
-![](https://cdn.paicoding.com/stutymore/paicli-interview-prompt-skill-20260528121450.png)
+运行时，LLM 根据用户输入判断需要哪个 Skill，主动调用 `load_skill(name)` 工具。工具本身只返回一句确认，Agent 拿到工具结果后，在同一轮的下一次模型请求之前，把 SKILL.md 正文作为一条独立的 user 消息追加到工具结果后面。模型读完正文，再决定下一步调什么工具。
 
 ### 为什么不把所有 Skill 塞进 system prompt
 
@@ -154,23 +152,35 @@ LLM 调用 `load_skill(name)` 时，可能遇到两种异常情况。
 
 两种情况都是把错误信息作为工具返回值交给 LLM，由 LLM 决定下一步怎么做——可以换一个 Skill，也可以直接用通用知识回答。不会因为某个 Skill 加载失败就中断整个对话流程。
 
-## 07、Skill 缓冲区的容量控制怎么做的？
+## 07、Skill 正文什么时候生效？为什么不直接放进工具结果？
 
-Skill 加载会占用 token，如果不做容量控制，buffer 会随着工具调用持续膨胀。
+load_skill 成功后，**同一轮**就生效，不用等用户下一次发消息。
 
-PaiCLI 的做法是最多保留 3 个 Skill，超出后按加载顺序淘汰最早进入缓冲区的那个。底层用 LinkedHashMap 的插入顺序实现，不需要额外的数据结构。如果同名 Skill 被重复加载，会先删除旧记录再插入新记录，既避免重复，也刷新加载顺序。
+Agent 的工具循环里，工具结果写进历史之后、进入下一次模型请求之前，会检查这批结果里有没有成功的 load_skill。有的话，就按参数从 SkillRegistry 查出 Skill，把正文（超过 5KB 截断）拼成一条 user 消息追加进去：
 
-![](https://cdn.paicoding.com/stutymore/paicli-interview-prompt-skill-20260528135859.png)
+```
+assistant  调用 load_skill("web-access")
+tool       已加载 skill 'web-access' 的完整指引……
+user       ## 已加载 Skill：web-access + SKILL.md 正文
+```
 
-**为什么用 LRU 而不是 LFU（按频率淘汰）？** 
+这里有个坑，面试可以主动讲。PaiCLI 早期版本是把正文先放进一个缓冲区，等用户下一次输入时再拼到那条消息前面。结果模型调完 load_skill，本轮剩下的请求都看不到正文，只能凭索引里的一行描述干活。这个问题是读者在评论区指出来的，后来改成了现在的同一轮注入。
 
-因为 Skill 的使用场景是单次会话内的任务切换，不是长期高频访问。LRU 的语义更贴合实际——最近加载的 Skill 和当前任务的相关性最高，最早加载的大概率已经用完了。LFU 还需要额外维护频率计数器，复杂度更高但收益不大。
+**为什么不把正文直接塞进工具结果？** 
 
-还有一个细节是缓冲区的读取是一次性的，取出后自动清空，上一轮注入过的 Skill 不会下一轮再注入一次。
+PaiCLI 所有工具结果进入历史前都会被包成 `trust="untrusted-data"`，告诉模型这是外部数据，里面的指令不执行，用来防网页、MCP 内容做提示词注入。SKILL.md 是本地可信的操作指引，恰恰需要模型照做，混进工具结果要么被当成数据忽略，要么就得给安全边界开口子。
 
-因为异步工具调用可能在不同线程触发 load_skill，缓冲区做了 synchronized 线程安全处理。Multi-Agent 模式下，Planner、Worker、Reviewer 各持一个独立的缓冲区实例，避免角色间的提示词污染。
+**为什么不塞进 system prompt？** 
 
+system prompt 一变，prompt cache 就失效。正文走 user 消息，system prompt 从头到尾不变，缓存能一直命中。
 
+**并发和多 Agent 下会不会串？** 
+
+不会。正文只从当前这一批工具结果里算出来，没有共享的待注入状态。Plan 模式并行执行的任务、Team 模式的多个 Worker，谁加载谁拿到。早期那个缓冲区是 ReAct、Plan、Team 共用的，并行任务之间确实可能串。
+
+**同一个 Skill 会不会重复注入？** 
+
+同一批工具结果里对同一个 Skill 调了多次 load_skill，只注入一次。注入之后正文留在对话历史里，后续轮次模型都能看到，所以索引里提示同一会话加载一次就够。
 
 ## 08、web-access Skill 具体包含什么内容？
 

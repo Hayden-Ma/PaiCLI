@@ -12,9 +12,9 @@ import com.paicli.prompt.PromptAssembler;
 import com.paicli.prompt.PromptContext;
 import com.paicli.prompt.PromptMode;
 import com.paicli.prompt.ProjectMemoryLoader;
-import com.paicli.skill.SkillContextBuffer;
 import com.paicli.skill.SkillIndexFormatter;
 import com.paicli.skill.SkillRegistry;
+import com.paicli.tool.LoadedSkillMessages;
 import com.paicli.tool.ToolRegistry;
 import com.paicli.tool.ToolResultBoundary;
 import com.paicli.tool.ToolRegistry.ToolExecutionResult;
@@ -54,7 +54,6 @@ public class SubAgent {
     private final List<LlmClient.Message> conversationHistory;
     private Supplier<String> externalContextSupplier = () -> "";
     private SkillRegistry skillRegistry;
-    private SkillContextBuffer skillContextBuffer;
     private final AutoCompactionManager autoCompactionManager;
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private TurnToolPolicy turnToolPolicy;
@@ -90,10 +89,6 @@ public class SubAgent {
     public void setSkillRegistry(SkillRegistry skillRegistry) {
         this.skillRegistry = skillRegistry;
         refreshSystemPrompt();
-    }
-
-    public void setSkillContextBuffer(SkillContextBuffer skillContextBuffer) {
-        this.skillContextBuffer = skillContextBuffer;
     }
 
     public void setConversationLedger(ConversationLedger conversationLedger) {
@@ -187,13 +182,12 @@ public class SubAgent {
         }
     }
 
-    private String prependSkillBodies(String content) {
-        if (skillContextBuffer == null || skillContextBuffer.isEmpty()) {
-            return content;
+    /** load_skill 成功后，同一任务的下一次 LLM 请求前就把 Skill 正文追加进历史。 */
+    private void appendLoadedSkillMessage(List<ToolExecutionResult> toolResults) {
+        String skills = LoadedSkillMessages.from(toolResults, toolRegistry.getSkillRegistry());
+        if (!skills.isEmpty()) {
+            appendConversationMessage(LlmClient.Message.user(skills), "skill_injection");
         }
-        String drained = skillContextBuffer.drain();
-        if (drained.isEmpty()) return content;
-        return drained + "\n" + content;
     }
 
     private void refreshSystemPrompt() {
@@ -287,7 +281,7 @@ public class SubAgent {
         Objects.requireNonNull(activeToolPolicy, "activeToolPolicy");
         pruneHistoricalImagePayloads();
         refreshSystemPrompt();
-        String taskContent = prependSkillBodies(task.content());
+        String taskContent = task.content();
 
         // 将任务注入对话
         appendConversationMessage(ImageReferenceParser.userMessage(
@@ -354,6 +348,7 @@ public class SubAgent {
                                 "tool_execution");
                     }
                     appendImageToolMessages(toolResults);
+                    appendLoadedSkillMessage(toolResults);
                     continue;
                 }
 

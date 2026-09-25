@@ -7,7 +7,7 @@ import java.util.List;
  * 一个 Skill 是 PaiCLI 沉淀决策与经验的复用单元。
  *
  * 由 SKILL.md 文件解析得到：frontmatter 决定索引段元数据，body 在 LLM 调用 load_skill
- * 时通过 SkillContextBuffer 注入下一轮 user message。
+ * 时由调用方紧跟工具结果注入同一轮上下文（见 LoadedSkillMessages）。
  *
  * source 标记加载来源，用于 /skill list 展示与三层覆盖的可观测性。
  */

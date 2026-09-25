@@ -17,10 +17,10 @@ import com.paicli.render.PlainRenderer;
 import com.paicli.render.Renderer;
 import com.paicli.render.StatusInfo;
 import com.paicli.runtime.CancellationContext;
-import com.paicli.skill.SkillContextBuffer;
 import com.paicli.skill.SkillIndexFormatter;
 import com.paicli.skill.SkillRegistry;
 import com.paicli.util.AnsiStyle;
+import com.paicli.tool.LoadedSkillMessages;
 import com.paicli.tool.ToolRegistry;
 import com.paicli.tool.ToolResultBoundary;
 import com.paicli.tool.ToolRegistry.ToolExecutionResult;
@@ -55,7 +55,6 @@ public class Agent {
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private Supplier<String> externalContextSupplier = () -> "";
     private SkillRegistry skillRegistry;
-    private SkillContextBuffer skillContextBuffer;
     private Renderer renderer;
     private Supplier<Boolean> hitlEnabledSupplier = () -> false;
     private boolean returnFinalResponseWhenStreamed;
@@ -113,10 +112,6 @@ public class Agent {
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
         this.skillRegistry = skillRegistry;
-    }
-
-    public void setSkillContextBuffer(SkillContextBuffer skillContextBuffer) {
-        this.skillContextBuffer = skillContextBuffer;
     }
 
     public void setRenderer(Renderer renderer) {
@@ -190,10 +185,8 @@ public class Agent {
         String memoryContext = memoryManager.buildContextForQuery(userInput, contextProfile.memoryContextTokens());
         updateSystemPromptWithMemory(memoryContext);
 
-        // 添加用户输入到历史（如有 skill body 注入，前置到原文之前）
-        String userMessageContent = prependSkillBodies(userInput);
         appendConversationMessage(ImageReferenceParser.userMessage(
-                userMessageContent,
+                userInput,
                 Path.of(toolRegistry.getProjectPath())), "user_input");
         StringBuilder reasoningTranscript = new StringBuilder();
         StreamRenderer streamRenderer = new StreamRenderer(renderer());
@@ -272,6 +265,7 @@ public class Agent {
                                 "tool_execution");
                     }
                     appendImageToolMessages(toolResults);
+                    appendLoadedSkillMessage(toolResults);
                     pushStatus(budget, startNanos, "running");
 
                     // 继续循环，让 LLM 根据工具结果继续思考
@@ -397,10 +391,6 @@ public class Agent {
         appendConversationMessage(
                 LlmClient.Message.system(buildSystemPrompt("")),
                 "history_reset");
-
-        if (skillContextBuffer != null) {
-            skillContextBuffer.clear();
-        }
     }
 
     /**
@@ -529,13 +519,12 @@ public class Agent {
         }
     }
 
-    private String prependSkillBodies(String userInput) {
-        if (skillContextBuffer == null || skillContextBuffer.isEmpty()) {
-            return userInput;
+    /** load_skill 成功后，同一轮下一次 LLM 请求前就把 Skill 正文追加进历史。 */
+    private void appendLoadedSkillMessage(List<ToolExecutionResult> toolResults) {
+        String skills = LoadedSkillMessages.from(toolResults, toolRegistry.getSkillRegistry());
+        if (!skills.isEmpty()) {
+            appendConversationMessage(LlmClient.Message.user(skills), "skill_injection");
         }
-        String drained = skillContextBuffer.drain();
-        if (drained.isEmpty()) return userInput;
-        return drained + "\n用户输入：\n" + userInput;
     }
 
     private String buildExternalContext() {
