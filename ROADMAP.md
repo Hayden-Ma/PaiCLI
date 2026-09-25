@@ -667,6 +667,46 @@ E2 原生观察接口已接线：默认关闭的 13 类角色/输入/工具/审�
 设计、运行手册与当前开发结果见 `benchmarks/paicli-native-agentbench-v0.1/`。
 
 ---
+## 下一阶段升级计划（对标 MiniMax Code，2026-09-25）
+
+来源：对 MiniMax Code（`MiniMax-AI/minimax-code`，commit 8b55164）源码的对照调研，结合 2026-09-24 的 PaiCLI 代码审查。路径均相对 minimax-code 仓库。按批次推进，批内按顺序做。
+
+**PaiCLI 已领先、保持并作为卖点**：自建评测集（对方无公开评测）、工具结果统一的不可信数据边界（对方零散处理）、URL 来源授权、长期记忆冲突检测与新鲜度。项目级 MCP 信任确认双方都没有，补上即领先。
+
+### 第一批：安全与正确性（优先）
+
+- ⬜ 权限规则持久化：审批提供“本会话允许 / 始终允许（先展示将保存的规则范围）/ 拒绝并附反馈”；规则按工具、命令前缀、路径匹配，deny 优先 → ask → allow 的纯函数裁决。参考 `packages/agent-modules/permission/src/permission-core.ts`。现状：“全部放行”只按工具名，放行一次 `execute_command` 等于放行之后所有命令
+- ⬜ 命令安全判断语法树化：剥 nohup / timeout 等外壳、识别写入目标、硬拦截级不可被放开模式绕过，可选 `rm` 改移入回收站。参考 `packages/agent-modules/permission/src/tools/bash-permission.ts`、`classifier/dangerous-patterns.ts`。现状：正则黑名单，`rm -r -f /` 等写法可绕过
+- ⬜ Token 计数以模型返回的 usage 为基准，只估算之后新增的消息（BPE 分词器估算），计入工具 schema 与 reasoning 内容；超窗 400 时先压缩再重试一次。参考 `packages/agent-modules/context-manager/src/token-estimator.ts`、`provider-budget.ts`。现状：按字符折算，偏小导致压缩偏晚
+- ⬜ 项目级 `.paicli/mcp.json` 首次出现或内容变化时逐个 server 确认，禁止覆盖用户同名配置
+- ⬜ HITL 默认开启（至少 `execute_command` 与 MCP 默认需确认）
+- ⬜ 审批框完整显示命令，转义控制字符与双向控制字符，防止伪装
+- ⬜ `revert_turn` 不跟随符号链接写出项目，按文件模式恢复软链与可执行位，失败回滚
+
+### 第二批：体验与能力
+
+- ⬜ 会话恢复：`--continue` / `--session <id>`，`/sessions` 管理面板，`/fork`、`/rewind`、`/retry`。PaiCLI 已有原始会话账本，缺恢复入口。参考 `packages/tui/src/features/session/manager.ts`
+- ⬜ 按轮次回滚：可选“只回退对话 / 对话连同文件”，还原前比对哈希，文件已被别处改过则跳过并说明。参考 `packages/local-runtime/src/turns/file-changes.ts`
+- ⬜ `edit_file` 容错：精确匹配失败后做 Unicode、行尾空白、引号归一化再匹配；剥掉从 read 输出带来的行号前缀；支持 `replace_all`
+- ⬜ 运行中插话：Enter 插话改变当前方向，Alt+Enter 排到下一轮，`/btw` 只读旁路会话；同时修掉 ESC 取消的线程竞态。参考 `packages/tui/src/tui/shell/keybindings.ts`
+- ⬜ 无头执行 `exec`：固定 JSON 结果结构、明确退出码、`--max-steps` / `--timeout`，可接 CI 与评测。参考 `packages/tui/src/headless/`
+- ⬜ 停滞检测升级：识别多类重复信号（含来回切换、参数微调），只注入提醒不拦截，并配默认轮数上限询问是否继续。参考 `packages/agent-modules/runaway-guard/`
+- ⬜ 写操作按真实路径排队加锁，不同文件之间恢复并行（当前为写类工具整体串行）。参考 `withFileMutationQueue`（`packages/agent-tools/src/desktop/local-pi-tools.ts`）
+
+### 第三批：扩展与工程化
+
+- ⬜ Hooks：SessionStart、UserPromptSubmit、PreToolUse、PermissionRequest、PostToolUse、Stop、PreCompact 等事件点，command 类型、带超时。参考 `packages/agent-modules/plugin-hooks/src/contracts.ts`
+- ⬜ Skill 兼容读取 `.claude/skills`、`.agents/skills` 目录。参考 `packages/config/src/skills-config.ts`
+- ⬜ 斜杠命令元数据化（运行中是否可用、可见条件、参数补全），借此拆分 3117 行的 `Main.java`。参考 `packages/tui/src/tui/commands/catalog.ts`
+- ⬜ 测试工程：测试清单单一来源；本地验证命令与 CI 跑同一套门禁；本地假模型服务驱动真实 CLI 做端到端测试；清理 `mvn test -Pquick` 既有失败。参考 `test/vitest-suites.json`、`scripts/verify.mjs`
+
+### 暂不做
+
+- 多模态媒体工具（对方依赖自家 Matrix 服务）
+- 插件市场（分量重，教学价值有限）
+
+---
+
 ## 技术栈演进图
 
 ```
@@ -698,6 +738,7 @@ Git       Prompt    异步后台    图片
 - **PaiAgent**：工作流编排、可视化
 - **LangGraph**：状态管理、循环控制
 - **Spring AI**：多模型适配、工具回调
+- **MiniMax Code**（`MiniMax-AI/minimax-code`）：权限规则、会话恢复、按轮回滚、无头执行、Hooks，见「下一阶段升级计划」
 
 ---
 
