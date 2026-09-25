@@ -368,6 +368,9 @@ public class SubAgent {
                                 response.content()));
 
                 streamRenderer.finish();
+                if (llmClient.looksLikeUnexecutedToolCall(response.content())) {
+                    out.println(AnsiStyle.subtle(Agent.UNEXECUTED_TOOL_CALL_NOTICE));
+                }
 
                 return AgentMessage.result(name, role, response.content());
 

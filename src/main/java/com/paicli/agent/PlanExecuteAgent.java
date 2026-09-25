@@ -768,6 +768,9 @@ public class PlanExecuteAgent {
                     return TaskRunResult.of(toolOnlyResult, streamRenderer.hasStreamedOutput(), taskToolPolicy);
                 }
                 streamRenderer.finish();
+                if (llmClient.looksLikeUnexecutedToolCall(response.content())) {
+                    out.println(AnsiStyle.subtle(Agent.UNEXECUTED_TOOL_CALL_NOTICE));
+                }
                 return TaskRunResult.of(response.content(), streamRenderer.hasStreamedOutput(), taskToolPolicy);
             }
 

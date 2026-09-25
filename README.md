@@ -75,8 +75,9 @@ mvn test -DskipTests=false
 - 危险操作静态规则识别：`write_file`、`edit_file`、`execute_command`、`create_project`、`revert_turn`
 - 三级危险等级：高危（`execute_command`）、中危（`write_file` / `edit_file` / `create_project`）
 - 审批决策：批准 / 全部放行 / 拒绝 / 跳过 / 修改参数后执行
-- HITL 默认关闭，通过 `/hitl on` 启用
-- 新增 `/hitl` CLI 命令，支持 `/hitl on`、`/hitl off`、`/hitl`（查看状态）
+- auto（启动默认，不打断用户）：读写文件直接执行；Shell 命令先由轻量模型分类器审查，低风险直接执行；分类器不放行的命令，以及 MCP 工具、回滚快照，都交回模型换做法或向你说明，同一轮连续被拦 3 次才弹审批
+- ask：写文件、编辑文件、执行命令、创建项目、回滚快照和 MCP 工具都要确认
+- `/hitl on` 切到 ask，`/hitl default` 切回 auto，`/hitl` 查看当前档位；交互式 CLI 不提供全部放行
 
 ### 第七期：异步执行 + 并行工具调用
 
@@ -95,7 +96,7 @@ mvn test -DskipTests=false
 - DeepSeek V4.1 Flash / V4 Pro 使用 `thinking.type=enabled`、`reasoning_effort=max`、`temperature=1`、`top_p=0.95`（DeepSeek 思考模式忽略 temperature，仅保留兼容）；GLM-5.3 还启用持续思考、流式工具与 usage；混元 Hy4 使用 `reasoning_effort=high` 并请求流式 usage。三者在 thinking tool-call 续轮都会带回 assistant `reasoning_content`
 - DeepSeek 是默认 provider：未保存默认 provider 时优先使用，找不到 Key 时按 deepseek → glm → hunyuan → step → kimi → freellmapi → xfyun → agnes 顺序回退。默认模型 DeepSeek V4.1 Flash（模型 ID `deepseek-flash`），支持图片输入；旧名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 由官方转到新版，同样启用图片能力。`deepseek-v4-pro` 仍按文本模型处理。升级已有配置可执行 `/model deepseek-flash`；启动模型按环境变量 → 项目 `.env` → 用户 `.env` → 已保存模型 → 客户端默认值选择；会话内显式 `/model <模型ID>` 立即生效并保存，下次启动如果仍有环境配置则优先环境配置。启动页与底部状态栏把 `deepseek-flash` 显示为 `DeepSeek V4.1 Flash`，请求仍使用原始模型 ID。
 - DeepSeek V4.1 Flash / V4 Pro 对正文 DSML 工具调用提供 fail-closed 兼容：支持 `tool_calls` / `calls` 容器及标记后的空白，只转换当前请求已暴露的工具，未知或畸形块保持文本；普通正文与 reasoning 仍保持流式输出
-- ReAct 支持用 `1` / `选1` 回复上一条编号选项，以及用“继续”“好的”续接上一轮任务；不会再因回复过短而漏发工具定义。续接保留禁网限制，不自动继承旧 URL 或记忆写入授权，`/clear` 后重新判断
+- 工具默认开放给模型，不再按用户措辞里有没有动作词决定；只有明确的标题标记会收掉联网工具并在终端提示。模型在正文里写了工具调用却没被执行时，终端会提示“工具调用未执行”
 - 多步骤任务会检查逗号、分号和换行后的动作，支持“进入 demo 目录，编译并运行 Hello.java”和“在 demo 目录下运行 Hello.java”等表达；引用文字、代码块与明确标注的摘录不会因此触发工具
 - OpenAI-compatible provider 共用有限重试：`408` / `429` / 可恢复 `5xx` 与瞬时连接故障默认总尝试 3 次，采用指数退避 + jitter 并读取 `Retry-After`；确定性 `4xx` 直接失败。SSE 尚未交付输出时可安全重发，已经流给终端的半截内容不会自动重放
 
@@ -265,7 +266,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 
 - 三种形态共享同一套 `Agent` / `ToolRegistry` / `MemoryManager` / MCP server / SkillRegistry / HITL handler，不创建孤立空会话
 - 普通输入走 ReAct；`/plan <任务>` 走 Plan-and-Execute；`/team <任务>` 走 Multi-Agent；`/cancel` 可取消运行中任务
-- 通用命令：`/clear`、`/context`、`/memory`、`/memory clear`、`/save <事实>`、`/export`、`/better-harness`、`/hitl`、`/hitl on`、`/hitl off`、`/config`、`/exit`
+- 通用命令：`/mode`（或 Shift+Tab）、`/clear`、`/context`、`/memory`、`/memory clear`、`/save <事实>`、`/export`、`/better-harness`、`/hitl`、`/hitl on`、`/hitl default`、`/config`、`/exit`
 - Lanterna 的展示快照保存到 `~/.paicli/history/session_*.jsonl`
 - 原始会话账本独立保存到 `~/.paicli/history/raw/session-*.jsonl`：默认 CLI 的 ReAct / Plan / Team 共享同一个 append-only 文件，system、user、assistant、tool_call、tool_result 都保留完整 `LlmClient.Message`（含 reasoning、工具参数/结果和图片 payload）。`/clear` 和上下文压缩只改模型发送视图，不改写旧账本；POSIX 下目录为 0700、文件为 0600。账本可能包含敏感内容，请勿提交或随意分享
 - 兼容旧设置：`PAICLI_TUI=true` 自动映射为 `PAICLI_RENDERER=lanterna`（已 deprecated）
@@ -415,7 +416,7 @@ Tips for getting started:
 - 🔒 危险操作静态规则识别（`write_file` / `edit_file` / `execute_command` / `create_project` / `revert_turn`）
 - ⚠️ 三级危险等级展示（高危 / 中危 / 安全）
 - ✅ 审批决策：批准、全部放行、拒绝、跳过、修改参数后执行
-- 🔓 HITL 默认关闭，`/hitl on` 启用、`/hitl off` 关闭
+- 🔒 auto 模式下 Shell 命令由模型分类器审查，低风险直接执行、有风险才确认；`/hitl on` 全部确认
 
 ### 第七期
 
@@ -804,9 +805,11 @@ I
 - `/team` - 下一条任务使用 Multi-Agent 协作模式
 - `/team <任务>` - 直接用 Multi-Agent 协作模式执行这条任务
 - `/cancel` - 运行中请求取消当前任务；空闲时会提示当前没有正在运行的任务
-- `/hitl on` - 启用危险操作人工审批（HITL）
-- `/hitl off` - 关闭 HITL 审批
-- `/hitl` - 查看 HITL 当前状态
+- `Shift+Tab` - 在 auto、plan、ask 三个模式之间循环切换，状态栏左侧显示当前模式
+- `/mode [auto|plan|ask]` - 查看或切换模式：auto 由模型审查 Shell 命令、低风险直接执行、有风险的交回模型处理（默认）；plan 让每条输入先规划、审阅后执行；ask 全部确认
+- `/hitl on` - 全部危险操作都确认（含写文件、编辑文件、创建项目）
+- `/hitl default` - 切回 auto（启动默认）
+- `/hitl` - 查看 HITL 当前档位
 - `/mcp` - 查看所有 MCP server 状态
 - `/mcp restart <name>` - 重启单个 MCP server
 - `/mcp logs <name>` - 查看 MCP server 最近 200 行 stderr 日志

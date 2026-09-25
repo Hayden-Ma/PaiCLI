@@ -18,8 +18,16 @@ public record StatusInfo(
         long elapsedMillis,
         String phase,
         String mcpSummary,
-        String skillSummary
+        String skillSummary,
+        String sessionMode
 ) {
+    public StatusInfo(String model, long totalTokens, long contextWindow, long inputTokens, long outputTokens,
+                      long cachedInputTokens, String estimatedCost, boolean hitlEnabled, long elapsedMillis,
+                      String phase, String mcpSummary, String skillSummary) {
+        this(model, totalTokens, contextWindow, inputTokens, outputTokens, cachedInputTokens, estimatedCost,
+                hitlEnabled, elapsedMillis, phase, mcpSummary, skillSummary, null);
+    }
+
     public StatusInfo(String model, long totalTokens, long contextWindow, boolean hitlEnabled, long elapsedMillis) {
         this(model, totalTokens, contextWindow, 0L, 0L, 0L, null, hitlEnabled, elapsedMillis,
                 (totalTokens > 0 || elapsedMillis > 0) ? "running" : "idle", null, null);
@@ -95,8 +103,16 @@ public record StatusInfo(
                 elapsedMillis,
                 phase,
                 normalizeSummary(mcpSummary),
-                normalizeSummary(skillSummary)
+                normalizeSummary(skillSummary),
+                sessionMode
         );
+    }
+
+    /** 状态栏左侧显示的会话模式文案（如 {@code AUTO shift+tab to cycle}）；null 时按 hitlEnabled 显示。 */
+    public StatusInfo withSessionMode(String sessionMode) {
+        return new StatusInfo(model, totalTokens, contextWindow, inputTokens, outputTokens, cachedInputTokens,
+                estimatedCost, hitlEnabled, elapsedMillis, phase, mcpSummary, skillSummary,
+                sessionMode == null || sessionMode.isBlank() ? null : sessionMode);
     }
 
     private static String normalizeSummary(String summary) {

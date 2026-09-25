@@ -55,6 +55,16 @@ public class TerminalHitlHandler implements HitlHandler {
     }
 
     @Override
+    public void onAutoDenied(String toolName, String reason) {
+        out.println("  ⊘ auto 未放行 " + toolName + "：" + reason + "（已交回模型处理）");
+    }
+
+    @Override
+    public void onAutoApproved(String toolName, String reason) {
+        out.println("  ✓ auto 已放行 " + toolName + "：" + reason);
+    }
+
+    @Override
     public boolean isEnabled() {
         return enabled;
     }

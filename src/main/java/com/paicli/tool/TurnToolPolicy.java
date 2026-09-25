@@ -46,37 +46,12 @@ public final class TurnToolPolicy {
                     + "|without\\s+(?:browsing|web\\s+search)|offline\\s+only|no\\s+web");
     private static final Pattern REQUEST_PREFIX = Pattern.compile(
             "^(?:请|请你|请帮忙|帮我|帮忙|麻烦|能否|能不能|可以帮我|我想让你|我需要你|给我)" );
-    private static final Pattern STRONG_LOCAL_ACTION = Pattern.compile(
-            "^(?:先|再|然后|接着|顺便|同时|并且?)?(?:读一下|读取|阅读|列出|查看|看看|检查|验证|核对|"
-                    + "分析|总结|概括|解释|介绍|改写|润色|翻译|修改|修复|修正|实现|开发|新增|添加|"
-                    + "删除|删掉|移除|移动|重命名|去掉|替换|创建|构建|编译|执行|运行|测试|调试|排查|定位|生成|写入|写|"
-                    + "提取|对比|推荐|告诉我|重构|配置|安装|升级|更新|部署|启动|停止|提交|保存|完成|记住|记一下)");
-    private static final Pattern DIRECTORY_ACTION = Pattern.compile(
-            "^(?:进入|切换到|切到)\\s*.{1,160}?(?:目录|文件夹)(?:\\s|$|[，,；;。])");
-    private static final Pattern LOCATION_PREFIX = Pattern.compile(
-            "^(?:在|到)\\s*.{1,160}?(?:目录|文件夹)(?:中|下|里)?\\s*");
-    private static final Pattern QUOTED_INPUT = Pattern.compile(
-            "(?s)```.*?```|~~~.*?~~~|\"[^\"]*\"|'[^']*'|“[^”]*”|‘[^’]*’|《[^》]*》|`[^`]*`");
-    private static final Pattern EXCERPT_PREFIX = Pattern.compile(
-            "^(?:标题|主题|摘录|原文|引用|例句|示例|文章|文档|日志)(?:内容)?[：:]");
     private static final Pattern CHINESE_WEB_ACTION = Pattern.compile(
             "^(?:先|再|然后|接着|顺便|同时|并且?)?(?:"
                     + "(?:搜索|搜)(?:一下|下|这个|这篇|该|标题|原文|资料|最新|关于|关键词|\\s|：|:|$)"
                     + "|(?:查一下|查查|查找|查询|查证|检索)(?:一下|下|这个|这篇|该|标题|原文|资料|最新|关于|关键词|后|\\s|：|:|$)"
                     + "|(?:打开|访问|浏览|阅读)(?:一下)?(?:这个|这篇|该|上面|上述|链接|网页|页面|网站|公众号文章|文章)"
                     + "|(?:打开|访问|浏览|阅读|fetch|browse)\\s*https?://)" );
-    private static final Pattern CHINESE_QUESTION = Pattern.compile(
-            "(?:为什么|为何|是什么|是谁|怎么做|怎么解决|怎么处理|如何实现|如何|是否|有没有|何时|"
-                    + "什么时候|多少|怎样|怎么样|怎么办|什么意思|哪(?:一|个|些)?|谁|能不能|可不可以|吗|呢)"
-                    + ".*(?:[。！!？?]*)$");
-    private static final Pattern ENGLISH_ACTION = Pattern.compile(
-            "(?i)^(?:please\\b|can\\s+you\\b|could\\s+you\\b|would\\s+you\\b|help\\s+me\\b|"
-                    + "i\\s+(?:want|need)\\s+you\\s+to\\b|read\\b|list\\b|check\\b|verify\\b|"
-                    + "analy[sz]e\\b|summari[sz]e\\b|explain\\b|rewrite\\b|edit\\b|translate\\b|fix\\b|"
-                    + "implement\\b|add\\b|remove\\b|create\\b|run\\b|generate\\b|build\\b|compile\\b|test\\b|debug\\b|"
-                    + "search(?:\\s+the\\s+web)?\\s+for\\b|find\\s+(?:the\\s+)?(?:original|source|article)\\b|"
-                    + "look\\s+up\\b|open\\s+(?:this|the|https?://)|visit\\b|fetch\\s+https?://|browse\\s+https?://|"
-                    + "(?:what|why|how|when|who|where|which)\\s+(?:is|are|do|does|did|has|have|can|should|would)\\b)" );
     private static final Pattern HEADLINE_SUFFIX = Pattern.compile(
             "(?i)[（(【\\[].{0,12}(?:附|含).{0,24}(?:面试题|源码|答案|资料|清单|PDF|福利).*[）)】\\]]$");
     private static final Pattern NETWORK_COMMAND = Pattern.compile(
@@ -140,7 +115,8 @@ public final class TurnToolPolicy {
             "evaluate_script", "evaluate", "select_option", "type", "type_text", "click_at",
             "close_page", "close");
 
-    private final boolean actionable;
+    /** 输入带明确的标题 / 摘录标记且没有提出请求：本轮只收掉联网工具，本地工具照常开放。 */
+    private final boolean headlineOnly;
     private final boolean explicitNoWeb;
     private final boolean webForbidden;
     private final BrowserIntent browserIntent;
@@ -163,21 +139,15 @@ public final class TurnToolPolicy {
     private final AtomicBoolean externalContentConsumed = new AtomicBoolean(false);
     private volatile boolean memoryGuardEnabled = ExternalContextTracker.guardEnabledByConfiguration();
 
-    private TurnToolPolicy(String submittedUserInput, boolean forceActionable,
+    private TurnToolPolicy(String submittedUserInput, boolean explicitTask,
                            boolean sharedBrowserSession, boolean agentOwnedCurrentPage) {
-        this(submittedUserInput, forceActionable, sharedBrowserSession, agentOwnedCurrentPage, null);
-    }
-
-    private TurnToolPolicy(String submittedUserInput, boolean forceActionable,
-                           boolean sharedBrowserSession, boolean agentOwnedCurrentPage,
-                           TurnToolPolicy continuation) {
         String input = submittedUserInput == null ? "" : submittedUserInput.trim();
-        this.explicitNoWeb = EXPLICIT_NO_WEB.matcher(input).find()
-                || (continuation != null && continuation.explicitNoWeb);
-        String actionableInput = explicitNoWeb ? stripNoWebConstraints(input) : input;
-        this.actionable = forceActionable || looksActionable(actionableInput);
-        this.webForbidden = explicitNoWeb || looksLikeLocalTextTransform(input)
-                || (continuation != null && continuation.webForbidden);
+        this.explicitNoWeb = EXPLICIT_NO_WEB.matcher(input).find();
+        String headlineInput = explicitNoWeb ? stripNoWebConstraints(input) : input;
+        // 自然语言判断只用来收紧：命中高精度的标题标记才收掉联网工具；没命中时保持完整工具集，
+        // 漏判的代价是模型多一次只读搜索，而不是正常任务因为缺工具静默失败
+        this.headlineOnly = !explicitTask && looksLikeHeadlineOnly(headlineInput);
+        this.webForbidden = explicitNoWeb || headlineOnly || looksLikeLocalTextTransform(input);
         this.browserIntent = detectBrowserIntent(input);
         this.browserTabManagementRequested = BROWSER_TAB_REQUEST.matcher(input).find();
         this.existingBrowserContextRequested = EXISTING_BROWSER_CONTEXT.matcher(input).find()
@@ -193,7 +163,7 @@ public final class TurnToolPolicy {
     }
 
     private TurnToolPolicy(TurnToolPolicy source) {
-        this.actionable = source.actionable;
+        this.headlineOnly = source.headlineOnly;
         this.explicitNoWeb = source.explicitNoWeb;
         this.webForbidden = source.webForbidden;
         this.browserIntent = source.browserIntent;
@@ -224,34 +194,6 @@ public final class TurnToolPolicy {
                                                boolean agentOwnedCurrentPage) {
         return new TurnToolPolicy(
                 submittedUserInput, false, sharedBrowserSession, agentOwnedCurrentPage);
-    }
-
-    /**
-     * A short reply can select the previous assistant's numbered option or continue an explicit
-     * task. Only actionability and restrictive web flags carry over; URLs, browser permissions,
-     * and memory authority must still come from the current submitted text.
-     */
-    public static TurnToolPolicy fromConversationReply(String submittedUserInput,
-                                                       String previousAssistant,
-                                                       TurnToolPolicy previousPolicy,
-                                                       boolean sharedBrowserSession,
-                                                       boolean agentOwnedCurrentPage) {
-        String reply = submittedUserInput == null ? "" : submittedUserInput.trim()
-                .replaceFirst("[。！!，,]+$", "").trim();
-        boolean continuation = false;
-        if (previousPolicy != null && previousAssistant != null && !previousAssistant.isBlank()) {
-            Matcher option = Pattern.compile("(?:选|选择|第)?\\s*([1-9][0-9]?)\\s*(?:项|个)?").matcher(reply);
-            if (option.matches()) {
-                continuation = Pattern.compile("(?m)^\\s*(?:\\*\\*)?" + option.group(1)
-                        + "[.、)）]\\s*\\S").matcher(previousAssistant).find();
-            } else if (previousPolicy.actionable) {
-                continuation = Pattern.compile(
-                        "(?i)(?:继续|继续吧|继续执行|接着做|开始吧|可以|好的?|行|同意|确认|没问题|"
-                                + "就这样|按这个来|ok|yes|continue|go ahead|do it)").matcher(reply).matches();
-            }
-        }
-        return new TurnToolPolicy(submittedUserInput, continuation, sharedBrowserSession,
-                agentOwnedCurrentPage, continuation ? previousPolicy : null);
     }
 
     /** Use for an already explicit task envelope while retaining no-web and URL rules. */
@@ -299,7 +241,7 @@ public final class TurnToolPolicy {
      * grounded URLs, and browser state advertised for the matching response.
      */
     public ToolExposure expose(List<LlmClient.Tool> definitions) {
-        if (definitions == null || definitions.isEmpty() || !actionable) {
+        if (definitions == null || definitions.isEmpty()) {
             return ToolExposure.none();
         }
 
@@ -428,13 +370,12 @@ public final class TurnToolPolicy {
         if (invocation == null || invocation.name() == null || invocation.name().isBlank()) {
             return Decision.deny(ReasonCode.TOOL_NOT_ADVERTISED, "模型返回了无效工具调用。");
         }
-        if (!actionable) {
-            return Decision.deny(ReasonCode.NO_ACTION,
-                    "当前顶层用户输入只有标题、主题或文本片段，没有明确任务。不要猜测用户意图或调用工具；请先询问用户希望如何处理。");
-        }
-
         String name = invocation.name();
         boolean networkCommand = isNetworkCommand(invocation);
+        if (headlineOnly && (isExternalWebTool(name) || networkCommand)) {
+            return Decision.deny(ReasonCode.NO_ACTION,
+                    "当前输入看起来只是一个标题或摘录，没有说明要做什么。本轮不开放联网工具；请先询问用户希望如何处理。");
+        }
         if (webForbidden && (isExternalWebTool(name) || networkCommand)) {
             return Decision.deny(ReasonCode.WEB_FORBIDDEN,
                     "用户明确要求不要联网，或当前请求只需要处理已有文本。请仅使用本地上下文。");
@@ -520,6 +461,11 @@ public final class TurnToolPolicy {
     }
 
     /** 当前分支是否已接触外部内容（含会话中更早的轮次）；供测试和诊断使用。 */
+    /** 本轮是否因为输入只是标题 / 摘录而收掉了联网工具；调用方据此提示用户补充意图。 */
+    public boolean headlineOnly() {
+        return headlineOnly;
+    }
+
     public boolean hasConsumedExternalContent() {
         return externalContentConsumed.get();
     }
@@ -606,67 +552,14 @@ public final class TurnToolPolicy {
                 List.of());
     }
 
-    private static boolean looksActionable(String input) {
+    private static boolean looksLikeHeadlineOnly(String input) {
         if (input == null || input.isBlank()) {
             return false;
         }
-        if (input.matches("(?is)^https?://\\S+[。！!？?]?$")) {
-            return true;
-        }
-        if (!extractUrls(input).isEmpty()) {
-            return true;
-        }
-        boolean requestPrefixed = REQUEST_PREFIX.matcher(input).find();
-        if (requestPrefixed) {
-            return true;
-        }
-        if (looksLikeHeadline(input)) {
+        if (!extractUrls(input).isEmpty() || REQUEST_PREFIX.matcher(input).find()) {
             return false;
         }
-        String commandBody = stripCommandLead(input);
-        if (STRONG_LOCAL_ACTION.matcher(commandBody).find()
-                || CHINESE_WEB_ACTION.matcher(commandBody).find()
-                || BROWSER_READ_REQUEST.matcher(commandBody).find()
-                || BROWSER_INTERACT_REQUEST.matcher(commandBody).find()
-                || BROWSER_CONNECT_REQUEST.matcher(input).find()
-                || BROWSER_DISCONNECT_REQUEST.matcher(input).find()
-                || BROWSER_STATUS_REQUEST.matcher(input).find()
-                || BROWSER_HISTORY_REQUEST.matcher(input).find()
-                || BROWSER_TAB_REQUEST.matcher(input).find()
-                || CHINESE_QUESTION.matcher(input).find()
-                || ENGLISH_ACTION.matcher(input).find()) {
-            return true;
-        }
-        if (input.indexOf('?') >= 0 || input.indexOf('？') >= 0) {
-            return true;
-        }
-        if (hasActionInInstructionClauses(input)) {
-            return true;
-        }
-        return input.matches("^(?:把|将).{1,240}(?:改|写|删|去掉|替换|翻译|总结|整理).*$")
-                || input.matches("^给.{1,160}(?:打分|评价|点评).*$");
-    }
-
-    private static boolean hasActionInInstructionClauses(String input) {
-        // A command may start with a location or setup clause. Inspect later clauses too, but
-        // never promote quoted examples, code blocks, or explicitly labelled excerpts to tasks.
-        if (EXCERPT_PREFIX.matcher(input).find()) {
-            return false;
-        }
-        String instructions = QUOTED_INPUT.matcher(input).replaceAll(" ");
-        for (String clause : instructions.split("[，,；;。\\n]+")) {
-            String body = stripCommandLead(clause);
-            if (DIRECTORY_ACTION.matcher(body).find()) {
-                return true;
-            }
-            body = LOCATION_PREFIX.matcher(body).replaceFirst("");
-            if (STRONG_LOCAL_ACTION.matcher(body).find()
-                    || CHINESE_WEB_ACTION.matcher(body).find()
-                    || ENGLISH_ACTION.matcher(body).find()) {
-                return true;
-            }
-        }
-        return false;
+        return looksLikeHeadline(input);
     }
 
     private static String stripNoWebConstraints(String input) {

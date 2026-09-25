@@ -14,24 +14,11 @@ import java.util.List;
 import java.util.Queue;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AgentWebSearchDecisionTest {
-    @Test
-    void clearHistoryRemovesFollowUpContext(@TempDir Path tempDir) {
-        RecordingClient llm = new RecordingClient(List.of(
-                new LlmClient.ChatResponse("assistant", "1. 创建 Hello.java\n2. 取消", null, 20, 5),
-                new LlmClient.ChatResponse("assistant", "请说明任务。", null, 20, 5)));
-        RecordingToolRegistry registry = new RecordingToolRegistry();
-        registry.setProjectPath(tempDir.toString());
-        Agent agent = new Agent(llm, registry);
-        agent.run("创建 Hello.java");
-        agent.clearHistory();
-        agent.run("1");
-        assertTrue(llm.toolSnapshots.get(1).isEmpty());
-    }
-
 
     private static final String BARE_ARTICLE_TITLE =
             "阿里员工：作为一名合格的375员工，老板在的时候9点走，老板不在的时候6点半走，老板9点前走了那就跟着走（附Agent面试题）";
@@ -103,8 +90,10 @@ class AgentWebSearchDecisionTest {
                 "裸标题不能把模型臆造的 URL 交给底层 ToolRegistry 执行");
         assertEquals(2, llm.messageSnapshots.size());
         assertNotNull(llm.toolSnapshots.get(0));
-        assertTrue(llm.toolSnapshots.get(0).isEmpty(),
-                "NO_ACTION 首轮不应向模型暴露任何工具");
+        List<String> firstTools = toolNames(llm.toolSnapshots.get(0));
+        assertFalse(firstTools.contains("web_fetch"), "裸标题首轮不应暴露联网工具");
+        assertFalse(firstTools.contains("web_search"), "裸标题首轮不应暴露联网工具");
+        assertTrue(firstTools.contains("read_file"), "收紧只针对联网工具，本地工具照常开放");
         assertTrue(llm.messageSnapshots.get(1).stream()
                         .filter(message -> "tool".equals(message.role()))
                         .map(LlmClient.Message::content)
@@ -133,7 +122,8 @@ class AgentWebSearchDecisionTest {
         agent.run(expandedInput, BARE_ARTICLE_TITLE);
 
         assertEquals(0, registry.executedInvocations.size());
-        assertTrue(llm.toolSnapshots.get(0).isEmpty());
+        assertFalse(toolNames(llm.toolSnapshots.get(0)).contains("web_fetch"),
+                "展开的文件内容不能授予 URL，web_fetch 不应出现在工具清单里");
         assertTrue(llm.messageSnapshots.get(1).stream()
                 .filter(message -> "tool".equals(message.role()))
                 .map(LlmClient.Message::content)
@@ -250,5 +240,9 @@ class AgentWebSearchDecisionTest {
         public String getProviderName() {
             return "test";
         }
+    }
+
+    private static List<String> toolNames(List<LlmClient.Tool> tools) {
+        return tools == null ? List.of() : tools.stream().map(LlmClient.Tool::name).toList();
     }
 }

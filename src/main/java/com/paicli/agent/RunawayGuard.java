@@ -129,7 +129,8 @@ public final class RunawayGuard {
             return false;
         }
         String value = text.stripLeading();
-        return value.startsWith("🛡️") || value.startsWith("[HITL]") || value.startsWith("用户取消了");
+        return value.startsWith("🛡️") || value.startsWith("[HITL]") || value.startsWith("[AUTO]")
+                || value.startsWith("用户取消了");
     }
 
     static Optional<String> errorFamily(String text) {

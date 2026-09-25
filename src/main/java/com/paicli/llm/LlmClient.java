@@ -39,6 +39,14 @@ public interface LlmClient {
         return true;
     }
 
+    /**
+     * 最终回复正文里是否残留了没被执行的工具调用文本（如 DeepSeek 在正文里输出的 DSML）。
+     * 调用方据此提示用户“这段调用没有执行”，避免把调用文字误认为操作已经完成。
+     */
+    default boolean looksLikeUnexecutedToolCall(String content) {
+        return false;
+    }
+
     default String promptCacheMode() {
         return "none";
     }

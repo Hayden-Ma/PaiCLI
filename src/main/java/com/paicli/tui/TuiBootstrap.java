@@ -141,7 +141,7 @@ public final class TuiBootstrap {
             LanternaWindow window = new LanternaWindow(config, llmClient);
             LanternaRenderer renderer = new LanternaRenderer(window);
             reactAgent.setRenderer(renderer);
-            reactAgent.setHitlEnabledSupplier(hitlHandler::isEnabled);
+            reactAgent.setHitlEnabledSupplier(hitlHandler::isConfirmationActive);
             reactAgent.getToolRegistry().setWriteFileObserver(
                     (path, ba) -> renderer.appendDiff(path, ba[0], ba[1]));
             RendererHitlHandler rendererHitl = new RendererHitlHandler(renderer, hitlHandler.isEnabled());

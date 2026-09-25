@@ -47,6 +47,10 @@ import java.util.function.Supplier;
  */
 public class Agent {
     private static final Logger log = LoggerFactory.getLogger(Agent.class);
+    /** 正文里残留了没被执行的工具调用文本时给用户的提示，三条执行路径共用。 */
+    static final String UNEXECUTED_TOOL_CALL_NOTICE =
+            "  ⚠ 上面有一段工具调用格式的文本没有被执行（本轮没有开放对应工具，或格式无法解析）；"
+                    + "如果它是你要求展示的示例，可以忽略这条提示";
     private LlmClient llmClient;
     private final ToolRegistry toolRegistry;
     private final List<LlmClient.Message> conversationHistory;
@@ -57,8 +61,8 @@ public class Agent {
     private SkillRegistry skillRegistry;
     private Renderer renderer;
     private Supplier<Boolean> hitlEnabledSupplier = () -> false;
+    private Supplier<String> sessionModeSupplier = () -> null;
     private boolean returnFinalResponseWhenStreamed;
-    private TurnToolPolicy previousTurnPolicy;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
 
     public Agent(LlmClient llmClient) {
@@ -131,6 +135,11 @@ public class Agent {
         this.hitlEnabledSupplier = supplier == null ? () -> false : supplier;
     }
 
+    /** 状态栏左侧的会话模式文案（auto / plan / yolo / ask），由 CLI 的模式切换提供。 */
+    public void setSessionModeSupplier(Supplier<String> supplier) {
+        this.sessionModeSupplier = supplier == null ? () -> null : supplier;
+    }
+
     /**
      * 获取渲染器；首次调用时如果未设置，懒加载一个 {@link PlainRenderer} 兜底，
      * 保证旧调用方（构造 Agent 后没有 setRenderer 的代码、单测等）行为不变。
@@ -173,13 +182,14 @@ public class Agent {
                         submittedUserInput,
                         toolRegistry.isSharedBrowserSession(),
                         toolRegistry.hasAgentOwnedCurrentBrowserPage())
-                : TurnToolPolicy.fromConversationReply(
+                : TurnToolPolicy.fromUserInput(
                         submittedUserInput,
-                        lastAssistantReply(),
-                        previousTurnPolicy,
                         toolRegistry.isSharedBrowserSession(),
                         toolRegistry.hasAgentOwnedCurrentBrowserPage());
-        previousTurnPolicy = turnToolPolicy;
+        if (turnToolPolicy.headlineOnly()) {
+            renderer().stream().println(AnsiStyle.subtle(
+                    "  ℹ 这句输入看起来是标题或摘录，本轮未开放联网工具；需要搜索或抓取时请说明要做什么"));
+        }
         pruneHistoricalImagePayloads();
         recordExpandedMcpResources(userInput, submittedUserInput);
         storeExplicitBrowserMemoryHint(userInput);
@@ -304,12 +314,17 @@ public class Agent {
                     log.debug("Assistant answer preview: {}", preview(response.content(), 500));
                 }
 
+                boolean unexecutedToolCall = llmClient.looksLikeUnexecutedToolCall(response.content());
                 if (streamRenderer.hasStreamedOutput()) {
                     streamRenderer.finish();
+                    if (unexecutedToolCall) {
+                        renderer().stream().println(AnsiStyle.subtle(UNEXECUTED_TOOL_CALL_NOTICE));
+                    }
                     return returnFinalResponseWhenStreamed ? (response.content() == null ? "" : response.content().trim()) : "";
                 }
                 streamRenderer.clearThinkingPanel();
-                return formatUserFacingResponse(reasoningTranscript.toString(), response.content());
+                String answer = formatUserFacingResponse(reasoningTranscript.toString(), response.content());
+                return unexecutedToolCall ? answer + "\n\n" + UNEXECUTED_TOOL_CALL_NOTICE : answer;
 
             } catch (IOException e) {
                 log.error("LLM call failed in ReAct loop", e);
@@ -385,7 +400,6 @@ public class Agent {
      * 清空对话历史并重建基础系统提示，不影响长期记忆条目
      */
     public void clearHistory() {
-        previousTurnPolicy = null;
         autoCompactionManager.clear(conversationHistory);
         memoryManager.getExternalContextTracker().reset();
         conversationLedger.appendEvent(
@@ -398,14 +412,6 @@ public class Agent {
         appendConversationMessage(
                 LlmClient.Message.system(buildSystemPrompt("")),
                 "history_reset");
-    }
-
-    private String lastAssistantReply() {
-        if (conversationHistory.isEmpty()) {
-            return null;
-        }
-        LlmClient.Message last = conversationHistory.get(conversationHistory.size() - 1);
-        return "assistant".equals(last.role()) ? last.content() : null;
     }
 
     /**
@@ -437,9 +443,10 @@ public class Agent {
         boolean hitl = Boolean.TRUE.equals(hitlEnabledSupplier.get());
         long contextTokens = estimateCurrentContextTokens();
         if ("idle".equals(normalizedPhase)) {
-            return StatusInfo.idle(model, contextWindow, contextTokens, hitl);
+            return StatusInfo.idle(model, contextWindow, contextTokens, hitl).withSessionMode(sessionModeSupplier.get());
         }
-        return StatusInfo.active(model, contextWindow, contextTokens, hitl, normalizedPhase);
+        return StatusInfo.active(model, contextWindow, contextTokens, hitl, normalizedPhase)
+                .withSessionMode(sessionModeSupplier.get());
     }
 
     /**
@@ -837,7 +844,7 @@ public class Agent {
                     elapsed,
                     phase == null || phase.isBlank()
                             ? (totalTokens > 0 || elapsed > 0 ? "running" : "idle")
-                            : phase));
+                            : phase).withSessionMode(sessionModeSupplier.get()));
         } catch (Exception e) {
             log.debug("status push failed", e);
         }

@@ -132,9 +132,21 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - SubAgent IOException 返回 ERROR 类型
 - 所有子代理共享 ToolRegistry 和 MemoryManager
 
+### Session Modes
+
+- Shift+Tab（终端序列 `ESC [ Z`）在 inline CLI 的 JLine MAIN / EMACS / VIINS 键位上绑定 `paicli-cycle-session-mode`，按 auto → plan → ask 循环；`/mode [auto|plan|ask]` 同效；交互式 CLI 不提供全部放行
+- auto = `/hitl default`；plan = `/hitl default` + 普通输入走 Plan-and-Execute（显式 `/team` 与待执行 Team 任务优先）；ask = `/hitl on`
+- 当前模式由审批档位和 plan 开关推出，`/hitl` 改档位后显示会跟着变；Agent 通过 `setSessionModeSupplier` 在运行中也刷新状态栏模式
+- 计划审阅与任务运行中的原始按键读取把 `ESC [ Z` 归为控制序列，不会误判为 ESC 取消；运行中按 Shift+Tab 不切换模式
+- 没有底部状态栏（plain 渲染）时，切换后在提示符上方打印一行模式说明；Lanterna TUI 尚未接入
+
 ### HITL System
 
-- 危险工具：write_file(中) / execute_command(高) / create_project(中) / revert_turn(高)
+- 危险工具：write_file(中) / edit_file(中) / execute_command(高) / create_project(中) / revert_turn(高) / mcp__*
+- 两档：`/hitl default`（auto，启动默认）与 `/hitl on`（ask，全部危险工具人工确认）；交互式 CLI 已移除 `/hitl off`。默认档由 `SwitchableHitlHandler.setHighRiskConfirmationEnabled` 开启，`HitlHandler` 接口默认关闭，所以评测等非交互处理器不会弹确认
+- auto 下 `execute_command` 由 `AutoApprovalReviewer` 审查，交互式 CLI 注入 `LlmApprovalClassifier`：系统提示列出放行条件（只读或项目内易撤销、用户请求需要；不删改用户数据、不改 git 历史、不推送部署、不联网安装、不碰密钥与系统设置、不写项目外），只输出 `{"decision":"allow|ask","reason":"…"}`，只认精确的 `allow`。请求只含 system + 一条 user（用户本轮原话、工具名、参数），不带历史和工具结果，不暴露工具；客户端经 `LlmClientFactory.createApprovalClassifier` 以 `thinking=disabled`、`max_tokens=400` 发送。20 秒超时、异常、无法解析、参数超 32000 字符（不截断，截断会漏掉危险部分）都判为不放行；只缓存 allow，换用户请求即清空。放行写 `AuditEntry.allowByAutoClassifier`（approver=`auto-classifier`）并由 `HitlHandler.onAutoApproved` 在终端打一行说明；不放行写 `denyByAutoClassifier`、`onAutoDenied` 打一行说明，并返回 `[AUTO] 自动审查未放行：…` 失败结果给模型（提示换只读做法或请用户切 ask），不弹框。同一轮连续被拦 3 次转人工，审批框“自动审查”栏写明连续次数与原因；`RunawayGuard` 把 `[AUTO]` 当作未执行调用，不计入重复
+- `revert_turn`、全部 `mcp__*`、敏感页面改写在 auto 下不经分类器，直接交回模型（计入连续被拦次数）：MCP 的实际行为由第三方 server 决定，分类器只看得到名字和参数，且项目级 `.paicli/mcp.json` 尚无首次确认机制。转人工后用户选“全部放行”仍按工具 / server 生效
+- 状态栏在有会话模式时显示 `AUTO/PLAN/ASK shift+tab to cycle`；无模式（非交互）时回退 HITL/YOLO 文案
 - 审批选项：y(批准) / a(全部放行) / n(拒绝) / s(跳过) / m(修改参数)
 - fail-safe：连续 5 次无效输入判为 REJECTED
 - 并发：requestApproval 整体 synchronized
@@ -161,9 +173,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `web_search`：SearchProvider 接口，返回 SearchResult 列表
 - `web_fetch`：NetworkPolicy → WebFetcher → HtmlExtractor，SPA/防爬墙返回空正文 + 边界提示
 - Prompt 不包含 Freshness Policy，也不对“最新/当前/今天”等关键词做自动 `web_search` 预检。模型只能在顶层用户目标明确时主动选择联网工具；明确“不要联网”始终优先。
-- 顶层输入只是裸标题、主题或摘录，且无动作、问题或目标时，当前轮只做澄清，不调用任何工具。模型不得根据标题、记忆或自己的 reasoning 猜测 URL。
-- ReAct 使用当前 `conversationHistory` 的末条助手正文判断简短续接：`1` / `选1` / `第1项` 必须匹配上一条编号选项；“继续”“好的”等要求上一轮已是任务。只恢复 actionability 并保留上一轮禁网限制，不继承旧 URL、浏览器操作或记忆写入授权；文件/MCP 展开内容不能充当用户选项回复。`/clear` 同时清除续接策略状态。
-- `TurnToolPolicy` 的动作判断还检查用户原文中逗号、分号、句号和换行分隔的指令，识别目录操作与“在 … 目录下”前缀，避免首个分句是位置说明时丢掉后续“编译/运行”等动作。该补充判断先排除引文、代码块和明确标注的摘录；禁网、URL 来源、工具审批仍单独检查。
+- 工具默认开放；自然语言判断只能收紧，不能授予能力。顶层输入命中高精度标题标记（`《…》`、`# `、“（附…面试题）”后缀、“X：Y？”）且无请求前缀和 URL 时，本轮收掉联网工具（与禁网同一套 `webForbidden` 执行），拒绝原因 `NO_ACTION`，Agent 在终端提示用户补充意图；本地工具照常开放。没有标记的裸标题由提示词要求模型先澄清。模型不得根据标题、记忆或自己的 reasoning 猜测 URL。
 - 用户明确要求查找但没有 URL 时，先 `web_search`；`web_fetch` 或 Chrome / MCP 导航 URL 只能来自用户实际提交的顶层原文（不能是 `@path` / MCP resource 展开正文），或同一执行分支由搜索 provider 返回的结构化 `discoveredUrls`。搜索正文、snippet、query 回显、错误提示、`web_fetch` 正文、浏览器导航/快照/网络列表、普通本地工具结果、assistant reasoning、回复文本和 tool arguments 都不能建立 URL provenance；当前 StepSearch MCP 的非结构化文本不会生成凭据。
 - `TurnToolPolicy` 是运行时确定性边界：ReAct / Plan / Team 都必须单独传入用户提交原文与展开后的执行内容，不能让 planner / worker 派生的“搜索”子任务自行获得联网授权。Plan 审阅补充会重建策略；Plan 并行任务和 Team worker 使用 fork 后的独立 URL 集合，避免跨分支扩权。只有 DAG 中声明的后继依赖会继承前置分支不可伪造的 `TrustedUrlContext`；任务结果文本不作为授权来源。grounded URL 先只曝光导航，成功导航只建立当前页读取上下文，读取结果不产生新 URL 授权；交互工具必须有顶层原文明确授权。shared Chrome 的真实模式与 PaiCLI-owned 当前页从 `BrowserSession` 跨轮注入策略；非 owned 标签页只在用户明确要求时开放只读，导航/写入/关闭会硬拒绝，导航结果的全量 `# Pages` 会在回灌模型前裁成单页回执。策略在 StepSearch、内置 SearchProvider / WebFetcher 和 Chrome / MCP 路由之前执行，拒绝结果不得用 fallback 绕过。
 - StepSearch 优先级：通过 `TurnToolPolicy` 后，当前模型 provider=`step` 且 model 以 `step-3.7-flash` 开头，并且自动/显式 `mcp__step_search__web_search` / `mcp__step_search__web_fetch` 已注册时，内置 `web_search` / `web_fetch` 会先代理到 StepSearch MCP；MCP 未就绪或返回不可用结果时回退原实现。
@@ -218,7 +228,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `NO_COLOR=1`：禁用 ANSI 颜色
 - 当前开屏 Banner 是无右侧盒线边框的简洁布局，避免 ANSI/CJK 字宽导致竖线错位
 - InlineRenderer 复用 JLine 4 的编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`
-- BottomStatusBar 是 JLine `Status` 托管的底部 dock：由 JLine 负责滚动区域和状态行位置，不再手写 `\n`、`moveUp`、`CLEAR_TO_EOS` 或绝对光标行号；dock 上层展示 YOLO/HITL 与 MCP/Skill 摘要，下层展示 model、phase、ctx、token、cost、elapsed 与 cwd。关键字段可用 JLine `AttributedString` 做克制彩色高亮，但纯文本格式和列宽裁剪仍要稳定。`ctx` 只表示当前仍会带入下一轮请求的上下文估算，`in/out/cache` 表示最近任务调用统计。
+- BottomStatusBar 是 JLine `Status` 托管的底部 dock：由 JLine 负责滚动区域和状态行位置，不再手写 `\n`、`moveUp`、`CLEAR_TO_EOS` 或绝对光标行号；dock 上层展示会话模式（`AUTO/PLAN/YOLO/ASK shift+tab to cycle`，无模式时回退 HITL/YOLO）与 MCP/Skill 摘要，下层展示 model、phase、ctx、token、cost、elapsed 与 cwd。关键字段可用 JLine `AttributedString` 做克制彩色高亮，但纯文本格式和列宽裁剪仍要稳定。`ctx` 只表示当前仍会带入下一轮请求的上下文估算，`in/out/cache` 表示最近任务调用统计。
 - `/clear` 清空当前 ReAct conversationHistory（含已注入的 Skill 正文）和对应的 Session Memory 预计算状态，并重建不含上一轮检索记忆的 system prompt；长期记忆条目保留，后续只会按新查询重新检索注入。
 - `/compact` 手动以完整摘要压缩当前 ReAct conversationHistory，压缩期间显示动态 activity 面板，成功后刷新底部 ctx；不会清空长期记忆。
 - `/export` 导出当前 ReAct conversationHistory 为 Markdown 到 `~/.paicli/exports/session-*.md`；包含完整 system prompt，便于检查 LLM 实际接收前的指令，命令不接受路径参数。
@@ -602,7 +612,7 @@ Agnes provider 名为 `agnes`，默认 Base URL 为 `https://apihub.agnes-ai.com
 ### Web + Browser 细节
 
 - 每轮 system prompt 会注入当前日期/时区，用于相对日期理解；不做基于“最新/当前/今天”等关键词的自动 freshness 预检。模型只能在顶层用户目标明确时选择联网工具，用户明确要求不要联网时优先遵从。
-- 当前顶层输入只是裸标题、主题或摘录，没有动作、问题或目标时，先澄清，本轮不调用任何工具；不得自行猜测 URL。
+- 当前顶层输入只是裸标题、主题或摘录，没有动作、问题或目标时，由提示词要求模型先澄清；带明确标题标记时代码层收掉联网工具。不得自行猜测 URL。
 - 用户明确要求查找但没有提供 URL 时，先 `web_search` 再基于结果继续；`web_fetch` 与浏览器导航 URL 只能来自用户实际提交的顶层原文（不含 `@path` / MCP resource 展开正文），或本执行分支成功完成的 `web_search` 结构化 `discoveredUrls`。搜索正文、snippet、query 回显、错误提示、`web_fetch` 正文、浏览器导航/快照/网络列表、普通本地工具输出、模型 reasoning / 回复 / tool arguments 都不能扩充 URL 授权；当前 StepSearch MCP 的非结构化文本不会生成 URL 凭据。
 - 运行时 `TurnToolPolicy` 覆盖 ReAct / Plan / Team，在 StepSearch、内置 Web provider 或 MCP / Chrome 路由之前执行；Plan 审阅补充会重建策略。Plan 并行任务和 Team worker 各用独立策略副本，不能跨分支共享新发现的 URL；只有 DAG 中声明的后继依赖才会继承前置分支的类型化 `web_search` URL 凭据，不从任务回复文本重新提取。grounded URL 只开放导航，成功导航只建立当前页的读取上下文；读取结果不产生新 URL 授权，点击/填写等交互仍需顶层原文明确授权。shared Chrome 状态必须从真实 `BrowserSession` 跨轮读取，非 PaiCLI 创建的标签页只能在用户明确要求时只读，不能由 Agent 导航、改写或关闭；导航结果不得把完整标签页清单回灌模型。策略拒绝不得通过换工具或换 provider 绕过。
 - “当前项目/当前 README/当前文件/当前代码”等表达属于本地上下文任务，通常应由模型选择 `glob_files` / `grep_code` / `read_file`，而不是联网工具。

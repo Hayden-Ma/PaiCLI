@@ -10,6 +10,22 @@ public class LlmClientFactory {
         return create(provider, null, config);
     }
 
+    /**
+     * auto 模式审批分类器用的轻量客户端：沿用当前供应商与 Key，关闭思考、限制输出长度，
+     * 只做一次短判断。{@code classifierModel} 为空时使用该供应商当前配置的模型。
+     */
+    public static LlmClient createApprovalClassifier(String provider, String classifierModel, PaiCliConfig config) {
+        LlmClient base = create(provider, classifierModel, config);
+        if (base == null) {
+            return null;
+        }
+        AbstractOpenAiCompatibleClient transport = base instanceof ProfiledLlmClient profiled
+                ? profiled.transport() : (AbstractOpenAiCompatibleClient) base;
+        ModelProfile classifierProfile = new ModelProfile(
+                null, null, false, "disabled", null, false, false, 400, "approval-classifier");
+        return transport.withModelProfile(base.getModelName(), classifierProfile);
+    }
+
     public static LlmClient create(String provider, String selectedModel, PaiCliConfig config) {
         if (provider == null) return null;
 

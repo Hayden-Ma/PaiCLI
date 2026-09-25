@@ -20,77 +20,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TurnToolPolicyTest {
-    @Test
-    void localInstructionsCanStartWithLocationOrSetupClause() {
-        for (String input : List.of(
-                "进入 demo 目录，编译并运行 Hello.java",
-                "项目在 demo 目录，编译并运行 Hello.java",
-                "项目在 demo 目录；然后编译 Hello.java",
-                "项目在 demo 目录\n运行 Hello.java",
-                "在 demo 目录下编译并运行 Hello.java",
-                "进入 demo 目录",
-                "切换到 demo 文件夹",
-                "删掉",
-                "The project is in demo; compile and run Hello.java",
-                "The project is in demo; run Hello.java")) {
-            var policy = TurnToolPolicy.fromUserInput(input);
-            assertTrue(policy.expose(definitions()).advertisedNames().contains("execute_command"), input);
-        }
-        var offline = TurnToolPolicy.fromUserInput("不要联网，项目在 demo 目录，编译并运行 Hello.java");
-        assertTrue(offline.expose(definitions()).advertisedNames().contains("execute_command"));
-        assertFalse(offline.expose(definitions()).advertisedNames().contains("web_search"));
-    }
-
-    @Test
-    void quotedActionsAndTopicFragmentsAreNotInstructions() {
-        for (String input : List.of(
-                "进入 Agent 世界的大门",
-                "项目在 demo 目录，Hello.java",
-                "原文：进入 demo 目录，编译并运行 Hello.java",
-                "文档内容：\n编译并运行 Hello.java",
-                "示例\n```text\n编译并运行 Hello.java\n```",
-                "这句原文是“进入 demo 目录，编译并运行 Hello.java”",
-                "《进入 demo 目录，编译并运行 Hello.java》")) {
-            assertTrue(TurnToolPolicy.fromUserInput(input).expose(definitions()).definitions().isEmpty(), input);
-        }
-    }
-
-    @Test
-    void conversationRepliesRestoreToolsButNotUrlAuthority() {
-        TurnToolPolicy previous = TurnToolPolicy.fromUserInput("读取 https://example.com/original");
-        String answer = "1. 创建 Hello.java\n2. 读取 https://example.com/assistant-only";
-        for (String reply : List.of("1", "选1", "第1项", "继续", "好的", "OK！")) {
-            TurnToolPolicy next = TurnToolPolicy.fromConversationReply(reply, answer, previous, false, false);
-            var names = next.expose(definitions()).advertisedNames();
-            assertTrue(names.contains("read_file"), reply);
-            assertFalse(names.contains("web_fetch"), reply);
-        }
-    }
-
-    @Test
-    void followUpKeepsNoWebRestrictionAndBareTitlesStillNeedClarification() {
-        TurnToolPolicy previous = TurnToolPolicy.fromUserInput("不要联网，读取 README.md");
-        String answer = "1. 创建文件\n2. 取消";
-        var next = TurnToolPolicy.fromConversationReply("1", answer, previous, false, false);
-        assertTrue(next.expose(definitions()).advertisedNames().contains("read_file"));
-        assertFalse(next.expose(definitions()).advertisedNames().contains("web_search"));
-        for (String reply : List.of("3", "2026", INCIDENT_TITLE)) {
-            assertTrue(TurnToolPolicy.fromConversationReply(reply, answer, previous, false, false)
-                    .expose(definitions()).definitions().isEmpty(), reply);
-        }
-        assertTrue(TurnToolPolicy.fromConversationReply("1", answer, null, false, false)
-                .expose(definitions()).definitions().isEmpty());
-        assertTrue(TurnToolPolicy.fromConversationReply("1", null, previous, false, false)
-                .expose(definitions()).definitions().isEmpty());
-    }
-
     private static final String INCIDENT_TITLE =
             "阿里员工：作为一名合格的375员工，老板在的时候9点走，老板不在的时候6点半走，老板9点前走了那就跟着走（附Agent面试题）";
     private static final String HALLUCINATED_URL =
             "https://mp.weixin.qq.com/s/X1kQ_5tHZgO-zJfQrN1z2g";
 
     @Test
-    void bareHeadlineExposesNoToolsAndBlocksEveryHallucinatedCall() {
+    void markedHeadlineHidesWebToolsButKeepsLocalTools() {
         TurnToolPolicy policy = TurnToolPolicy.fromUserInput(INCIDENT_TITLE);
         TurnToolPolicy.ToolExposure exposure = policy.expose(definitions());
         RecordingRegistry registry = new RecordingRegistry();
@@ -100,16 +36,20 @@ class TurnToolPolicyTest {
                 invocation("search", "web_search", "{\"query\":\"375员工\"}"),
                 invocation("file", "read_file", "{\"path\":\"README.md\"}")), exposure);
 
-        assertTrue(exposure.definitions().isEmpty());
+        assertTrue(policy.headlineOnly());
+        assertTrue(exposure.advertisedNames().contains("read_file"));
+        assertFalse(exposure.advertisedNames().contains("web_search"));
+        assertFalse(exposure.advertisedNames().contains("web_fetch"));
         assertTrue(policy.visibleToolCalls(List.of(
                 toolCall("fetch", "web_fetch", "{\"url\":\"" + HALLUCINATED_URL + "\"}")), exposure).isEmpty());
-        assertTrue(registry.executed.isEmpty());
-        assertEquals(3, results.size());
-        assertTrue(results.stream().allMatch(result -> result.result().contains("[NO_ACTION]")));
+        assertEquals(List.of("read_file"), registry.executed.stream().map(ToolInvocation::name).toList());
+        assertTrue(results.get(0).result().contains("[NO_ACTION]"), results.get(0).result());
+        assertTrue(results.get(1).result().contains("[NO_ACTION]"), results.get(1).result());
     }
 
     @Test
-    void headlineWordsDoNotBecomeCommands() {
+    void headlinesNeverLoseLocalToolsOrGainUngroundedFetch() {
+        // 自然语言判断只能收紧：标题再像命令，也只影响联网工具；没有可信 URL 时 web_fetch 始终不可见
         List<String> headlines = List.of(
                 "打开 Agent 世界的大门：从 Tool Calling 到 MCP",
                 "搜索改变编程的方式：AI Agent 实战",
@@ -118,8 +58,34 @@ class TurnToolPolicyTest {
                 "DeepSeek V4 发布：百万上下文真的有用吗？");
 
         for (String headline : headlines) {
-            assertTrue(TurnToolPolicy.fromUserInput(headline)
-                    .expose(definitions()).definitions().isEmpty(), headline);
+            TurnToolPolicy.ToolExposure exposure = TurnToolPolicy.fromUserInput(headline).expose(definitions());
+            assertTrue(exposure.advertisedNames().contains("read_file"), headline);
+            assertTrue(exposure.advertisedNames().contains("write_file"), headline);
+            assertFalse(exposure.advertisedNames().contains("web_fetch"), headline);
+        }
+    }
+
+    @Test
+    void onlyHighPrecisionHeadlineMarkersHideWebSearch() {
+        for (String marked : List.of(
+                "DeepSeek V4 发布：百万上下文真的有用吗？（附面试题）",
+                "DeepSeek V4 发布：百万上下文真的有用吗？",
+                "《Agent 工程实践》",
+                "# 第一章 ReAct 循环")) {
+            TurnToolPolicy policy = TurnToolPolicy.fromUserInput(marked);
+            assertTrue(policy.headlineOnly(), marked);
+            assertFalse(policy.expose(definitions()).advertisedNames().contains("web_search"), marked);
+        }
+        for (String task : List.of(
+                "进入 demo 目录，编译并运行 Hello.java",
+                "1",
+                "是的",
+                "继续",
+                "把 Hello.java 里的 Hello World 改成 Hello PaiCLI",
+                "帮我搜一下《Agent 工程实践》的作者")) {
+            TurnToolPolicy policy = TurnToolPolicy.fromUserInput(task);
+            assertFalse(policy.headlineOnly(), task);
+            assertTrue(policy.expose(definitions()).advertisedNames().contains("execute_command"), task);
         }
     }
 
@@ -760,10 +726,12 @@ class TurnToolPolicyTest {
     }
 
     @Test
-    void aNoWebConstraintWithoutATaskDoesNotExposeLocalTools() {
+    void aNoWebConstraintKeepsLocalToolsAndHidesWebTools() {
         for (String request : List.of("不要联网", "请别用浏览器", "offline only")) {
-            assertTrue(TurnToolPolicy.fromUserInput(request)
-                    .expose(definitions()).definitions().isEmpty(), request);
+            TurnToolPolicy.ToolExposure exposure = TurnToolPolicy.fromUserInput(request).expose(definitions());
+            assertTrue(exposure.advertisedNames().contains("read_file"), request);
+            assertFalse(exposure.advertisedNames().contains("web_search"), request);
+            assertFalse(exposure.advertisedNames().contains("mcp__chrome-devtools__navigate_page"), request);
         }
     }
 

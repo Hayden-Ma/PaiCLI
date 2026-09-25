@@ -71,6 +71,9 @@ public record ApprovalRequest(
         if (callerContext != null && !callerContext.isBlank()) {
             sb.append(formatBoxField("来源", callerContext)).append("\n");
         }
+        if (suggestion != null && !suggestion.isBlank()) {
+            sb.append(formatBoxField("自动审查", suggestion)).append("\n");
+        }
         if (sensitiveNotice != null && !sensitiveNotice.isBlank()) {
             sb.append(formatBoxField("敏感页面", sensitiveNotice)).append("\n");
         }

@@ -188,19 +188,8 @@ public final class TuiSessionController implements AutoCloseable {
             }
             return true;
         }
-        if ("/hitl on".equals(lower)) {
-            hitlHandler.setEnabled(true);
-            appendSystem("HITL 审批已启用。");
-            return true;
-        }
-        if ("/hitl off".equals(lower)) {
-            hitlHandler.setEnabled(false);
-            hitlHandler.clearApprovedAll();
-            appendSystem("HITL 审批已关闭。");
-            return true;
-        }
-        if ("/hitl".equals(lower)) {
-            appendSystem("HITL 当前状态: " + (hitlHandler.isEnabled() ? "启用" : "关闭"));
+        if (lower.equals("/hitl") || lower.startsWith("/hitl ")) {
+            appendSystem(hitlHandler.switchConfirmationMode(lower.substring("/hitl".length()).trim()));
             return true;
         }
         if ("/snapshot".equals(lower)) {

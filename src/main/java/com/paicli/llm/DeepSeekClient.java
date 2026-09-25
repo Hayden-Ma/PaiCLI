@@ -138,6 +138,12 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
         return normalized;
     }
 
+    /** 能转换的 DSML 已经变成 tool_calls 并从正文移除；正文里还剩 DSML 标记就说明没有执行。 */
+    @Override
+    public boolean looksLikeUnexecutedToolCall(String content) {
+        return content != null && content.contains(DSML_OPEN_PREFIX);
+    }
+
     @Override
     public boolean supportsImageInput() {
         // The official API routes both retired Flash aliases to V4.1 Flash.

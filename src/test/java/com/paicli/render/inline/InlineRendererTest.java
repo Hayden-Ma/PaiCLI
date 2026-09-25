@@ -36,7 +36,7 @@ class InlineRendererTest {
         org.jline.builtins.ScreenTerminal screen = new org.jline.builtins.ScreenTerminal(columns, rows);
         // Seed the screen with the dock that JLine's diff cache believes is already present.
         screen.write(AnsiSeq.moveCursor(38, 1) + "-- dock border --"
-                + AnsiSeq.moveCursor(39, 1) + "YOLO Ctrl+Y to enable HITL"
+                + AnsiSeq.moveCursor(39, 1) + "YOLO /hitl default to confirm"
                 + AnsiSeq.moveCursor(40, 1) + "Auto Model · DeepSeek V4.1 Flash  idle  ctx 2%"
                 + AnsiSeq.setScrollRegion(1, 37) + AnsiSeq.moveCursor(35, 1));
         InlineRenderer renderer = new InlineRenderer(terminal,
@@ -67,7 +67,7 @@ class InlineRendererTest {
         sink.reset();
         String visible = screen.toString();
         assertTrue(visible.contains("-- dock border --"), visible);
-        assertTrue(visible.contains("YOLO Ctrl+Y to enable HITL"), visible);
+        assertTrue(visible.contains("YOLO /hitl default to confirm"), visible);
         assertTrue(visible.contains("Auto Model · DeepSeek V4.1 Flash"), visible);
     }
 

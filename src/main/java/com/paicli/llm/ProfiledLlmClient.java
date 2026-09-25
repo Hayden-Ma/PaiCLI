@@ -30,6 +30,7 @@ final class ProfiledLlmClient implements LlmClient {
         return profile.contextWindow() == null ? delegate.maxContextWindow() : profile.contextWindow();
     }
     public boolean supportsImageInput() { return delegate.effectiveImageInput(); }
+    public boolean looksLikeUnexecutedToolCall(String content) { return delegate.looksLikeUnexecutedToolCall(content); }
     public boolean supportsTools() { return delegate.supportsTools(); }
     public boolean supportsPromptCaching() { return delegate.supportsPromptCaching(); }
     public String promptCacheMode() { return delegate.promptCacheMode(); }

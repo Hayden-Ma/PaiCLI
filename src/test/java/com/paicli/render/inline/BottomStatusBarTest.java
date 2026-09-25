@@ -119,6 +119,18 @@ class BottomStatusBarTest {
     }
 
     @Test
+    void sessionModeLabelReplacesHitlFallbackAndSurvivesEnvironment() {
+        StatusInfo info = StatusInfo.idle("deepseek-flash", 1_000_000L, true)
+                .withSessionMode("PLAN shift+tab to cycle")
+                .withEnvironment("MCP 1/1", "Skill 2/2");
+
+        String top = BottomStatusBar.formatStatusLines(info, 120).get(0).toString();
+
+        assertTrue(top.contains("PLAN shift+tab to cycle"), top);
+        assertFalse(top.contains("HITL"), top);
+    }
+
+    @Test
     void statusLinesHighlightKeySegments() {
         StatusInfo info = StatusInfo.tokens("deepseek-v4-pro", 1_000_000L, 5200L, 16_100L,
                         437L, 14_300L, null, false, 0L, "idle")

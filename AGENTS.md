@@ -38,7 +38,7 @@ mvn test -Dtest=XxxTest -DskipTests=false   # 针对性（必须带 -DskipTests=
 mvn test -DskipTests=false                  # 全量
 ```
 
-交互命令：`/plan`、`/team`、`/hitl on|off`、`/save`、`/memory`、`/compact`、`/context`、`/init`、`/export`、`/better-harness`、`/wechat`。未识别的 `/xxx` 在 CLI 层报“未知命令”，不回退给 Agent。
+交互命令：`/plan`、`/team`、`/mode auto|plan|ask`（Shift+Tab 循环）、`/hitl on|default`、`/save`、`/memory`、`/compact`、`/context`、`/init`、`/export`、`/better-harness`、`/wechat`。未识别的 `/xxx` 在 CLI 层报“未知命令”，不回退给 Agent。
 
 `mvn test -Pquick` 当前有一批评测包（`eval.benchmark.*`）和 `TerminalMarkdownRendererTest` 的既有失败，`ToolRegistryTest.macSandboxAllowsDevelopmentRuntimesAndDevNull` 在较新 macOS 上 Seatbelt 内 JVM 以 139 退出。判断回归要对比改动前后的失败集合，不要只看总数。
 
@@ -87,7 +87,8 @@ src/main/java/com/paicli/
 ### HITL 与策略
 
 - 拦截顺序 HitlToolRegistry → ToolRegistry → PathGuard / CommandGuard；用户无法批准策略拒绝的请求
-- 需审批：`write_file`、`edit_file`、`execute_command`、`create_project`、`revert_turn` 与全部 `mcp__*`；HITL 默认关闭，`/hitl on` 开启
+- 会话模式（`SessionMode` / `SessionModeController`）：Shift+Tab 按 auto → plan → ask 循环，`/mode` 同效；交互式 CLI 不提供“全部放行”，最宽松就是 auto；模式只是审批档位与 plan 开关的组合，不另存权限状态。plan 模式让普通输入走 Plan-and-Execute，显式 `/team` 优先；启动默认 auto。当前只在 inline CLI 生效，Lanterna TUI 未接
+- auto（`/hitl default`，启动默认）：读写文件直接执行；`execute_command` 先经 `LlmApprovalClassifier`（当前供应商、关闭思考的轻量请求，可用 `PAICLI_AUTO_CLASSIFIER_MODEL` 换模型）审查，放行则执行并写 `auto-classifier` 审计；不放行、审查失败（超时 / 异常 / 非约定 JSON / 参数超 32000 字符 / 无分类器），以及 `revert_turn`、全部 `mcp__*`、敏感页面改写，都以 `[AUTO]` 失败结果交回模型，不弹框；同一轮连续被拦 3 次（`AUTO_ESCALATE_AFTER`）才转人工审批，放行或新一轮输入（`startAutoReviewTurn`）清零。分类器只看用户本轮原话 + 工具名 + 参数，不看工具结果；绝不 fail-open；放行结论只在同一请求内缓存；PathGuard / CommandGuard 在分类器之后照常生效。ask（`/hitl on`）额外确认 `write_file`、`edit_file`、`create_project`，不走分类器。默认确认只由 `SwitchableHitlHandler` 开启，评测等非交互处理器保持关闭，不能让无人值守通道卡在审批上
 - PathGuard 强制路径在项目根内；CommandGuard 只是辅助黑名单，不是主防线；命令沙箱 `PAICLI_COMMAND_SANDBOX=off|auto|required`，默认 off
 - 微信通道无人工审批面板，走非交互默认拒绝：只读工具允许，`execute_command` / `mcp__*` 必须命中白名单，`revert_turn` 与浏览器会话切换拒绝
 
@@ -97,9 +98,8 @@ src/main/java/com/paicli/
 
 - `web_fetch` 和浏览器导航的 URL 只能来自用户顶层原文或本分支 `web_search` 的结构化 `discoveredUrls`；工具正文、模型输出都不能扩充授权，被拒绝的调用不能换工具绕过
 - Plan 并行任务和 Team worker 各用独立策略副本，只有 DAG 声明的依赖才继承上游 `web_search` URL
-- 只给裸标题或主题、没有动作时先澄清，本轮不调用工具；“当前项目/文件”类问题优先本地工具
-- 多步骤输入检查各个非引用分句的动作，支持“进入 demo 目录，编译并运行”等目录前缀；引文、代码块和明确标注的摘录不作为新增动作依据
-- ReAct 的简短续接回复按上一条助手正文识别：编号须对应上一条选项，“继续/好的”等须有上一轮任务；续接保留禁网限制，不继承旧 URL 或记忆写入授权，`/clear` 清除续接状态
+- 自然语言判断只能收紧、不能授予能力：工具默认开放，不要再用动作词表决定是否给模型工具（漏判会让正常任务因缺工具静默失败）。只有命中高精度的标题标记（`《…》`、`# `、“（附…面试题）”后缀、“X：Y？”）且没有请求前缀和 URL 时，收掉联网工具并提示用户；没有标记的裸标题由提示词要求模型先澄清。“当前项目/文件”类问题优先本地工具
+- 最终回复正文里残留未执行的工具调用文本（如 DeepSeek DSML）时，由 `LlmClient.looksLikeUnexecutedToolCall` 识别并提示“工具调用未执行”，三条路径都要提示
 - 已知 URL 先 `web_fetch`，SPA / 防爬再用 Chrome DevTools MCP；读取优先 `take_snapshot`；公开页面不提前切 shared 模式
 
 ### Plan 与 Team

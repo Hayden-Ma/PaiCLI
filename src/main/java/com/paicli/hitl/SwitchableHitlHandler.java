@@ -12,6 +12,7 @@ import java.util.Objects;
 public final class SwitchableHitlHandler implements HitlHandler {
 
     private volatile HitlHandler delegate;
+    private volatile boolean highRiskConfirmation;
 
     public SwitchableHitlHandler(HitlHandler delegate) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
@@ -38,6 +39,26 @@ public final class SwitchableHitlHandler implements HitlHandler {
     @Override
     public void setEnabled(boolean enabled) {
         delegate.setEnabled(enabled);
+    }
+
+    @Override
+    public void onAutoApproved(String toolName, String reason) {
+        delegate.onAutoApproved(toolName, reason);
+    }
+
+    @Override
+    public void onAutoDenied(String toolName, String reason) {
+        delegate.onAutoDenied(toolName, reason);
+    }
+
+    @Override
+    public boolean isHighRiskConfirmationEnabled() {
+        return highRiskConfirmation;
+    }
+
+    @Override
+    public void setHighRiskConfirmationEnabled(boolean enabled) {
+        this.highRiskConfirmation = enabled;
     }
 
     @Override

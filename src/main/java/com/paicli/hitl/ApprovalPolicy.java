@@ -23,7 +23,21 @@ public class ApprovalPolicy {
             "revert_turn"
     );
 
+    // 交互式 CLI 默认就要确认的高危操作：执行命令、批量回滚，以及全部 MCP 工具（见 requiresConfirmationByDefault）
+    private static final Set<String> HIGH_RISK_TOOLS = Set.of(
+            "execute_command",
+            "revert_turn"
+    );
+
     private ApprovalPolicy() {
+    }
+
+    /**
+     * 未开启完整 HITL 时，交互式 CLI 仍默认确认的工具：执行命令、回滚快照和全部 MCP 工具。
+     * 写文件、编辑文件和创建项目只在 /hitl on 后确认。
+     */
+    public static boolean requiresConfirmationByDefault(String toolName) {
+        return HIGH_RISK_TOOLS.contains(toolName) || isMcpTool(toolName);
     }
 
     /**

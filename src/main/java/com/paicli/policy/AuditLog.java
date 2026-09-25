@@ -39,6 +39,8 @@ public class AuditLog {
     public static final String APPROVER_POLICY = "policy";
     public static final String APPROVER_NONE = "none";
     public static final String APPROVER_MENTION = "mention";
+    /** auto 模式下由模型分类器判定为低风险后自动放行。 */
+    public static final String APPROVER_AUTO_CLASSIFIER = "auto-classifier";
 
     public static final String OUTCOME_ALLOW = "allow";
     public static final String OUTCOME_DENY = "deny";
@@ -164,6 +166,16 @@ public class AuditLog {
         public static AuditEntry allowByMention(String tool, String args, long durationMs) {
             return new AuditEntry(Instant.now().toString(), tool, truncate(args),
                     OUTCOME_ALLOW, null, APPROVER_MENTION, durationMs, null);
+        }
+
+        public static AuditEntry allowByAutoClassifier(String tool, String args, String reason, long durationMs) {
+            return new AuditEntry(Instant.now().toString(), tool, truncate(args),
+                    OUTCOME_ALLOW, reason, APPROVER_AUTO_CLASSIFIER, durationMs, null);
+        }
+
+        public static AuditEntry denyByAutoClassifier(String tool, String args, String reason, long durationMs) {
+            return new AuditEntry(Instant.now().toString(), tool, truncate(args),
+                    OUTCOME_DENY, reason, APPROVER_AUTO_CLASSIFIER, durationMs, null);
         }
 
         public static AuditEntry denyByHitl(String tool, String args, String reason, long durationMs) {

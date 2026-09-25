@@ -37,6 +37,16 @@ public final class RendererHitlHandler implements HitlHandler {
     }
 
     @Override
+    public void onAutoDenied(String toolName, String reason) {
+        renderer.stream().println(com.paicli.util.AnsiStyle.subtle("  ⊘ auto 未放行 " + toolName + "：" + reason + "（已交回模型处理）"));
+    }
+
+    @Override
+    public void onAutoApproved(String toolName, String reason) {
+        renderer.stream().println(com.paicli.util.AnsiStyle.subtle("  ✓ auto 已放行 " + toolName + "：" + reason));
+    }
+
+    @Override
     public synchronized ApprovalResult requestApproval(ApprovalRequest request) {
         String mcpServer = ApprovalPolicy.mcpServerName(request.toolName());
         boolean sensitivePerCall = request.sensitiveNotice() != null && !request.sensitiveNotice().isBlank();

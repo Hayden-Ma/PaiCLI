@@ -16,6 +16,7 @@ final class CliCommandParser {
         SWITCH_PLAN,
         SWITCH_TEAM,
         SWITCH_HITL,
+        SESSION_MODE,
         MEMORY_STATUS,
         MEMORY_CLEAR,
         MEMORY_LIST,
@@ -135,8 +136,16 @@ final class CliCommandParser {
             return new ParsedCommand(CommandType.SWITCH_HITL, "on");
         }
 
-        if (trimmed.equalsIgnoreCase("/hitl off")) {
-            return new ParsedCommand(CommandType.SWITCH_HITL, "off");
+        if (trimmed.equalsIgnoreCase("/hitl default")) {
+            return new ParsedCommand(CommandType.SWITCH_HITL, "default");
+        }
+
+        if (trimmed.equalsIgnoreCase("/mode")) {
+            return new ParsedCommand(CommandType.SESSION_MODE, null);
+        }
+
+        if (trimmed.regionMatches(true, 0, "/mode ", 0, 6)) {
+            return new ParsedCommand(CommandType.SESSION_MODE, trimmed.substring(6).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/hitl")) {

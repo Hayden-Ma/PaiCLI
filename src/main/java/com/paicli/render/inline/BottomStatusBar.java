@@ -159,8 +159,15 @@ public final class BottomStatusBar implements AutoCloseable {
         }
     }
 
+    static String modeLabel(StatusInfo info) {
+        if (info.sessionMode() != null) {
+            return info.sessionMode();
+        }
+        return info.hitlEnabled() ? "HITL /hitl to change" : "YOLO /hitl default to confirm";
+    }
+
     static String formatStatusLine(StatusInfo info, int cols) {
-        String mode = info.hitlEnabled() ? "HITL Ctrl+Y for YOLO" : "YOLO Ctrl+Y to enable HITL";
+        String mode = modeLabel(info);
         String right = environmentSummary(info);
         if (right.isBlank()) {
             return fitToColumns(" " + mode, cols);
@@ -223,11 +230,11 @@ public final class BottomStatusBar implements AutoCloseable {
     }
 
     static AttributedString formatStatusLineAttributed(StatusInfo info, int cols) {
-        String mode = info.hitlEnabled() ? "HITL Ctrl+Y for YOLO" : "YOLO Ctrl+Y to enable HITL";
+        String mode = modeLabel(info);
         String right = environmentSummary(info);
         AttributedStringBuilder builder = new AttributedStringBuilder(Math.max(0, cols));
         builder.append(" ", BASE_STYLE);
-        builder.append(mode, info.hitlEnabled() ? MODE_HITL_STYLE : MODE_YOLO_STYLE);
+        builder.append(mode, mode.startsWith("YOLO") ? MODE_YOLO_STYLE : MODE_HITL_STYLE);
         if (!right.isBlank()) {
             int gap = Math.max(1, cols - visibleLength(mode) - visibleLength(right) - 2);
             builder.append(" ".repeat(gap), BASE_STYLE);

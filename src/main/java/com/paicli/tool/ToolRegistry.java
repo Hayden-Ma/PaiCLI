@@ -1405,6 +1405,7 @@ public class ToolRegistry {
         return value.startsWith("🛡️")
                 || value.startsWith("❌")
                 || value.startsWith("[HITL]")
+                || value.startsWith("[AUTO]")
                 || value.startsWith("用户取消了")
                 || value.startsWith("工具执行失败")
                 || value.startsWith("工具执行超时")

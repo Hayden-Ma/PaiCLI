@@ -381,11 +381,28 @@ class CliCommandParserTest {
     }
 
     @Test
-    void parsesHitlOffCommand() {
+    void hitlOffIsNoLongerACommand() {
+        // 交互式 CLI 不提供“全部放行”，最宽松的档位就是 auto
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/hitl off");
 
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, command.type());
+    }
+
+    @Test
+    void parsesModeCommands() {
+        assertEquals(CliCommandParser.CommandType.SESSION_MODE, CliCommandParser.parse("/mode").type());
+        assertNull(CliCommandParser.parse("/mode").payload());
+        CliCommandParser.ParsedCommand plan = CliCommandParser.parse("/mode plan");
+        assertEquals(CliCommandParser.CommandType.SESSION_MODE, plan.type());
+        assertEquals("plan", plan.payload());
+    }
+
+    @Test
+    void parsesHitlDefaultCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/hitl default");
+
         assertEquals(CliCommandParser.CommandType.SWITCH_HITL, command.type());
-        assertEquals("off", command.payload());
+        assertEquals("default", command.payload());
     }
 
     @Test

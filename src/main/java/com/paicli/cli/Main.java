@@ -239,7 +239,14 @@ public class Main {
             refreshTerminalColumns(terminal);
             TerminalHitlHandler terminalHitlHandler = new TerminalHitlHandler(false);
             SwitchableHitlHandler hitlHandler = new SwitchableHitlHandler(terminalHitlHandler);
+            // 交互式 CLI 默认确认高危操作（执行命令、回滚快照、MCP 工具），/hitl off 可全部关闭
+            hitlHandler.setHighRiskConfirmationEnabled(true);
+            SessionModeController sessionModes = new SessionModeController(hitlHandler);
             HitlToolRegistry hitlToolRegistry = new HitlToolRegistry(hitlHandler);
+            // auto 模式的 Shell 命令审查：跟随当前会话的供应商，关闭思考的轻量请求；切换模型后自动重建
+            com.paicli.hitl.LlmApprovalClassifier approvalClassifier = new com.paicli.hitl.LlmApprovalClassifier(
+                    approvalClassifierClient(llmClientRef, config));
+            hitlToolRegistry.setAutoApprovalReviewer(approvalClassifier);
             BrowserSession browserSession = new BrowserSession();
             BrowserConnectivityCheck browserConnectivityCheck = new BrowserConnectivityCheck();
             hitlToolRegistry.setBrowserGuard(new BrowserGuard(browserSession, new SensitivePagePolicy()));
@@ -289,7 +296,8 @@ public class Main {
             }
             PrintStream ui = renderer.stream();
             renderer.start();
-            renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, null));
+            renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, null)
+                    .withSessionMode(sessionModes.current().statusLabel()));
 
             String startupNote = "";
             try {
@@ -375,7 +383,16 @@ public class Main {
             }
 
             reactAgent.setRenderer(renderer);
-            reactAgent.setHitlEnabledSupplier(hitlHandler::isEnabled);
+            reactAgent.setHitlEnabledSupplier(hitlHandler::isConfirmationActive);
+            reactAgent.setSessionModeSupplier(() -> sessionModes.current().statusLabel());
+            bindSessionModeCycle(lineReader, () -> {
+                SessionMode mode = sessionModes.cycle();
+                renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistryRef.get(), "idle"));
+                if (!(renderer instanceof InlineRenderer inline && inline.hasStatusBar())) {
+                    // 没有底部状态栏时，在提示符上方打印一行，否则切换没有任何可见反馈
+                    lineReader.printAbove("模式：" + SessionModeController.describe(mode));
+                }
+            });
             reactAgent.getToolRegistry().setWriteFileObserver(
                     (path, ba) -> renderer.appendDiff(path, ba[0], ba[1]));
 
@@ -654,21 +671,14 @@ public class Main {
                         }
                         continue;
                     }
+                    case SESSION_MODE -> {
+                        ui.println("🧭 " + sessionModes.handleCommand(command.payload()) + "\n");
+                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        continue;
+                    }
                     case SWITCH_HITL -> {
                         String payload = command.payload();
-                        if ("on".equals(payload)) {
-                            hitlHandler.setEnabled(true);
-                            ui.println("🔒 HITL 审批已启用：write_file / edit_file / execute_command / create_project 执行前将请求人工确认\n");
-                        } else if ("off".equals(payload)) {
-                            hitlHandler.setEnabled(false);
-                            hitlHandler.clearApprovedAll();
-                            ui.println("🔓 HITL 审批已关闭：危险操作将直接执行\n");
-                        } else {
-                            String status = hitlHandler.isEnabled() ? "启用" : "关闭";
-                            ui.println("🔒 HITL 当前状态：" + status);
-                            ui.println("   /hitl on  - 启用人工审批");
-                            ui.println("   /hitl off - 关闭人工审批\n");
-                        }
+                        ui.println("🔒 " + hitlHandler.switchConfirmationMode(payload == null ? "" : payload) + "\n");
                         renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
@@ -938,9 +948,17 @@ public class Main {
                     printSubmittedInput(renderer, ui, submittedInput);
                 }
                 final String taskInput = input;
+                approvalClassifier.setCurrentUserRequest(submittedInput);
+                hitlToolRegistry.startAutoReviewTurn();
                 Callable<String> runTask;
                 String snapshotMode;
-                if (nextTaskUsePlanMode || command.type() == CliCommandParser.CommandType.SWITCH_PLAN) {
+                boolean teamRequested = nextTaskUseTeamMode
+                        || command.type() == CliCommandParser.CommandType.SWITCH_TEAM;
+                // 显式 /team 优先；plan 模式只接管普通输入
+                boolean planRequested = nextTaskUsePlanMode
+                        || command.type() == CliCommandParser.CommandType.SWITCH_PLAN
+                        || (sessionModes.planMode() && !teamRequested);
+                if (planRequested) {
                     snapshotMode = "plan";
                     LlmClient activeClient = llmClient;
                     runTask = () -> {
@@ -949,7 +967,7 @@ public class Main {
                         planAgent.setSkillRegistry(skillRegistry);
                         return planAgent.run(taskInput, submittedInput);
                     };
-                } else if (nextTaskUseTeamMode || command.type() == CliCommandParser.CommandType.SWITCH_TEAM) {
+                } else if (teamRequested) {
                     snapshotMode = "team";
                     LlmClient activeClient = llmClient;
                     runTask = () -> {
@@ -1717,9 +1735,13 @@ public class Main {
                 new SlashCommandHint("/plan ", "/plan <任务内容>", "直接用计划模式执行这条任务"),
                 new SlashCommandHint("/team", "/team", "下一条任务使用 Multi-Agent 协作模式"),
                 new SlashCommandHint("/team ", "/team <任务内容>", "直接用多 Agent 协作执行这条任务"),
+                new SlashCommandHint("/mode", "/mode", "查看模式（Shift+Tab 循环切换）"),
+                new SlashCommandHint("/mode auto", "/mode auto", "自动审查，低风险命令直接执行（默认）"),
+                new SlashCommandHint("/mode plan", "/mode plan", "每条输入先规划，审阅后执行"),
+                new SlashCommandHint("/mode ask", "/mode ask", "审批：全部危险操作都确认"),
                 new SlashCommandHint("/hitl", "/hitl", "查看 HITL 状态"),
-                new SlashCommandHint("/hitl on", "/hitl on", "启用危险操作人工审批"),
-                new SlashCommandHint("/hitl off", "/hitl off", "关闭 HITL 审批"),
+                new SlashCommandHint("/hitl on", "/hitl on", "全部危险操作都确认"),
+                new SlashCommandHint("/hitl default", "/hitl default", "切回 auto（默认）"),
                 new SlashCommandHint("/browser", "/browser", "查看浏览器会话状态"),
                 new SlashCommandHint("/browser connect", "/browser connect", "复用已允许远程调试的登录态 Chrome"),
                 new SlashCommandHint("/browser connect ", "/browser connect <port>", "旧式 CDP 端口连接"),
@@ -1831,6 +1853,53 @@ public class Main {
         return tips;
     }
 
+    /**
+     * 审批分类器的模型：默认沿用当前会话的供应商与模型（请求时关闭思考），
+     * 可用 PAICLI_AUTO_CLASSIFIER_MODEL 指定同一供应商下更便宜的模型 ID。按供应商 + 模型缓存。
+     */
+    static java.util.function.Supplier<LlmClient> approvalClassifierClient(AtomicReference<LlmClient> current,
+                                                                         PaiCliConfig config) {
+        AtomicReference<String> cachedKey = new AtomicReference<>();
+        AtomicReference<LlmClient> cachedClient = new AtomicReference<>();
+        return () -> {
+            LlmClient session = current.get();
+            if (session == null) {
+                return null;
+            }
+            String override = loadConfigValue("PAICLI_AUTO_CLASSIFIER_MODEL", null);
+            String model = override == null || override.isBlank() ? session.getModelName() : override.trim();
+            String key = session.getProviderName() + "/" + model;
+            if (!key.equals(cachedKey.get())) {
+                cachedClient.set(LlmClientFactory.createApprovalClassifier(session.getProviderName(), model, config));
+                cachedKey.set(key);
+            }
+            return cachedClient.get();
+        };
+    }
+
+    /** Shift+Tab 在终端里发送 ESC [ Z，绑定成循环切换会话模式。 */
+    static final String SHIFT_TAB = "\033[Z";
+
+    static void bindSessionModeCycle(LineReader lineReader, Runnable onCycle) {
+        if (lineReader == null) {
+            return;
+        }
+        lineReader.getWidgets().put("paicli-cycle-session-mode", () -> {
+            onCycle.run();
+            if (lineReader.isReading()) {
+                lineReader.callWidget(LineReader.REDISPLAY);
+            }
+            return true;
+        });
+        Reference cycle = new Reference("paicli-cycle-session-mode");
+        for (String keyMapName : List.of(LineReader.MAIN, LineReader.EMACS, LineReader.VIINS)) {
+            KeyMap<org.jline.reader.Binding> keyMap = lineReader.getKeyMaps().get(keyMapName);
+            if (keyMap != null) {
+                keyMap.bind(cycle, SHIFT_TAB);
+            }
+        }
+    }
+
     private static void bindSlashWidget(LineReader lineReader, String keyMapName, Reference slashHint) {
         KeyMap<org.jline.reader.Binding> keyMap = lineReader.getKeyMaps().get(keyMapName);
         if (keyMap != null) {
@@ -1879,7 +1948,7 @@ public class Main {
         var items = java.util.List.of(
                 "模型: " + (llmClient == null ? "(none)" : llmClient.getModelName() + " / " + llmClient.getProviderName()),
                 "默认 Provider: " + (config == null ? "(none)" : config.getDefaultProvider()),
-                "HITL: " + (hitlHandler.isEnabled() ? "ON" : "OFF"),
+                "HITL: " + hitlHandler.confirmationModeLabel(),
                 "Skill 启用数: " + (skillRegistry == null ? 0 : skillRegistry.enabledSkills().size()),
                 "渲染器: " + renderer.getClass().getSimpleName(),
                 "配置文件: ~/.paicli/config.json (只读视图，编辑请用编辑器)"
@@ -2627,9 +2696,9 @@ public class Main {
                                          SkillRegistry skillRegistry) {
         String normalizedPhase = phase == null || phase.isBlank() ? "idle" : phase;
         StatusInfo base = "idle".equals(normalizedPhase)
-                ? StatusInfo.idle(ModelCatalog.statusName(llmClient.getProviderName(), llmClient.getModelName()), llmClient.maxContextWindow(), hitlHandler.isEnabled())
+                ? StatusInfo.idle(ModelCatalog.statusName(llmClient.getProviderName(), llmClient.getModelName()), llmClient.maxContextWindow(), hitlHandler.isConfirmationActive())
                 : StatusInfo.active(ModelCatalog.statusName(llmClient.getProviderName(), llmClient.getModelName()), llmClient.maxContextWindow(),
-                hitlHandler.isEnabled(), normalizedPhase);
+                hitlHandler.isConfirmationActive(), normalizedPhase);
         return base.withEnvironment(mcpStatusSummary(mcpServerManager), skillStatusSummary(skillRegistry));
     }
 

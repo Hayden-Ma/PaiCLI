@@ -114,7 +114,7 @@
 - 危险操作静态规则识别（`write_file`、`execute_command`、`create_project`）
 - 三级危险等级（高危 / 中危 / 安全）
 - 审批决策：批准 / 全部放行 / 拒绝 / 跳过 / 修改参数后执行
-- HITL 默认关闭，`/hitl on|off` 运行时切换
+- 交互式 CLI 默认 auto（Shell 命令由模型分类器审查），`/hitl on|default` 运行时切换
 - `HitlToolRegistry` 透明拦截层，HITL 关闭时与普通 `ToolRegistry` 行为完全相同
 
 **HITL 增强（后续补丁，归在本期叙事下）**：
@@ -682,7 +682,8 @@ E2 原生观察接口已接线：默认关闭的 13 类角色/输入/工具/审�
 - ⬜ 命令安全判断语法树化：剥 nohup / timeout 等外壳、识别写入目标、硬拦截级不可被放开模式绕过，可选 `rm` 改移入回收站。参考 `packages/agent-modules/permission/src/tools/bash-permission.ts`、`classifier/dangerous-patterns.ts`。现状：正则黑名单，`rm -r -f /` 等写法可绕过
 - ⬜ Token 计数以模型返回的 usage 为基准，只估算之后新增的消息（BPE 分词器估算），计入工具 schema 与 reasoning 内容；超窗 400 时先压缩再重试一次。参考 `packages/agent-modules/context-manager/src/token-estimator.ts`、`provider-budget.ts`。现状：按字符折算，偏小导致压缩偏晚
 - ⬜ 项目级 `.paicli/mcp.json` 首次出现或内容变化时逐个 server 确认，禁止覆盖用户同名配置
-- ⬜ HITL 默认开启（至少 `execute_command` 与 MCP 默认需确认）
+- ✅ HITL 默认开启（至少 `execute_command` 与 MCP 默认需确认）：2026-09-25 交互式 CLI 默认确认 `execute_command`、`revert_turn` 与全部 MCP 工具，`/hitl on|default` 切换；同日改为 auto 模式由轻量模型分类器审查 Shell 命令，低风险直接执行，移除 `/hitl off`
+- ✅ 会话模式切换（参考 Claude Code）：2026-09-25 Shift+Tab / `/mode` 在 auto、plan、ask 之间循环，状态栏显示当前模式；Lanterna TUI 待接入
 - ⬜ 审批框完整显示命令，转义控制字符与双向控制字符，防止伪装
 - ⬜ `revert_turn` 不跟随符号链接写出项目，按文件模式恢复软链与可执行位，失败回滚
 
