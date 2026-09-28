@@ -413,6 +413,11 @@ class PlanExecuteAgentTest {
             plan.computeExecutionOrder();
             return plan;
         }
+
+        @Override
+        public ExecutionPlan revisePlan(ExecutionPlan current, String feedback) {
+            return createPlan(current.getGoal() + "\n补充要求：" + feedback);
+        }
     }
 
     private static final class DiamondFailurePlanner extends Planner {
@@ -494,8 +499,10 @@ class PlanExecuteAgentTest {
             return chat(messages, tools, StreamListener.NO_OP);
         }
 
+        // 并行任务会同时调用这里，队列和快照列表都不是线程安全的，必须串行出队
         @Override
-        public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
+        public synchronized ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener)
+                throws IOException {
             toolSnapshots.add(tools == null ? List.of() : List.copyOf(tools));
             messageSnapshots.add(List.copyOf(messages));
             StubResponse stubResponse = responses.poll();

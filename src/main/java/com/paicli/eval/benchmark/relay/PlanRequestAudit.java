@@ -201,7 +201,6 @@ public final class PlanRequestAudit {
             Task.TaskType type;
             try { type = Task.TaskType.valueOf(task.path("type").asText().toUpperCase(Locale.ROOT)); }
             catch (IllegalArgumentException e) { type = Task.TaskType.ANALYSIS; }
-            if (type == Task.TaskType.PLANNING) type = Task.TaskType.ANALYSIS;
             result.add(new TaskNode(ids.get(task.path("id").asText()), type,
                     TextFingerprint.of(task.path("description").asText()), List.copyOf(deps)));
         }

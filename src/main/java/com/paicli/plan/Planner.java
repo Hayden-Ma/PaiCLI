@@ -1,7 +1,13 @@
 package com.paicli.plan;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.paicli.history.ConversationLedger;
 import com.paicli.llm.LlmClient;
 import com.paicli.llm.LlmTraceLogger;
@@ -28,7 +34,11 @@ public class Planner {
 
     private final LlmClient llmClient;
     private final PrintStream out;
-    private final ObjectMapper mapper = new ObjectMapper();
+    // 与评测重放器的 json.loads 保持一致：JSON 后面跟着说明文字、键重复，都算不合法
+    private final ObjectMapper mapper = JsonMapper.builder()
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .build();
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private ConversationLedger conversationLedger = ConversationLedger.disabled();
     private Supplier<String> projectMemorySupplier = () ->
@@ -62,13 +72,29 @@ public class Planner {
         if (isSimpleGoal(goal)) {
             return createMinimalPlan(goal);
         }
+        return requestPlan(goal, "请为以下任务制定执行计划：\n" + goal);
+    }
 
-        // 构建规划请求
+    /**
+     * 审阅时用户按 I 补充要求：把当前计划和补充要求一起交给模型修改，
+     * 不受补充要求影响的任务保持原样，修改结果仍走同一套严格校验。
+     */
+    public ExecutionPlan revisePlan(ExecutionPlan current, String feedback) throws IOException {
+        String revisedGoal = current.getGoal() + "\n补充要求：" + feedback;
+        out.println("📋 正在按补充要求修改计划: " + feedback + "\n");
+        String request = "请为以下任务制定执行计划：\n" + revisedGoal
+                + "\n\n下面是用户刚审阅过的当前计划。请在它的基础上按补充要求修改，"
+                + "不受补充要求影响的任务保持原样，输出修改后的完整计划：\n"
+                + toPlanJson(current);
+        return requestPlan(revisedGoal, request);
+    }
+
+    private ExecutionPlan requestPlan(String goal, String planningRequest) throws IOException {
         List<LlmClient.Message> messages = Arrays.asList(
                 LlmClient.Message.system(promptAssembler.assemble(PromptMode.PLANNER, PromptContext.builder()
                         .projectMemoryContext(buildProjectMemoryContext())
                         .build())),
-                LlmClient.Message.user("请为以下任务制定执行计划：\n" + goal)
+                LlmClient.Message.user(planningRequest)
         );
         conversationLedger.appendMessage("plan", "planner", "system_prompt", messages.get(0));
         conversationLedger.appendMessage("plan", "planner", "planning_request", messages.get(1));
@@ -111,7 +137,12 @@ public class Planner {
                 .replaceAll("```\\s*", "")
                 .trim();
 
-        JsonNode root = mapper.readTree(cleaned);
+        JsonNode root;
+        try {
+            root = mapper.readTree(cleaned);
+        } catch (JsonProcessingException e) {
+            throw new IOException("计划不是合法的 JSON：" + e.getOriginalMessage(), e);
+        }
         if (root == null || !root.isObject()) {
             throw new IOException("计划必须是 JSON 对象");
         }
@@ -181,6 +212,26 @@ public class Planner {
         }
 
         return plan;
+    }
+
+    private String toPlanJson(ExecutionPlan plan) {
+        ObjectNode root = mapper.createObjectNode();
+        root.put("summary", plan.getSummary() == null ? "" : plan.getSummary());
+        ArrayNode tasks = root.putArray("tasks");
+        for (String taskId : plan.getExecutionOrder()) {
+            Task task = plan.getTask(taskId);
+            ObjectNode node = tasks.addObject();
+            node.put("id", task.getId());
+            node.put("description", task.getDescription());
+            node.put("type", task.getType().name());
+            ArrayNode deps = node.putArray("dependencies");
+            task.getDependencies().forEach(deps::add);
+        }
+        try {
+            return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("计划序列化失败", e);
+        }
     }
 
     /**

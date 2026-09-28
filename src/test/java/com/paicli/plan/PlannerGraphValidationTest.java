@@ -26,7 +26,9 @@ class PlannerGraphValidationTest {
             "{\"tasks\":[{\"id\":\"1\"},{\"id\":\"b\",\"dependencies\":[1]}]}",
             "{\"tasks\":[{\"id\":\"a\",\"dependencies\":[null]}]}",
             "{\"tasks\":[{\"id\":\"a\",\"dependencies\":[\"a\"]}]}",
-            "{\"tasks\":[{\"id\":\"a\",\"dependencies\":[\"b\"]},{\"id\":\"b\",\"dependencies\":[\"a\"]}]}"
+            "{\"tasks\":[{\"id\":\"a\",\"dependencies\":[\"b\"]},{\"id\":\"b\",\"dependencies\":[\"a\"]}]}",
+            "{\"tasks\":[{\"id\":\"a\"}]}\n以上是计划说明",
+            "{\"tasks\":[{\"id\":\"a\"}],\"tasks\":[{\"id\":\"b\"}]}"
     })
     void rejectsMalformedGraphsInsteadOfSilentlyChangingTheirDependencies(String json) {
         assertThrows(IOException.class, () -> planner(json).createPlan("先分析两个任务，再合并结果"));

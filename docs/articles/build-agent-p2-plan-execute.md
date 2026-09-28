@@ -1,7 +1,7 @@
 ---
-title: 给Agent CLI加上Plan-and-Execute，让Agent先规划后执行，支持DAG。
-shortTitle: Agent任务规划与DAG调度
-description: 第2期：为Java Agent CLI加入Plan-and-Execute能力，按最新源码讲清任务建模、DFS拓扑排序、严格计划校验、按轮并行调度、依赖失败跳过和有上限的重新规划。
+title: 手搓 Java 版 Claude Code 第 2 期，先出计划再动手，按 DAG 分批并行执行
+shortTitle: Plan-and-Execute与DAG调度
+description: PaiCLI 第 2 期，按最新源码拆解 Plan-and-Execute：任务和依赖怎么建模，模型给的计划怎么严格校验，DAG 怎么按轮并行执行，上游结果怎么交给下游，任务失败后怎么重规划和收场。
 keywords: Plan-and-Execute, DAG, 拓扑排序, 任务规划, PaiCLI
 tag:
   - Agent
@@ -14,60 +14,39 @@ date: 2026-04-19
 
 大家好，我是二哥呀。
 
-Opus 5.5 发布后我觉得真的太强大了，加上GPT-6 Astra也很牛逼，我就决定升级一下 PaiCLI 的代码和教程，感觉新的模型能力，真的，和半年前有了天差地别，太恐怖了。
+第 1 期的 ReAct 已经能干活了，读文件、改代码、跑命令，一步接一步。
 
-我们就从第二期开始，第一期审查了一下问题不大，毕竟ReAct就那么多东西。
-
-好。
-
-PaiCLI 的第 1 期我们已经实现了，一个基础的 ReAct Agent，能一步一步执行任务，一边思考一边行动。
-
-但这种方式有个问题，**复杂任务需要很多轮对话**，每一步都需要调用 LLM，走到哪算哪，用户事先也不知道它打算怎么做。
+可任务一长，比如“读 pom.xml、看看源码结构、再写一份升级方案”，问题就来了。我们在 Agent 动手之前不知道它打算怎么做，互不相干的几步也没法同时跑。中途哪一步错了，只能等它自己发现。
 
 ![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924182030-166934ea.png)
 
-第 2 期，我们来实现 **Plan-and-Execute** 模式，先生成任务计划，再让执行器逐项完成。这里的“规划一次”只描述首次生成计划；执行每个任务仍会调用 LLM，任务中使用工具后还可能继续调用，失败或用户补充要求时也可能重新规划。
+这一期我们给 PaiCLI 加上 Plan-and-Execute。模型先出一份带依赖关系的任务清单，我们确认之后，执行器按依赖分批执行，互不依赖的任务可以并行。
 
-## 01、Plan-and-Execute 的核心思想
+## 01、先规划再执行
 
-Plan-and-Execute 的核心是把任务规划与逐项执行分开。
+Plan-and-Execute 把一次任务交给两个角色。规划器只调用一次模型，不给任何工具，要求模型输出一份 JSON 格式的计划。执行器拿着这份计划，按依赖关系一批一批地跑任务。
 
-规划器决定任务及其依赖，执行器根据任务结果调用模型和工具。
+![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260926174050.png)
 
-```text
-复杂目标 → Planner（首次规划：1 次 LLM 调用）→ 任务 DAG
-                                      ├─ 任务 1：至少 1 次 LLM 调用，可能调用工具并继续询问模型
-                                      ├─ 任务 2：至少 1 次 LLM 调用，可能调用工具并继续询问模型
-                                      └─ 任务 3：至少 1 次 LLM 调用，可能调用工具并继续询问模型
-用户补充要求或执行失败 → 可能重新规划，产生额外的 LLM 调用
-```
+每个任务内部，跑的还是第 1 期 ReAct。模型决定调用什么工具，工具结果交回模型，直到模型不再调用工具，这个任务就算完成。
 
-这样做的好处有：
+在 Agent 开始动手之前，我们能看到完整的计划，可以确认、补充要求或者直接取消。读 pom.xml 和列出 src 目录这种没有先后关系的任务，可以同时跑。每个任务拿到的上下文也更干净，只有总目标、任务描述和直接依赖的结果。
 
-1. **提前安排任务**：先明确步骤和依赖，再逐项执行；LLM 调用次数不一定比 ReAct 少
-2. **可预测性更强**：执行前用户能看到整份计划，可以确认、补充或取消
-3. **支持并行执行**：识别无依赖的任务并行处理
-4. **失败可处理**：任务失败后可以依据已完成的进度重新规划；是否需要重做步骤取决于新计划
+两种模式放在一起比一下。
 
-代价是规划本身增加了一次模型请求和等待时间。如果执行中发现计划有问题，还可能再次请求模型重规划；能否节省 Token 和时间，要看任务数、每个任务的执行轮数及并行程度。
+| 对比项 | ReAct | Plan-and-Execute |
+| --- | --- | --- |
+| 模型调用次数 | 由 Action 轮数决定 | 多一次规划，每个任务至少一次 |
+| 耗时 | 取决于 Action 轮数 | 多一次规划等待，独立任务并行时可能更快 |
+| 执行前能否看到步骤 | 不能 | 能，还能补充要求后修改计划 |
+| 适合的任务 | 简单任务、边看边决定的探索 | 步骤多、依赖明确、想先看清流程的任务 |
 
-## 02、任务建模
+## 02、计划长什么样
 
-要实现 Plan-and-Execute，首先要定义什么是“任务”。
-
-### 为什么需要任务建模
-
-在 ReAct 模式中，任务隐含在对话历史中。LLM 通过阅读历史消息知道当前该做什么。这种方式有两个问题。
-
-第一，**上下文膨胀**。复杂任务需要很多轮对话，随着历史消息越来越长，Token 的消耗剧增。
-
-第二，**状态不清晰**。对话历史里混杂了思考过程、工具调用、执行结果，很难一眼看出任务执行到哪一步。
-
-任务建模把“做什么”和“怎么做”分离开来。计划阶段确定“做什么”（任务列表），执行阶段解决“怎么做”（具体执行）。
-
-### Task 类设计
+一个任务就是一个节点。
 
 ```java
+// src/main/java/com/paicli/plan/Task.java
 public class Task {
     private final String id;
     private final String description;
@@ -77,68 +56,23 @@ public class Task {
     private volatile String error;
     private final List<String> dependencies;  // 依赖的其他任务ID
     private final List<String> dependents;    // 依赖此任务的其他任务ID
-    private volatile long startTime;
-    private volatile long endTime;
 }
 ```
 
-状态、结果和时间戳都加了 `volatile`。同一轮里的多个任务会在线程池里并行执行，工作线程写状态，主线程读状态，不加 `volatile` 就可能读到旧值。
+任务类型有 5 种，`FILE_READ`、`FILE_WRITE`、`COMMAND`、`ANALYSIS`、`VERIFICATION`。类型只作为提示词变量交给执行任务的模型，提醒它这一步是读任务、写任务还是分析任务，不限制它能用哪些工具。
 
-枚举里定义了 6 种任务类型，Planner 的提示词只给模型列出其中 5 种：
-
-- `FILE_READ`：读取文件，获取信息
-- `FILE_WRITE`：写入文件，输出结果
-- `COMMAND`：执行命令，编译运行等
-- `ANALYSIS`：分析结果，中间决策
-- `VERIFICATION`：验证结果，检查正确性
-
-第 6 种 `PLANNING` 在解析逻辑里没有对应分支，模型写了也会被当成 `ANALYSIS`。任务类型只作为提示词变量交给执行器，不限制任务能用哪些工具。
-
-任务状态有 5 种，`PENDING`、`RUNNING`、`COMPLETED`、`FAILED`、`SKIPPED`。`SKIPPED` 用在两种情况：依赖的任务失败了，或者重新规划达到了上限，下文讲失败处理时再展开。
-
-### 任务的生命周期
-
-一个任务从创建到完成，完整的生命周期如下所示。
-
-```
-PENDING → RUNNING → COMPLETED / FAILED
-PENDING → SKIPPED（依赖的任务失败，或达到重新规划上限）
-```
-
-每个状态转换都有对应的方法。
-
-```java
-public void markStarted() {
-    this.status = TaskStatus.RUNNING;
-    this.startTime = System.currentTimeMillis();
-}
-
-public void markCompleted(String result) {
-    this.status = TaskStatus.COMPLETED;
-    this.result = result;
-    this.endTime = System.currentTimeMillis();
-}
-
-public void markFailed(String error) {
-    this.status = TaskStatus.FAILED;
-    this.error = error;
-    this.endTime = System.currentTimeMillis();
-}
-```
-
-记录时间戳有两个用途，一是统计执行耗时，二是分析任务瓶颈。如果某个任务总是耗时很长，可能需要优化或者拆分。
-
-### 依赖关系
-
-复杂任务有先后依赖。比如“写代码”依赖“创建项目”，“运行”依赖“编译”。
-
-我们用 DAG（有向无环图）表示依赖关系。
+`dependencies` 是我依赖谁，用来判断能不能开始执行；`dependents` 是谁依赖我，任务失败时顺着它找出受影响的下游。
 
 ![](https://cdn.paicoding.com/paicoding/7ec21fcc8f1031ffef6704fd6c9d8586.png)
 
-每个任务声明自己依赖哪些任务（dependencies），同时记下哪些任务依赖自己（dependents）。前者用来判断能不能开始执行，后者用来在失败时找出受影响的下游。
+任务状态有 5 种。
 
-判断能不能执行的方法是 `isExecutable`。
+```text
+PENDING → RUNNING → COMPLETED / FAILED
+PENDING → SKIPPED（依赖的任务失败，或者重新规划达到了上限）
+```
+
+能不能开始执行，只看一个条件，所有依赖是否都已经完成。
 
 ```java
 public boolean isExecutable(Map<String, Task> allTasks) {
@@ -153,47 +87,20 @@ public boolean isExecutable(Map<String, Task> allTasks) {
 }
 ```
 
-只有当所有依赖都已完成时，任务才可以执行。执行器每一轮都用它重新筛一遍可执行任务，调度就靠这一个检查。
+依赖失败或者被跳过，下游会等不到 `COMPLETED`，所以失败处理必须主动把下游标成 `SKIPPED`，不然会一直停在 `PENDING`。
 
-![](https://cdn.paicoding.com/paicoding/8840940d9c21255b3aea4da40cf38d81.png)
+状态和结果都由调度线程写，任务开始前标记为 `RUNNING`，收回结果后标记为完成或失败。工作线程只读依赖任务的结果。线程池的提交和 `Future.get()` 保证先写后读的可见性，字段上的 `volatile` 算多一层保险。
 
-### 执行计划
+【截图：任务状态流转；风格：three-layer；截图目标：展示 PENDING、RUNNING、COMPLETED、FAILED、SKIPPED 之间的转换条件；关键词：任务状态、依赖完成、跳过下游】
 
-多个任务可以组成一个执行计划。
+### 拓扑排序和环检测
 
-```java
-public class ExecutionPlan {
-    private final String id;
-    private final String goal;                   // 计划目标
-    private final Map<String, Task> tasks;       // 所有任务，LinkedHashMap 保持插入顺序
-    private final List<String> executionOrder;   // 拓扑排序后的顺序
-    private PlanStatus status;
-    private String summary;
-}
-```
+多个任务组成一个执行计划，任务按插入顺序存在 `LinkedHashMap` 里，另外维护一份拓扑排序后的顺序。
 
-![](https://cdn.paicoding.com/paicoding/4d0ca17a2df7ff04df8d39c8b99ca37b.png)
-
-### 拓扑排序算法
-
-`computeExecutionOrder()` 用 DFS 把 DAG 转换成线性顺序。沿着“依赖”方向递归，先把所有依赖加进结果，再加自己，也就是后序遍历。这样得到的顺序天然就是依赖在前。
+拓扑排序用的是 DFS 后序遍历。沿着依赖方向递归，先把所有依赖加进结果，再加自己，得到的顺序天然就是依赖在前。
 
 ```java
-public boolean computeExecutionOrder() {
-    executionOrder.clear();
-    Set<String> visited = new HashSet<>();
-    Set<String> visiting = new HashSet<>();
-
-    for (Task task : tasks.values()) {
-        if (!visited.contains(task.getId())) {
-            if (!topologicalSort(task, visited, visiting)) {
-                return false;  // 有环
-            }
-        }
-    }
-    return true;
-}
-
+// src/main/java/com/paicli/plan/ExecutionPlan.java
 private boolean topologicalSort(Task task, Set<String> visited, Set<String> visiting) {
     String id = task.getId();
     if (visiting.contains(id)) {
@@ -202,14 +109,11 @@ private boolean topologicalSort(Task task, Set<String> visited, Set<String> visi
     if (visited.contains(id)) {
         return true;
     }
-
     visiting.add(id);
     for (String depId : task.getDependencies()) {
         Task dep = tasks.get(depId);
-        if (dep != null) {
-            if (!topologicalSort(dep, visited, visiting)) {
-                return false;
-            }
+        if (dep != null && !topologicalSort(dep, visited, visiting)) {
+            return false;
         }
     }
     visiting.remove(id);
@@ -219,113 +123,77 @@ private boolean topologicalSort(Task task, Set<String> visited, Set<String> visi
 }
 ```
 
+`visiting` 是当前递归栈上的节点，递归中又碰到它，说明依赖绕回来了，比如 A 依赖 B，B 依赖 C，C 又依赖 A。`visited` 是已经处理完的节点，避免重复遍历。
+
 ![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924182251-1c5c3b96.png)
 
-算法用两个集合来跟踪状态，`visiting` 是当前递归栈中的节点，用于检测环；`visited` 是已处理完的节点，用于避免重复处理。
+排出来的顺序不直接决定谁先跑。调度靠每一轮重新筛可执行的任务，拓扑顺序只负责给同一轮的任务排先后，另外决定计划展示、跳过标记和失败汇总里的列出顺序。
 
-如果检测到环（`visiting.contains(id)`），说明任务依赖关系有问题，比如 A 依赖 B，B 依赖 C，C 又依赖 A。这种计划没法执行，解析阶段会直接报错。
+计划本身也有状态，`CREATED`、`RUNNING`、`COMPLETED`、`FAILED`、`CANCELLED`，用户按 ESC 中断执行时标成 `CANCELLED`。
 
-拓扑序在执行时的作用其实有限。调度靠每一轮重新调用 `isExecutable`，拓扑序只用来给同一轮的可执行任务排个先后，另外用在计划展示的编号上。
+## 03、模型给的计划凭什么能信
 
-### 计划状态管理
+计划是模型写的，写错是常事。规划器先把要求讲清楚，再对模型交回来的东西严格验收。
 
-执行计划本身也有状态，`CREATED`、`RUNNING`、`COMPLETED`、`FAILED`、`CANCELLED`。其中 `CANCELLED` 目前没有代码设置，用户取消时执行器直接返回“已取消”的提示。
-
-```java
-public void markStarted() {
-    this.status = PlanStatus.RUNNING;
-    this.startTime = System.currentTimeMillis();
-}
-
-public boolean hasFailed() {
-    return tasks.values().stream()
-        .anyMatch(t -> t.getStatus() == TaskStatus.FAILED);
-}
-```
-
-计划级别的状态让用户能快速了解整体执行情况，不需要逐个检查任务。
-
-## 03、规划器实现
-
-规划器负责把用户输入的复杂任务分解成可执行的计划。
+先看规划请求。
 
 ```java
+// src/main/java/com/paicli/plan/Planner.java
 public ExecutionPlan createPlan(String goal) throws IOException {
+    out.println("📋 正在规划任务: " + goal + "\n");
     if (isSimpleGoal(goal)) {
         return createMinimalPlan(goal);
     }
+    return requestPlan(goal, "请为以下任务制定执行计划：\n" + goal);
+}
+
+private ExecutionPlan requestPlan(String goal, String planningRequest) throws IOException {
     List<LlmClient.Message> messages = Arrays.asList(
             LlmClient.Message.system(promptAssembler.assemble(PromptMode.PLANNER, PromptContext.builder()
                     .projectMemoryContext(buildProjectMemoryContext())
                     .build())),
-            LlmClient.Message.user("请为以下任务制定执行计划：\n" + goal)
-    );
-    PlanningStreamRenderer streamRenderer = new PlanningStreamRenderer(out);
+            LlmClient.Message.user(planningRequest));
     LlmClient.ChatResponse response = llmClient.chat(messages, null, streamRenderer);
     return parsePlan(goal, response.content());
 }
 ```
 
-有三个地方值得注意。提示词放在 `prompts/modes/planner.md`，由提示词组装模块拼装，并带上 PAI.md 项目记忆。规划请求不带工具，流式只显示模型的思考过程。开头还有一个简单任务的短路判断，第 04 节再讲。
+`chat` 的第二个参数传 `null`，规划请求不带任何工具，模型只能用文字回答。终端上只流式显示模型的思考过程，JSON 正文不直接打出来，解析通过后以计划审阅的形式展示。开头的简单任务短路第 08 节再讲。
 
-![](https://cdn.paicoding.com/paicoding/105743aeb47ee7523d8abfc4841f54c5.png)
+### 规划提示词
 
-### 规划提示词工程
+提示词放在 `prompts/modes/planner.md`，拼装时带上 PAI.md 项目记忆。里面给了 JSON 格式示例、5 种任务类型，最后是 9 条规则，结尾强调“只输出 JSON，不要有其他内容”。
 
-关键是给 LLM 一个清晰的提示，让它输出标准格式的计划。提示词里有三块内容。
-
-**第一，明确输出格式**。告诉 LLM 必须输出 JSON，并且给出完整示例，结尾再强调一句“只输出 JSON，不要有其他内容”。
-
-```json
-{
-  "summary": "任务摘要",
-  "tasks": [
-    { "id": "task_1", "description": "任务描述", "type": "FILE_READ", "dependencies": [] }
-  ]
-}
+```text
+5. 简单任务允许只生成 1-3 个任务，不要为了凑步数引入无关步骤。
+6. 复杂任务拆分为 5-10 个子任务。
+7. 不要为了“保存中间结果”额外创建 FILE_WRITE / FILE_READ，除非用户明确要求落盘。
+8. 如果一个任务一步就能完成，就保持最短计划。
+9. 没有依赖关系的任务会并行执行。会写同一个文件的任务不能同时执行，必须让后一个依赖前一个。
 ```
 
-**第二，定义任务类型**。列出 5 种可用类型和用途，让 LLM 知道什么场景用什么类型。
+第 5、7、8 条对付过度规划。模型很爱把“列出目录”拆成“列出目录、保存结果、读取结果、总结结果”四步，步数多了看着认真，每一步都是一次模型调用。
 
-**第三，给出约束规则**。一共 8 条：
+第 9 条对付并行写冲突。执行器没有文件锁，两个并行任务改同一个文件，后写的会把先写的盖掉，只能在规划阶段让模型把它们排成先后。
 
-```
-1. 每个任务必须有唯一 id，如 task_1、task_2
-2. dependencies 列出依赖的任务 id
-3. 任务应该按执行顺序排列
-4. 任务描述要具体明确
-5. 简单任务允许只生成 1-3 个任务，不要为了凑步数引入无关步骤
-6. 复杂任务拆分为 5-10 个子任务
-7. 不要为了“保存中间结果”额外创建 FILE_WRITE / FILE_READ，除非用户明确要求落盘
-8. 如果一个任务一步就能完成，就保持最短计划
-```
+【截图：planner.md 的 9 条规则；风格：checklist-card；截图目标：展示防过度规划的 5、7、8 条和防并行写冲突的第 9 条；关键词：最短计划、不落盘、同文件串行】
 
-第 5、7、8 条专门用来防过度规划，一种是简单任务被拆得过细，另一种是为了保存中间结果额外建读写任务。
+### 严格校验
 
-![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924182401-d5181230.png)
-
-### 解析 LLM 输出
-
-模型输出的计划要经过严格校验，任何一项不合格都直接失败，不做静默修补。比如依赖里引用了一个不存在的 id，如果悄悄丢掉这条边，计划看起来能跑，执行顺序却已经不是模型本来的意思了。
+模型交回来的计划，任何一项不合格都直接失败。
 
 ````java
 String cleaned = planJson.replaceAll("```json\\s*", "")
         .replaceAll("```\\s*", "")
         .trim();
-JsonNode root = mapper.readTree(cleaned);
-if (root == null || !root.isObject()) {
-    throw new IOException("计划必须是 JSON 对象");
+JsonNode root;
+try {
+    root = mapper.readTree(cleaned);   // JSON 后面跟说明文字、键重复都算不合法
+} catch (JsonProcessingException e) {
+    throw new IOException("计划不是合法的 JSON：" + e.getOriginalMessage(), e);
 }
-JsonNode tasksNode = root.path("tasks");
-if (!tasksNode.isArray() || tasksNode.isEmpty()) {
-    throw new IOException("计划 tasks 必须是非空数组");
-}
-// 第一遍：登记 id，重复即失败
-JsonNode idNode = taskNode.path("id");
-if (!taskNode.isObject() || !idNode.isTextual() || idNode.asText().isBlank()) {
-    throw new IOException("计划任务必须具有非空字符串 id");
-}
-if (idMapping.putIfAbsent(idNode.asText(), "task_" + taskIndex++) != null) {
+// 第一遍：登记所有 id，重复即失败
+if (idMapping.putIfAbsent(originalId, "task_" + taskIndex++) != null) {
     throw new IOException("计划中存在重复任务 id");
 }
 // 第二遍：建立依赖，引用未声明的 id 即失败
@@ -338,60 +206,28 @@ if (!plan.computeExecutionOrder()) {
 }
 ````
 
-解析分两遍扫描。LLM 可能先定义 task_2，再定义 task_1，而 task_2 依赖 task_1。第一遍先登记所有 id，第二遍再建立依赖，前向引用就不会出问题。不管模型给的 id 叫什么，最终都按数组顺序重新编号成 `task_1` 到 `task_N`。
+解析分两遍。模型可能先写 task_2，再写 task_1，而 task_2 依赖 task_1。第一遍只登记 id，第二遍再连依赖，前向引用就不会误判。不管模型给的 id 叫什么，最后都按数组顺序重新编号成 `task_1` 到 `task_N`，依赖里却必须写模型自己声明的原 id，写成新编号也算未声明。
+
+JSON 解析开了两个严格选项，JSON 后面跟着一段说明文字、同一个键出现两次，都判为不合法。Jackson 默认会忽略这两种情况，PaiCLI 的评测重放器用 Python 的 `json.loads` 重新解析同一份回复，两边标准不一样，同一份计划就会一边能跑一边报错。
 
 ![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924182549-5438f8da.png)
 
-只有任务类型是宽松的，写错或缺失都按 `ANALYSIS` 处理。解析失败时没有自动重试，也不会退回 ReAct，整次 `/plan` 直接返回“❌ 执行失败”和具体原因。我的判断是，计划形状都不对的时候，与其猜模型想干什么，不如让用户看到错误重新描述一遍。
+为什么不悄悄修补？比如依赖里引用了一个不存在的 id，丢掉这条边，计划照样能跑，可执行顺序已经不是模型本来的意思了。某个本该等上游的任务提前开跑，拿不到它需要的结果，错误会在很后面才冒出来，还很难查。
 
-### 重新规划
+解析失败也不自动重试，不退回 ReAct，整次执行直接返回“❌ 执行失败”和具体原因。只有任务类型是宽松的，写错或缺失都按 `ANALYSIS` 处理，它本来就只是个提示。
 
-执行中某个任务失败，而且计划完成度低于一半时，执行器会基于已完成的进度重新规划。
+**计划形状都不对的时候，与其猜模型想干什么，不如把错误摆出来，让用户换个说法再来一次。**
 
-```java
-context.append("原任务: ").append(failedPlan.getGoal()).append("\n");
-context.append("失败原因: ").append(failureReason).append("\n");
-context.append("已完成的任务:\n");
-for (Task task : failedPlan.getAllTasks()) {
-    if (task.getStatus() == Task.TaskStatus.COMPLETED) {
-        context.append("- ").append(task.getId())
-                .append(": ").append(task.getDescription())
-                .append("\n");
-    }
-}
-context.append("\n请制定新的执行计划，避开之前的问题。");
-return createPlan(context.toString());
-```
+## 04、任务按什么顺序跑，哪些能并行
 
-上下文里只有已完成任务的 id 和描述，没有它们的执行结果。新生成的计划是一份全新的 `ExecutionPlan`，**不会继承**旧计划的完成状态或执行产物，所以不能保证失败后只重做失败的那一步，执行前仍要检查新计划有没有重复操作。
-
-重新规划有次数上限。如果不设上限，新计划只要又在完成一半之前失败，就会再规划一次，一直递归下去。默认最多重新规划 2 次，可以用 `PAICLI_PLAN_MAX_REPLANS` 调整。
+计划通过审阅后，执行器按轮调度。每一轮取出所有依赖已完成的任务，这一轮全部跑完，再算下一轮。
 
 ```java
-if (!stopAfterBatch && plan.getProgress() < 0.5) {
-    int maxReplans = maxReplans();
-    if (replansUsed < maxReplans) {
-        out.println("🔄 尝试重新规划（第 " + (replansUsed + 1) + "/" + maxReplans + " 次）...\n");
-        ExecutionPlan replanned = planner.replan(plan, error.getMessage());
-        return reviewAndExecutePlan(replanned, streamState, explicitTaskEnvelope, replansUsed + 1)
-                .result();
-    }
-    // 不再启动任何新任务，只收完本批已返回的结果
-    stopAfterBatch = true;
-    continue;
-}
-```
-
-到达上限后不再启动新任务，只把当前这一轮已经返回的结果收完，其余任务全部标成 `SKIPPED`。PaiCLI 的评测重放器要求重规划触发点之后不能再有新的工作，到上限时直接停下，正好和这条约束一致。
-
-## 04、PlanExecuteAgent
-
-现在把规划器和执行器整合起来。主流程分两步：先让用户审阅计划，再按轮找出可执行的任务并行执行。
-
-```java
+// src/main/java/com/paicli/agent/PlanExecuteAgent.java，executePlan 节选
 while (!stopAfterBatch) {
     if (CancellationContext.isCancelled()) {
-        return "⏹️ 已取消当前计划执行。";
+        plan.markCancelled();
+        return CANCELLED_PLAN_MESSAGE;
     }
     List<Task> executableTasks = getExecutableTasksInOrder(plan);
     if (executableTasks.isEmpty()) {
@@ -399,25 +235,54 @@ while (!stopAfterBatch) {
     }
     List<TaskExecutionResult> batchResults = executeTaskBatch(
             plan, executableTasks, streamState, taskTrustedUrls, observation);
+    // 取消会打断本轮正在执行的任务，这些中断不是任务本身失败，不能再触发重新规划
+    if (CancellationContext.isCancelled()) {
+        plan.markCancelled();
+        return CANCELLED_PLAN_MESSAGE;
+    }
     for (TaskExecutionResult batchResult : batchResults) {
-        // 成功则标记完成；失败则判断是否重新规划，或者跳过它的下游
+        // 成功就标记完成；失败就判断是重新规划，还是跳过它的下游（第 07 节）
     }
 }
 ```
 
-每一轮取出当前所有可执行的任务，整轮执行完，再重新计算下一轮。它不是事件驱动的调度器，某个任务的依赖提前完成了，也要等这一轮其他任务全部结束才会启动。
-
-![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924182704-ec070123.png)
-
-每个任务内部是一个独立的工具循环。任务有自己的消息列表，system 是任务执行提示词，user 是任务上下文；模型返回工具调用就执行工具，把结果交回模型，直到模型不再调用工具为止。
-
-任务上下文只带**直接依赖**的完整结果，不带间接依赖，也不带无关的兄弟任务。这样每个任务的上下文都很干净，代价是下游任务如果需要更早的信息，只能靠直接依赖在结果里转述。
-
-### 任务之间怎么传递上下文
-
-下游任务拿到的第一条 user 消息，是执行器按依赖关系拼出来的任务上下文。
+一轮里只有一个任务时，直接在当前线程执行。多个任务就开一个线程池并行。
 
 ```java
+out.println("⚡ 本轮并行执行 " + executableTasks.size() + " 个任务: " + parallelTaskIds);
+ExecutorService executor = Executors.newFixedThreadPool(Math.min(executableTasks.size(), 4), r -> {
+    Thread t = new Thread(r, "paicli-plan-executor");
+    t.setDaemon(true);
+    return t;
+});
+```
+
+并发度取本轮任务数和 4 的较小值，每一轮新建线程池，结束时关闭。第 5 个任务要等前面有线程空出来。
+
+【截图：按轮调度示意；风格：swimlane；截图目标：展示每一轮取出可执行任务、并行执行、整轮结束后再算下一轮；关键词：按轮执行、最多 4 路并行、轮次边界】
+
+### 为什么不就绪一个派发一个
+
+按轮调度有个明显的代价。某个任务的依赖早就完成了，也得等这一轮最慢的那个任务结束才能开始。改成事件驱动，哪个任务的依赖一到齐就立刻派发，总耗时能更短。
+
+PaiCLI 选按轮，是因为每一轮的边界很清楚。哪些任务在同一轮开始，失败发生时哪些结果已经提交，都能按轮复现出来。PaiCLI 的评测重放器就按这套语义逐条核对执行记录，比如“触发重新规划之后不能再有新任务开始”。换成就绪即派发，失败时兄弟任务还在跑，重规划和跳过的规则都要重新定义。
+
+对 PaiCLI 这种计划通常只有几个到十几个任务的场景，多等一轮的代价可以接受。
+
+### 并行输出和写冲突
+
+几个任务同时往终端打日志，内容会搅成一团。每个并行任务的输出先写进自己的缓冲区，整轮结束后按任务顺序一次性打印。代价是并行执行期间看不到这些任务的流式输出，只能看到“▶️ 并行任务 [task_x]”这样的开始提示。审批弹窗和自动审查的提示是例外，它们直接打到终端，不进缓冲区，要等用户确认的东西不能压到整轮结束。
+
+![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924183208-2fe0d6d3.png)
+
+写冲突先看任务内部。模型一次可能返回好几个工具调用，读文件、搜索这类只读工具最多 4 个并行，写文件、执行命令、MCP 调用一律按模型给出的顺序串行，第 1 期讲过原因。任务之间就没有文件锁了，只能靠规划提示词第 9 条，让模型把写同一个文件的任务排成先后。
+
+## 05、上游的结果怎么交给下游
+
+每个任务开始时，拿到的第一条 user 消息是执行器拼出来的任务上下文。
+
+```java
+// src/main/java/com/paicli/agent/PlanExecuteAgent.java，buildTaskContext 节选
 context.append("总目标：").append(goal).append("\n");
 context.append("当前任务：").append(task.getDescription()).append("\n");
 if (task.getDependencies().isEmpty()) {
@@ -438,157 +303,120 @@ if (task.getDependencies().isEmpty()) {
 context.append("请执行此任务。如果是ANALYSIS或VERIFICATION类型，请基于以上上下文直接给出结果。");
 ```
 
-依赖结果原样拼进来，不截断也不做摘要。上游读了一个大文件、下游又依赖了好几个上游时，这条消息会很长，好在任务内部也有上一期讲的自动压缩兜底。上下文后面还会追加和任务描述相关的长期记忆。
+只带直接依赖的结果，不带间接依赖，也不带无关的兄弟任务。下游如果需要更早的信息，只能靠直接依赖在结果里转述。
 
 ![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924182820-c5b9ffbb.png)
 
-联网权限也按依赖关系传递。每个任务从本轮的工具策略复制一份自己的副本，并行的兄弟任务之间不共享新发现的 URL。上游任务通过 `web_search` 拿到的可信 URL，只会传给 DAG 里声明依赖它的下游；上游回复正文里写的网址不算数，下游想抓取也会被拒绝。这样一个任务读到的网页内容再怎么诱导，也没法让另一个分支去访问它指定的地址。
+为什么不让所有任务共用一份对话历史？并行的几个任务同时往一份历史里追加消息，顺序说不清。就算串行，下游也会看到上游每一次工具调用的原始输出，历史越跑越长，每个任务都在为别人的过程付 Token。
 
-任务循环不设固定轮数上限，写死轮数的话，复杂一点的任务可能还没做完就被截断。兜底靠循环预算，默认只开停滞检测，连续 3 轮工具调用完全相同就判定原地打转。预算触发后，程序关掉工具再调一次模型，让它基于已有结果收尾，任务结果标“⚠️ 部分完成”。
+依赖结果原样拼进来，不截断也不做摘要。下游常常需要上游读到的完整内容，截掉一半，它就只能再读一遍。上游读了一个大文件、下游又依赖好几个上游时，这条消息会很长，任务内部还有第 1 期讲的工具结果落盘和上下文压缩兜底。上下文最后还会追加和任务描述相关的长期记忆。
 
-什么才算任务失败？只有任务执行过程中抛出异常，比如模型调用失败。工具报错、预算触发、用户取消都不算失败，它们会作为结果正常交给后续任务。
+【截图：任务上下文的组成；风格：three-layer；截图目标：展示总目标、当前任务、直接依赖结果、依赖分支的可信 URL、长期记忆五部分；关键词：直接依赖、原样拼接、长期记忆】
 
-一个复杂任务至少是 **1 次规划 + 每个任务至少 1 次执行** 的 LLM 调用；工具调用和重规划会增加次数。
+### 联网权限也按依赖传
 
-### 简单任务跳过模型规划
-
-用户输入 `/plan <任务>` 时，PaiCLI 会进入 Plan-and-Execute 模式。规划器内部有一个简单任务判断，三个条件同时满足才跳过 LLM 规划。
-
-- 不含“然后、并且、并、再、最后、同时、先、之后、接着、以及”这类多步提示词
-- 去掉首尾空白后不超过 30 个字符
-- 含“列出、查看、读取、显示、执行、运行、搜索、当前目录、文件”之一
-
-命中后直接生成只有一个任务的计划，任务描述就是用户原文。这个计划仍然会经过审阅，执行时仍要调用模型。它不是在 ReAct 和 Plan 两种模式之间自动切换，PaiCLI 默认走 ReAct，只有用户输入 `/plan` 才进入计划模式，执行完自动回到 ReAct。
-
-## 05、计划审阅
-
-计划生成之后，执行之前，会先停下来让用户看一眼。
-
-![](https://cdn.paicoding.com/paicoding/d2786097e271ba2ac5d129c43c9dfa1e.png)
-
-默认显示的是折叠摘要，包括目标、任务数、并行批次数、首批执行和最终收敛的任务。按键的含义如下。
-
-```
-📝 计划已生成。
-   - 回车：按当前计划执行
-   - Ctrl+O：展开完整计划
-   - ESC：折叠或取消本次计划
-   - I：输入补充要求后重新规划
-```
-
-Ctrl+O 展开的是带状态图标的完整任务图。执行期间不会刷新这张图，只输出逐行日志，比如“▶️ 执行任务”“⚡ 本轮并行执行 N 个任务”“✅ 完成”“❌ 失败”。
-
-![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924182939-aa5b4d92.png)
-
-按 I 输入的补充要求会拼到目标后面，整份重新规划，原计划不支持逐条编辑或删除任务。补充里如果写了“不要联网”，工具策略也会跟着收紧。终端读不到单键时会退回行模式，直接回车执行，输入 `/view` 展开，输入 `cancel` 取消，其他文字当作补充要求。
-
-## 06、运行测试
-
-编译运行：
-
-```bash
-mvn clean package
-java -jar target/paicli-1.0-SNAPSHOT.jar
-```
-
-输入 `/plan` 进入计划模式，然后输入提示词：创建一个 Java 项目叫 demo，写一个 Hello 类输出 Hello World，然后编译运行
-
-![](https://cdn.paicoding.com/paicoding/25e552a18c8fe15d5be6a0137844adbd.png)
-
-规划了 5 个任务，task5 依赖 task4，task4 依赖 task3，task3 依赖 task2，task2 依赖 task1。
-
-![](https://cdn.paicoding.com/paicoding/5350cd11f2aba24ef9f3ed20a0588f96.png)
-
-计划生成后会先停在审阅环节，回车确认之后才开始执行。
-
-![](https://cdn.paicoding.com/paicoding/598c7bbdfce39dc87a1e0b05280e2439.jpg)
-
-然后开始执行计划。
-
-![](https://cdn.paicoding.com/paicoding/fc0313d703fbfa1dc8858be32217b52e.jpg)
-
-整个流程清晰可见，每一步都知道在做什么。
-
-![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924183055-961d1c17.png)
-
-## 07、和 ReAct 的对比
-
-两种模式各有优劣，适用场景不同。
-
-| 特性         | ReAct            | Plan-and-Execute   |
-| ------------ | ---------------- | ------------------ |
-| LLM 调用次数 | 由行动和观察轮数决定 | 首次规划、每个任务的执行及必要的重规划都会调用；不保证更少 |
-| 执行速度     | 取决于行动轮数       | 增加规划耗时；独立任务并行时可能缩短总耗时               |
-| Token 消耗   | 取决于对话历史       | 取决于计划、任务上下文和执行轮数；不保证更低             |
-| 灵活性       | 高（随时调整）   | 低（按 plan 执行） |
-| 可预测性     | 低               | 高                 |
-| 错误恢复     | 容易（随时改）   | 需要重规划         |
-| 适用场景     | 简单/探索性任务  | 复杂/确定性任务    |
-
-任务简单、一两步就能完成，或者需要边看边决定下一步的探索性操作，用 ReAct 更顺手。比如“查看当前目录有什么文件”，直接 ReAct 一步完成。
-
-任务复杂、步骤之间有明确依赖，用户又希望执行前先看到完整流程，用 Plan-and-Execute 更合适。比如“读取配置、分析源码结构、再输出一份迁移方案”。
-
-两种模式在 PaiCLI 里其实是嵌套使用的。外层用 Plan-and-Execute 制定整体计划，每个任务内部是一个多轮的模型与工具循环。任务失败后，重不重新规划由固定规则决定（完成度低于一半且没到上限），没有再让模型分析一遍失败原因。其他产品的内部实现不能仅凭表面行为推断。
-
-## 08、并行执行进阶
-
-PaiCLI 当前会按 DAG 的依赖关系分批执行，同一轮里互不依赖的任务并行。
+每个任务开始前，都从本轮工具策略复制一份副本。并行的兄弟任务各用各的，新发现的 URL 不互相共享。
 
 ```java
-out.println("⚡ 本轮并行执行 " + executableTasks.size() + " 个任务: " + parallelTaskIds);
-ExecutorService executor = Executors.newFixedThreadPool(Math.min(executableTasks.size(), 4), r -> {
-    Thread t = new Thread(r, "paicli-plan-executor");
-    t.setDaemon(true);
-    return t;
-});
+TurnToolPolicy taskToolPolicy = turnToolPolicy.forkWithTrustedUrls(dependencyUrls);
 ```
 
-并发度是本轮任务数和 4 取小，每一轮新建线程池，结束时关闭。本轮只有一个任务时不开线程池，直接在当前线程执行。
+上游任务通过 `web_search` 拿到的 URL，只传给 DAG 里声明依赖它的下游，拼进任务上下文时单独列一段“依赖分支经 web_search 验证的 URL”。上游回复正文里写的网址不算数，下游想抓取也会被拒绝。
 
-比如“读取 pom.xml”和“列出 src 目录”可以同时进行，最后再汇总。
+这样一个任务读到的网页再怎么诱导，也没法让另一个分支去访问它指定的地址。
 
-### 并行执行可能遇到的问题
+**任务之间只传结果，不传过程；只传声明过的依赖，不传旁路。**
 
-并行执行会遇到三类问题，两个任务同时写同一个文件，日志交错看不清，一个任务失败后其他任务怎么办。PaiCLI 对这三类问题分别做了处理。
+## 06、一个任务内部怎么干活
 
-输出交错的处理最直接。每个并行任务的输出先写进自己的缓冲区，整轮结束后按任务顺序一次性打印。代价是并行任务执行期间，终端看不到它们的流式输出。
+每个任务有一份独立的消息列表。system 是任务执行提示词，带上 PAI.md、Skill 索引和任务类型；user 是上一节拼好的任务上下文。之后就是第 1 期那套循环，每一轮依次做这几件事。
 
-![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924183208-2fe0d6d3.png)
-
-写入冲突分两层看。计划层面，两个并行任务写同一个文件目前没有专门的锁，要靠规划时把它们设计成有依赖关系。工具层面，同一轮模型可能返回多个 `edit_file`，每次编辑都是读文件、改一处、整文件写回，如果并行执行，后写的会把先写的改动盖掉，工具却都报告成功。所以只有读文件、搜索这类只读工具才并行，写文件、执行命令、MCP 调用一律按模型给出的顺序串行。
-
-失败处理见下一小节。
-
-提示词：
-
-```
-/plan 请把任务拆成可并行的 DAG：
-1. 读取 pom.xml
-2. 列出 src/main/java 下的文件
-3. 列出 src/test/java 下的文件
-4. 读取 README.md 的前 80 行
-5. 最后汇总以上结果，告诉我这个项目的构建方式、源码结构和测试情况。
-要求：前 4 个任务彼此独立并行执行，最后 1 个任务依赖前 4 个任务；在执行日志里明确提示哪些任务是并行执行的。
+```java
+// src/main/java/com/paicli/agent/PlanExecuteAgent.java，任务循环节选
+while (true) {
+    if (CancellationContext.isCancelled()) { /* 返回“已取消任务” */ }
+    AgentBudget.ExitReason exitReason = budget.check();   // 停滞或预算命中就收尾
+    injectPendingLspDiagnostics(messages, out, actor);    // 上一步改过代码，补上语法诊断
+    maybeCompactHistory(messages, out, actor);            // 太长就先压缩
+    TurnToolPolicy.ToolExposure toolExposure = taskToolPolicy.expose(toolDefinitions);
+    LlmClient.ChatResponse response = llmClient.chat(
+            messages, toolExposure.definitions(), streamRenderer);
+    // 没有工具调用 → 任务完成，返回模型的回答
+    // 有工具调用 → 执行工具，结果经安全边界包装后交回模型 → 注入本轮加载的 Skill → 防打转检查
+}
 ```
 
-![](https://cdn.paicoding.com/paicoding/a3e75ca18361da8e7c45be61a2471e7d.jpg)
+防打转和第 1 期一致。同一个工具带同样的参数连续调用 3 次，或者同类错误连续出现 3 次，注入一次提醒，让模型换个思路。连续 5 轮调用完全相同，就判定原地打转，关掉工具再调一次模型，让它基于已有结果收尾，任务结果标“⚠️ 部分完成”。任务循环不设固定轮数上限，写死轮数的话，复杂一点的任务可能还没做完就被截断。
 
-开始并行执行任务。
+【截图：任务内部的防打转；风格：swimlane；截图目标：展示同一动作 3 次提醒、5 次停滞后关闭工具收尾；关键词：runaway guard、停滞检测、部分完成】
 
-![](https://cdn.paicoding.com/paicoding/f15e467c02e8f2662922d9c4973fcf98.jpg)
+权限也和 ReAct 共用一套。计划任务和 ReAct 用同一个工具注册表，默认 auto 模式下，`execute_command` 先交给关闭思考的轻量模型审查，放行才执行，不放行就把原因交回模型。整份计划算一轮用户输入，所有任务、并行的兄弟任务、重规划后的新任务共用一个计数，连续被拦 3 次才弹给用户确认。
 
-当所有并行任务结束后，开始汇总。
+什么才算任务失败？只有执行过程中抛出异常，比如模型调用失败。工具报错会作为工具结果交回模型，让它自己处理；预算触发返回部分结果；用户取消返回“已取消”。这几种都不算失败，不会触发下一节的重规划。
 
-![](https://cdn.paicoding.com/paicoding/768597fa4d66a36f278666398a00fabc.jpg)
+## 07、任务失败了怎么收场
 
-### 失败之后怎么收场
+一个任务失败后，执行器先看整份计划的完成度。
 
-一个任务失败后，执行器先看完成度。低于一半且没到重规划上限，就重新规划；否则继续执行不受影响的任务。
-
-失败任务的直接和间接下游都会标成 `SKIPPED`，不会一直停在 `PENDING`，汇总里能看到它们为什么没执行。汇总先列已完成任务的结果，再列失败和跳过的原因，已经做完的工作不会因为某个任务失败就丢掉。格式如下，内容为示意。
-
+```java
+if (!stopAfterBatch && plan.getProgress() < 0.5) {
+    int maxReplans = maxReplans();
+    if (replansUsed < maxReplans) {
+        out.println("🔄 尝试重新规划（第 " + (replansUsed + 1) + "/" + maxReplans + " 次）...\n");
+        ExecutionPlan replanned = planner.replan(plan, errorMessage);
+        return reviewAndExecutePlan(replanned, streamState, explicitTaskEnvelope, replansUsed + 1)
+                .result();
+    }
+    String stopNotice = "已达到重新规划上限（" + maxReplans + " 次），停止执行剩余任务";
+    out.println("🛑 " + stopNotice + "。\n");
+    failureLines.add(stopNotice);
+    stopAfterBatch = true;
+    continue;
+}
+for (Task skipped : plan.skipDependentsOf(task.getId())) {
+    failureLines.add("任务 " + skipped.getId() + " 已跳过: 依赖的任务 " + task.getId() + " 失败");
+}
 ```
+
+完成度低于一半，说明计划刚开头就出了问题，大概率是计划本身不对，重新规划。新计划同样要经过用户审阅。
+
+重新规划最多 2 次，可以用 `PAICLI_PLAN_MAX_REPLANS` 调整。不设上限的话，新计划只要又在一半之前失败，就会一直规划下去。到了上限，不再启动任何新任务，只收完这一轮已经返回的结果，其余任务全部标 `SKIPPED`。
+
+完成度过半，说明大部分工作已经做完，没必要推倒重来。失败任务的直接和间接下游标成 `SKIPPED`，不受影响的任务继续跑。
+
+【截图：失败后的两条路；风格：whiteboard；截图目标：展示完成度低于一半时重规划、过半时跳过下游继续执行、到达上限时停止；关键词：完成度 50%、重规划上限、跳过下游】
+
+### 重新规划时模型知道什么
+
+```java
+context.append("原任务: ").append(failedPlan.getGoal()).append("\n");
+context.append("失败原因: ").append(failureReason).append("\n");
+context.append("已完成的任务:\n");
+for (Task task : failedPlan.getAllTasks()) {
+    if (task.getStatus() == Task.TaskStatus.COMPLETED) {
+        context.append("- ").append(task.getId())
+                .append(": ").append(task.getDescription()).append("\n");
+    }
+}
+context.append("\n请制定新的执行计划，避开之前的问题。");
+return createPlan(context.toString());
+```
+
+模型只知道哪些任务做完了，看不到它们的结果。新计划是一份全新的计划，不继承旧计划的完成状态，所以没法保证只重做失败的那一步。审阅新计划时要留意有没有重复操作。
+
+为什么不把结果也带上？规划请求要保持小而固定。结果一带上，读过大文件的任务会把规划请求撑得很长，而这份请求的格式也是评测重放器逐字核对的内容。这是 PaiCLI 目前明确保留的限制，要改得连重放器一起改。
+
+### 用户取消的时候
+
+用户按 ESC 取消时，正在跑的任务会被打断，这些任务会以异常的形式回来。如果按普通失败处理，完成度又不到一半，执行器就会打印“🔄 尝试重新规划”，在用户已经放弃的任务上再调一次模型。
+
+所以一轮结果回来后，执行器先检查取消状态，已取消就把计划标成 `CANCELLED`，直接返回“⏹️ 已取消当前计划执行。”，不进入失败处理。
+
+### 汇总
+
+有任务失败时，汇总先列已完成任务的结果，再列失败和跳过的原因。已经流式显示过的结果不再重复打印。格式如下，内容为示意。
+
+```text
 ⚠️ 计划部分完成，有任务失败。
 已完成的任务结果:
 [task_1] pom.xml 使用 Maven 构建，Java 17
@@ -599,37 +427,126 @@ ExecutorService executor = Executors.newFixedThreadPool(Math.min(executableTasks
 
 ![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20260924183403-4e7044a4.png)
 
-已经流式显示过的任务结果不会重复打印。到达重规划上限的情况，汇总里会多一行“已达到重新规划上限（2 次），停止执行剩余任务”。
+**一个任务失败，不能让已经做完的工作跟着一起消失。**
 
-### 更智能的规划
+## 08、怎么进入计划模式，计划怎么审
 
-复杂任务还可以考虑**分层规划**，这部分 PaiCLI 还没有实现。
+PaiCLI 启动后默认走 ReAct。进入 Plan-and-Execute 有三种方式。
 
+- `/plan`：只有下一条任务走计划模式，执行完回到原来的模式
+- `/plan <任务>`：这一条任务直接走计划模式
+- Shift+Tab 切到 plan 模式，或者输入 `/mode plan`：之后每条普通输入都先规划再执行，状态栏显示“PLAN shift+tab to cycle”，直到切走
+
+Shift+Tab 按 auto → plan → ask 循环。plan 模式的审批档位和 auto 一样，只是多了一个“普通输入走计划”的开关。在 plan 模式下显式输入 `/team`，仍然走 Multi-Agent，本条输入里显式写的命令优先。
+
+【截图：Shift+Tab 切到 plan 模式；风格：data-board；截图目标：展示状态栏从 AUTO 切到 PLAN，普通输入直接进入规划；关键词：Shift+Tab、PLAN 模式、状态栏】
+
+### 审阅
+
+计划生成之后、执行之前，终端会停下来。默认显示折叠摘要，有目标、任务数、并行批次数、当前可执行和首批执行的任务。
+
+```text
+📝 计划已生成。
+   - 回车：按当前计划执行
+   - Ctrl+O：展开完整计划
+   - ESC：折叠或取消本次计划
+   - I：输入补充要求后重新规划
 ```
-第一层规划：确定主要阶段
-- 阶段1：环境搭建
-- 阶段2：核心功能开发
-- 阶段3：测试验证
 
-第二层规划：细化每个阶段
-- 阶段1包含：安装依赖、配置环境、初始化项目
-- 阶段2包含：写模块A、写模块B、集成测试
+Ctrl+O 展开带状态图标的完整任务图，ESC 在展开时折叠回摘要，在摘要里就是取消。执行期间这张图不会刷新，只输出逐行日志，比如“▶️ 执行任务”“⚡ 本轮并行执行 N 个任务”“✅ 完成”“❌ 失败”。
+
+【截图：计划审阅的折叠摘要和 Ctrl+O 展开图；风格：data-board；截图目标：真实运行中的摘要和展开后的任务图；关键词：计划审阅、并行批次、Ctrl+O】
+
+按 I 输入的补充要求，会连同当前计划一起交给模型修改。
+
+```java
+public ExecutionPlan revisePlan(ExecutionPlan current, String feedback) throws IOException {
+    String revisedGoal = current.getGoal() + "\n补充要求：" + feedback;
+    String request = "请为以下任务制定执行计划：\n" + revisedGoal
+            + "\n\n下面是用户刚审阅过的当前计划。请在它的基础上按补充要求修改，"
+            + "不受补充要求影响的任务保持原样，输出修改后的完整计划：\n"
+            + toPlanJson(current);
+    return requestPlan(revisedGoal, request);
+}
 ```
 
-分层规划的好处是高层计划稳定，低层计划可以灵活调整。某个阶段的详细计划有问题，只需要重规划这个阶段，不影响整体。
+为什么不按补充后的目标从头规划？用户刚审过这份计划，只想改一两处，从头生成会把没问题的任务也换个说法，还得从头再审一遍。改完的计划仍然走同一套严格校验，然后再审一次。补充里如果写了“不要联网”，工具策略也会跟着收紧。补充要求不计入重规划次数。
 
-## PaiCLI 如何写到简历上？
+终端读不到单个按键时会退回行模式。直接回车、`y`、`run` 都是执行，`/view` 展开，`cancel` 或 `esc` 取消，其他文字当作补充要求。
 
-**PaiCLI 项目（第 2 期）| 2026.04 - 2026.09 | Agent 开发**
+### 简单任务不调用模型规划
 
-**项目描述**：为 Agent CLI 加入 Plan-and-Execute 能力，实现任务分解、DAG 依赖管理、严格计划校验、按轮并行调度和有上限的失败重规划。
+规划器开头有一个简单任务判断，三个条件同时满足就不调用模型，直接生成只有一个任务的计划。
 
-**技术栈**：Java 17、Maven、GLM-5.1 API、DAG 拓扑排序、JSON 解析、JLine3
+- 不含“然后、并且、并、再、最后、同时、先、之后、接着、以及”这类多步提示词
+- 去掉首尾空白后不超过 30 个字符
+- 含“列出、查看、读取、显示、执行、运行、搜索、当前目录、文件”之一
 
-**核心职责**：
+命中后任务描述就是用户原文，这个计划仍然会经过审阅，执行时仍要调用模型，只是省掉了一次规划调用。
 
-- 设计任务模型，实现 5 种任务状态流转和依赖双向追踪，失败任务的传递下游自动标记为跳过，并发读写状态用 volatile 保证可见性
-- 实现基于 DFS 后序遍历的拓扑排序和环检测，按轮筛选依赖已完成的任务，用线程池并行执行同一轮的独立任务，并行输出先缓冲再按任务顺序打印
-- 开发 Planner 规划器，提示词约束简单任务 1-3 步、复杂任务 5-10 步，对模型输出的计划做严格校验，重复 id、未声明依赖和循环依赖直接拒绝，避免静默丢边
-- 实现失败处理，完成度低于一半时基于已完成进度重新规划且默认最多 2 次，失败汇总同时保留已完成结果与失败、跳过原因
-- 集成 JLine3 实现计划审阅交互，支持回车执行、展开完整计划、取消和输入补充要求整份重新规划
+【截图：简单任务直接生成单任务计划；风格：data-board；截图目标：输入“列出当前目录的文件”后没有规划思考，直接出现单任务计划；关键词：简单任务、单任务计划、省一次规划】
+
+## 09、跑起来看看
+
+编译运行。
+
+```bash
+mvn clean package
+java -jar target/paicli-1.0-SNAPSHOT.jar
+```
+
+先来一个串行的例子，每一步都依赖上一步。
+
+```text
+/plan 创建一个 Java 项目叫 demo，写一个 Hello 类输出 Hello World，然后编译运行
+```
+
+【截图：串行计划的审阅摘要；风格：data-board；截图目标：真实运行中生成的链式计划，任务依次依赖；关键词：/plan、链式依赖、计划审阅】
+
+【截图：串行计划的执行过程；风格：data-board；截图目标：任务逐个执行、auto 模式放行编译命令、最后输出运行结果；关键词：逐个执行、auto 已放行、Hello World】
+
+再来一个能并行的。
+
+```text
+/plan 请把任务拆成可并行的 DAG：
+1. 读取 pom.xml
+2. 列出 src/main/java 下的文件
+3. 列出 src/test/java 下的文件
+4. 读取 README.md 的前 80 行
+5. 最后汇总以上结果，告诉我这个项目的构建方式、源码结构和测试情况。
+要求：前 4 个任务彼此独立并行执行，最后 1 个任务依赖前 4 个任务。
+```
+
+【截图：并行计划的 Ctrl+O 展开图；风格：data-board；截图目标：前 4 个任务无依赖、第 5 个依赖前 4 个；关键词：DAG、并行批次、汇总任务】
+
+【截图：并行执行日志；风格：data-board；截图目标：出现“本轮并行执行 4 个任务”，整轮结束后按顺序打印结果，再执行汇总任务；关键词：本轮并行执行、按序打印、汇总】
+
+审阅时按 I，输入“汇总时用表格输出”，看模型怎么在原计划上修改。
+
+【截图：按 I 补充要求后修改的计划；风格：data-board；截图目标：前 4 个任务保持不变，只有汇总任务的描述变了；关键词：补充要求、修改计划、再次审阅】
+
+最后按 Shift+Tab 切到 plan 模式，直接输入一条普通任务，不用再敲 `/plan`。
+
+【截图：plan 模式下直接输入任务；风格：data-board；截图目标：状态栏显示 PLAN，普通输入直接进入规划；关键词：plan 模式、Shift+Tab、普通输入】
+
+## 简历怎么写
+
+### PaiCLI｜Java 终端 Coding Agent｜核心开发 第 2 期
+
+项目简介：在 ReAct Agent 的基础上实现 Plan-and-Execute 执行模式，由模型先生成带依赖关系的任务计划，用户审阅确认后按 DAG 分批并行执行，并支持计划修改、失败重规划与部分结果汇总，适用于步骤多、依赖明确的本地研发任务。
+
+技术栈：Java 17、Maven、Jackson、JLine3、ExecutorService、DAG 拓扑排序、Plan-and-Execute
+
+核心职责：
+
+- 设计 Task 与 Execution Plan 模型，用双向依赖记录上下游关系，实现 PENDING、RUNNING、COMPLETED、FAILED、SKIPPED 五种任务状态流转；基于 DFS 后序遍历完成拓扑排序与环检测。
+
+- 实现 Planner 规划器，规划请求不暴露工具，提示词约束简单任务 1-3 步、复杂任务 5-10 步，并要求写同一文件的任务串行；对模型输出做严格校验，尾随文字、重复键、重复 id、未声明依赖和循环依赖一律拒绝执行，不静默修补计划。
+
+- 实现按轮 DAG 调度器，每轮筛选依赖已完成的任务，用线程池最多 4 路并行执行；并行任务输出先写入独立缓冲区，整轮结束后按拓扑顺序打印，审批提示直接输出不受缓冲影响。
+
+- 设计任务间上下文传递机制，下游任务只接收直接依赖的完整结果，每个任务使用独立的工具策略副本，web_search 得到的可信 URL 只沿 DAG 声明的依赖向下游传递，防止跨分支的提示词注入扩大联网权限。
+
+- 实现失败处理与重规划，完成度低于 50% 时基于已完成进度重新规划且默认最多 2 次，完成度过半时跳过失败任务的传递下游并继续执行；用户取消时不触发重规划，汇总保留已完成结果与失败、跳过原因。
+
+- 集成 JLine3 实现计划审阅交互，支持回车执行、Ctrl+O 展开任务图、ESC 取消和补充要求后在原计划基础上修改，并接入 Shift+Tab 会话模式，plan 模式下普通输入自动走计划执行。

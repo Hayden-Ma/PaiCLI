@@ -423,11 +423,11 @@ public class Main {
                 if (promptInput.canceled()) {
                     if (nextTaskUsePlanMode) {
                         nextTaskUsePlanMode = false;
-                        ui.println("↩️ 已取消待执行的 Plan-and-Execute，回到默认 ReAct。\n");
+                        ui.println("↩️ 已取消待执行的 Plan-and-Execute，" + returnModeHint(sessionModes, "回到") + "。\n");
                     }
                     if (nextTaskUseTeamMode) {
                         nextTaskUseTeamMode = false;
-                        ui.println("↩️ 已取消待执行的 Multi-Agent，回到默认 ReAct。\n");
+                        ui.println("↩️ 已取消待执行的 Multi-Agent，" + returnModeHint(sessionModes, "回到") + "。\n");
                     }
                     continue;
                 }
@@ -614,8 +614,14 @@ public class Main {
                     }
                     case SWITCH_PLAN -> {
                         if (command.payload() == null || command.payload().isEmpty()) {
+                            if (sessionModes.planMode()) {
+                                ui.println("📋 当前已是 plan 模式，每条任务都会先规划再执行；Shift+Tab 或 /mode 可切换。\n");
+                                continue;
+                            }
                             nextTaskUsePlanMode = true;
-                            ui.println("📋 下一条任务将使用 Plan-and-Execute 模式，输入任务前按 ESC 可取消，执行完成后自动回到默认 ReAct。\n");
+                            nextTaskUseTeamMode = false;
+                            ui.println("📋 下一条任务将使用 Plan-and-Execute 模式，输入任务前按 ESC 可取消，"
+                                    + returnModeHint(sessionModes, "执行完成后回到") + "。\n");
                             continue;
                         }
                         input = command.payload();
@@ -623,7 +629,9 @@ public class Main {
                     case SWITCH_TEAM -> {
                         if (command.payload() == null || command.payload().isEmpty()) {
                             nextTaskUseTeamMode = true;
-                            ui.println("👥 下一条任务将使用 Multi-Agent 协作模式（规划者 + 执行者 + 检查者），输入任务前按 ESC 可取消，执行完成后自动回到默认 ReAct。\n");
+                            nextTaskUsePlanMode = false;
+                            ui.println("👥 下一条任务将使用 Multi-Agent 协作模式（规划者 + 执行者 + 检查者），输入任务前按 ESC 可取消，"
+                                    + returnModeHint(sessionModes, "执行完成后回到") + "。\n");
                             continue;
                         }
                         input = command.payload();
@@ -952,13 +960,9 @@ public class Main {
                 hitlToolRegistry.startAutoReviewTurn();
                 Callable<String> runTask;
                 String snapshotMode;
-                boolean teamRequested = nextTaskUseTeamMode
-                        || command.type() == CliCommandParser.CommandType.SWITCH_TEAM;
-                // 显式 /team 优先；plan 模式只接管普通输入
-                boolean planRequested = nextTaskUsePlanMode
-                        || command.type() == CliCommandParser.CommandType.SWITCH_PLAN
-                        || (sessionModes.planMode() && !teamRequested);
-                if (planRequested) {
+                String runMode = resolveRunMode(command.type(), nextTaskUsePlanMode, nextTaskUseTeamMode,
+                        sessionModes.planMode());
+                if ("plan".equals(runMode)) {
                     snapshotMode = "plan";
                     LlmClient activeClient = llmClient;
                     runTask = () -> {
@@ -967,7 +971,7 @@ public class Main {
                         planAgent.setSkillRegistry(skillRegistry);
                         return planAgent.run(taskInput, submittedInput);
                     };
-                } else if (teamRequested) {
+                } else if ("team".equals(runMode)) {
                     snapshotMode = "team";
                     LlmClient activeClient = llmClient;
                     runTask = () -> {
@@ -1879,6 +1883,33 @@ public class Main {
 
     /** Shift+Tab 在终端里发送 ESC [ Z，绑定成循环切换会话模式。 */
     static final String SHIFT_TAB = "\033[Z";
+
+    /**
+     * 决定这条输入走哪条执行路径：本条输入里显式写的 /plan、/team 优先，
+     * 其次是上一条 /plan、/team 留下的一次性标记，最后才是 plan 会话模式。
+     */
+    static String resolveRunMode(CliCommandParser.CommandType commandType,
+                                 boolean pendingPlan,
+                                 boolean pendingTeam,
+                                 boolean planSessionMode) {
+        if (commandType == CliCommandParser.CommandType.SWITCH_PLAN) {
+            return "plan";
+        }
+        if (commandType == CliCommandParser.CommandType.SWITCH_TEAM) {
+            return "team";
+        }
+        if (pendingPlan) {
+            return "plan";
+        }
+        if (pendingTeam) {
+            return "team";
+        }
+        return planSessionMode ? "plan" : "react";
+    }
+
+    private static String returnModeHint(SessionModeController sessionModes, String verb) {
+        return verb + (sessionModes.planMode() ? " plan 模式" : "默认 ReAct");
+    }
 
     static void bindSessionModeCycle(LineReader lineReader, Runnable onCycle) {
         if (lineReader == null) {

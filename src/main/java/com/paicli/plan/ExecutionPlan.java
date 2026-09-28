@@ -12,8 +12,6 @@ public class ExecutionPlan {
     private final List<String> executionOrder;    // 执行顺序（拓扑排序后）
     private PlanStatus status;
     private String summary;                       // 计划摘要
-    private long startTime;
-    private long endTime;
 
     public enum PlanStatus {
         CREATED,      // 刚创建
@@ -36,11 +34,8 @@ public class ExecutionPlan {
     public String getGoal() { return goal; }
     public PlanStatus getStatus() { return status; }
     public String getSummary() { return summary; }
-    public long getStartTime() { return startTime; }
-    public long getEndTime() { return endTime; }
 
     public void setSummary(String summary) { this.summary = summary; }
-    public void setStatus(PlanStatus status) { this.status = status; }
 
     /**
      * 添加任务
@@ -68,15 +63,6 @@ public class ExecutionPlan {
      */
     public Collection<Task> getAllTasks() {
         return tasks.values();
-    }
-
-    /**
-     * 获取根任务（没有依赖的任务）
-     */
-    public List<Task> getRootTasks() {
-        return tasks.values().stream()
-                .filter(t -> t.getDependencies().isEmpty())
-                .toList();
     }
 
     /**
@@ -218,7 +204,6 @@ public class ExecutionPlan {
      */
     public void markStarted() {
         this.status = PlanStatus.RUNNING;
-        this.startTime = System.currentTimeMillis();
     }
 
     /**
@@ -226,7 +211,6 @@ public class ExecutionPlan {
      */
     public void markCompleted() {
         this.status = PlanStatus.COMPLETED;
-        this.endTime = System.currentTimeMillis();
     }
 
     /**
@@ -234,16 +218,13 @@ public class ExecutionPlan {
      */
     public void markFailed() {
         this.status = PlanStatus.FAILED;
-        this.endTime = System.currentTimeMillis();
     }
 
     /**
-     * 获取总耗时
+     * 标记取消：用户按 ESC 中断执行
      */
-    public long getDuration() {
-        if (startTime == 0) return 0;
-        if (endTime == 0) return System.currentTimeMillis() - startTime;
-        return endTime - startTime;
+    public void markCancelled() {
+        this.status = PlanStatus.CANCELLED;
     }
 
     /**

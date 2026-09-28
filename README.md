@@ -687,26 +687,23 @@ mvn clean compile exec:java -Dexec.mainClass="com.paicli.cli.Main"
 
 ### 4. 如何进入 Plan 模式
 
-当前默认模式是 `ReAct`。进入 `Plan-and-Execute` 的方式只有 `/plan`：
+当前默认模式是 `ReAct`。进入 `Plan-and-Execute` 有三种方式：
 
-1. 输入 `/plan`
-2. 下一条任务会用计划模式执行
-3. 执行完成后自动回到默认 `ReAct`
-
-如果想一条命令切模式并执行任务，可以直接输入：
+1. 输入 `/plan`，只有下一条任务用计划模式执行，执行完回到原来的模式
+2. 输入 `/plan <任务>`，这一条任务直接用计划模式执行：
 
 ```text
 /plan 创建一个 demo 项目，然后读取 pom.xml，最后验证项目结构
 ```
 
-这条命令执行完成后，会自动回到默认的 `ReAct` 模式。
+3. 按 Shift+Tab 切到 plan 模式（或输入 `/mode plan`），之后每条普通输入都先规划再执行，直到切走；这期间显式输入 `/team` 仍走 Multi-Agent
 
 计划生成后，CLI 会先停下来等待确认：
 
 - 按 `Enter`：按当前计划执行
 - 按 `Ctrl+O`：展开完整计划
 - 按 `ESC`：折叠完整计划或取消本次计划
-- 按 `I`：输入补充要求并重新规划
+- 按 `I`：输入补充要求，模型在当前计划基础上修改，改完再审一次
 - 按方向键不会触发取消；只有单独按下 `ESC` 才会取消待执行 plan
 
 ## 使用示例
@@ -759,7 +756,7 @@ mvn clean compile exec:java -Dexec.mainClass="com.paicli.cli.Main"
 I
 补充> 请在执行前先检查 README
 
-📝 已收到补充要求，正在重新规划...
+📝 已收到补充要求，正在修改计划...
 
 🚀 开始执行计划...
 ```

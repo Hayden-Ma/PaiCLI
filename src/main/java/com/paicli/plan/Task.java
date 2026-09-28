@@ -14,11 +14,8 @@ public class Task {
     private volatile String error;
     private final List<String> dependencies;  // 依赖的其他任务ID
     private final List<String> dependents;    // 依赖此任务的其他任务ID
-    private volatile long startTime;
-    private volatile long endTime;
 
     public enum TaskType {
-        PLANNING,      // 规划任务
         FILE_READ,     // 读取文件
         FILE_WRITE,    // 写入文件
         COMMAND,       // 执行命令
@@ -57,13 +54,6 @@ public class Task {
     public String getError() { return error; }
     public List<String> getDependencies() { return new ArrayList<>(dependencies); }
     public List<String> getDependents() { return new ArrayList<>(dependents); }
-    public long getStartTime() { return startTime; }
-    public long getEndTime() { return endTime; }
-
-    // Setters
-    public void setStatus(TaskStatus status) { this.status = status; }
-    public void setResult(String result) { this.result = result; }
-    public void setError(String error) { this.error = error; }
 
     public void addDependent(String taskId) {
         if (!dependents.contains(taskId)) {
@@ -79,33 +69,20 @@ public class Task {
 
     public void markStarted() {
         this.status = TaskStatus.RUNNING;
-        this.startTime = System.currentTimeMillis();
     }
 
     public void markCompleted(String result) {
         this.status = TaskStatus.COMPLETED;
         this.result = result;
-        this.endTime = System.currentTimeMillis();
     }
 
     public void markFailed(String error) {
         this.status = TaskStatus.FAILED;
         this.error = error;
-        this.endTime = System.currentTimeMillis();
     }
 
     public void markSkipped() {
         this.status = TaskStatus.SKIPPED;
-        this.endTime = System.currentTimeMillis();
-    }
-
-    /**
-     * 获取执行耗时（毫秒）
-     */
-    public long getDuration() {
-        if (startTime == 0) return 0;
-        if (endTime == 0) return System.currentTimeMillis() - startTime;
-        return endTime - startTime;
     }
 
     /**

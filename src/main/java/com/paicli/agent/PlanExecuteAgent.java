@@ -51,6 +51,7 @@ public class PlanExecuteAgent {
     static final String MAX_REPLANS_PROPERTY = "paicli.plan.max.replans";
     static final String MAX_REPLANS_ENV = "PAICLI_PLAN_MAX_REPLANS";
     static final int DEFAULT_MAX_REPLANS = 2;
+    private static final String CANCELLED_PLAN_MESSAGE = "⏹️ 已取消当前计划执行。";
     private record PlanRunOutcome(String result, boolean persistAssistantMessage,
                                   boolean autoExtractEligible) {
         static PlanRunOutcome executed(String result) {
@@ -332,7 +333,7 @@ public class PlanExecuteAgent {
             if (CancellationContext.isCancelled()) {
                 conversationLedger.appendEvent(
                         "run_cancelled", "plan", "plan-agent", "before_planning", Map.of());
-                return "⏹️ 已取消当前计划执行。";
+                return CANCELLED_PLAN_MESSAGE;
             }
             PlanRunOutcome outcome = runWithPlan(userInput, streamState, explicitTaskEnvelope);
             if (outcome.persistAssistantMessage() && outcome.result() != null && !outcome.result().isBlank()) {
@@ -394,11 +395,10 @@ public class PlanExecuteAgent {
                 return PlanRunOutcome.executed(executePlan(plan, streamState, explicitTaskEnvelope, replansUsed));
             }
 
-            out.println("📝 已收到补充要求，正在重新规划...\n");
-            String revisedGoal = plan.getGoal() + "\n补充要求：" + feedback;
+            out.println("📝 已收到补充要求，正在修改计划...\n");
             submittedPolicyInput = submittedPolicyInput + "\n补充要求：" + feedback;
             turnToolPolicy = policyFor(submittedPolicyInput, explicitTaskEnvelope);
-            plan = planner.createPlan(revisedGoal);
+            plan = planner.revisePlan(plan, feedback);
         }
     }
 
@@ -438,7 +438,8 @@ public class PlanExecuteAgent {
 
         while (!stopAfterBatch) {
             if (CancellationContext.isCancelled()) {
-                return "⏹️ 已取消当前计划执行。";
+                plan.markCancelled();
+                return CANCELLED_PLAN_MESSAGE;
             }
             List<Task> executableTasks = getExecutableTasksInOrder(plan);
             if (executableTasks.isEmpty()) {
@@ -447,6 +448,11 @@ public class PlanExecuteAgent {
 
             List<TaskExecutionResult> batchResults = executeTaskBatch(
                     plan, executableTasks, streamState, taskTrustedUrls, observation);
+            // 取消会打断本轮正在执行的任务，这些中断不是任务本身失败，不能再触发重新规划
+            if (CancellationContext.isCancelled()) {
+                plan.markCancelled();
+                return CANCELLED_PLAN_MESSAGE;
+            }
             for (TaskExecutionResult batchResult : batchResults) {
                 Task task = batchResult.task();
 
@@ -465,18 +471,18 @@ public class PlanExecuteAgent {
                     continue;
                 }
 
-                Exception error = batchResult.error();
-                task.markFailed(error.getMessage());
-                log.warn("Task failed: {} error={}", task.getId(), error.getMessage());
-                out.println("❌ 失败 [" + task.getId() + "]: " + error.getMessage() + "\n");
+                String errorMessage = failureMessage(batchResult.error());
+                task.markFailed(errorMessage);
+                log.warn("Task failed: {} error={}", task.getId(), errorMessage);
+                out.println("❌ 失败 [" + task.getId() + "]: " + errorMessage + "\n");
 
-                failureLines.add("任务 " + task.getId() + " 失败: " + error.getMessage());
+                failureLines.add("任务 " + task.getId() + " 失败: " + errorMessage);
 
                 if (!stopAfterBatch && plan.getProgress() < 0.5) {
                     int maxReplans = maxReplans();
                     if (replansUsed < maxReplans) {
                         out.println("🔄 尝试重新规划（第 " + (replansUsed + 1) + "/" + maxReplans + " 次）...\n");
-                        ExecutionPlan replanned = planner.replan(plan, error.getMessage());
+                        ExecutionPlan replanned = planner.replan(plan, errorMessage);
                         return reviewAndExecutePlan(replanned, streamState, explicitTaskEnvelope, replansUsed + 1)
                                 .result();
                     }
@@ -1247,6 +1253,15 @@ public class PlanExecuteAgent {
         }
         summary.append(String.join("\n", failureLines));
         return summary.toString();
+    }
+
+    /** 异常消息可能为空（比如线程中断），失败原因至少要写出异常类型。 */
+    static String failureMessage(Exception error) {
+        if (error == null) {
+            return "未知错误";
+        }
+        String message = error.getMessage();
+        return message == null || message.isBlank() ? error.getClass().getSimpleName() : message;
     }
 
     static int maxReplans() {

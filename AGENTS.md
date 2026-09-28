@@ -104,9 +104,9 @@ src/main/java/com/paicli/
 
 ### Plan 与 Team
 
-- 审阅交互：`Enter` 执行 / `Ctrl+O` 展开 / `ESC` 取消 / `I` 补充重规划；方向键不能误判为 ESC；改动要连 raw mode 和行模式回退一起验证
+- 审阅交互：`Enter` 执行 / `Ctrl+O` 展开 / `ESC` 取消 / `I` 补充要求后在当前计划基础上修改（`Planner.revisePlan`）；方向键不能误判为 ESC；改动要连 raw mode 和行模式回退一起验证
 - Planner 计划严格校验：非空 tasks、唯一非空字符串 id、依赖精确引用已声明 id、无环；不合法直接失败，不静默删边或猜测别名。`parsePlan` 的围栏正则与 `e1_replay.py` 逐字对齐，改动前同步重放器
-- 失败且完成度 < 50% 时重规划，最多 `PAICLI_PLAN_MAX_REPLANS`（默认 2）次；到上限立即停止启动新任务、其余标 SKIPPED（与 e1_replay 的“触发点后无新工作”一致）；完成度 ≥ 50% 时失败任务的传递下游标 SKIPPED；汇总先列已完成结果，再列失败和跳过原因
+- 用户取消打断的任务不算失败，不触发重规划；失败且完成度 < 50% 时重规划，最多 `PAICLI_PLAN_MAX_REPLANS`（默认 2）次；到上限立即停止启动新任务、其余标 SKIPPED（与 e1_replay 的“触发点后无新工作”一致）；完成度 ≥ 50% 时失败任务的传递下游标 SKIPPED；汇总先列已完成结果，再列失败和跳过原因
 - Team planner 由 `TeamPlanParser` 按同一套规则校验；Reviewer 只认 JSON 布尔 `approved: true`，不要恢复关键词兜底
 - planner / reviewer 请求不暴露工具是评测审计约束，引入 `submit_*` 工具或 `response_format` 前先改审计合同
 

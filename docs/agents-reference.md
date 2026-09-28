@@ -86,7 +86,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - 主入口：`Agent.java`
 - 退出条件由 LLM 自决（不返回 tool_calls 即结束）
-- `AgentBudget` 默认不限制 ReAct、Plan 单任务和 SubAgent 的迭代轮数；显式 token / 轮数预算或连续 3 轮相同调用命中后，禁用工具并做一次部分结果收尾
+- `AgentBudget` 默认不限制 ReAct、Plan 单任务和 SubAgent 的迭代轮数；显式 token / 轮数预算或停滞窗口（默认连续 5 轮相同调用）命中后，禁用工具并做一次部分结果收尾；同一动作或同类错误连续 3 步时 `RunawayGuard` 先注入一次提醒
 - 流式输出 reasoning_content + content；inline ReAct 用固定高度 live thinking 区动态预览 reasoning，同一次输入只把完整 reasoning 引用块落到 transcript 一次；live 区只允许清理自己占用的行，避免覆盖旧输出
 - inline 流式回答用低调 `▪` 标记起始，不再输出强标题；plain / 非流式兜底仍可使用传统 reasoning + answer 文本
 - `TerminalMarkdownRenderer` 渲染 Markdown 表格时按终端列宽分配列宽，长内容在单元格内部换行；CJK 字符按显示宽度计算，避免表格行被终端自动折断后错位
@@ -341,6 +341,11 @@ system / user / assistant / tool_call / tool_result 原始消息的 append-only 
 
 ### PlanExecuteAgent.java
 规划后执行 / 计划审阅 / DAG 任务执行 / 并行批次 / 失败重规划
+
+- 审阅时按 I 的补充要求走 `Planner.revisePlan`：把当前计划 JSON 和补充要求一起交给模型修改，仍经 `parsePlan` 严格校验；补充不计入重规划次数。评测不经过审阅，不影响 E1 规划请求的重放
+- 规划回复按严格 JSON 解析（`FAIL_ON_TRAILING_TOKENS` + `STRICT_DUPLICATE_DETECTION`），与 `e1_replay.py` 的 `json.loads` 一致；围栏正则不变
+- 用户取消会打断本轮任务，本轮结果回来后先检查取消状态，直接返回“已取消”并把计划标为 CANCELLED，不把中断当失败、不触发重规划
+- 已知限制（改动都会影响 `e1_replay.py` 的重放合同，需授权）：按轮调度而不是就绪即派发；重规划上下文只带已完成任务的 id 和描述；依赖结果原样拼接不截断；触发重规划时同轮排在失败任务之后的成功任务不会进入重规划上下文
 
 可选 `setExecutionObserver(PlanExecutionObserver)` 默认关闭，不自动写入文件或长期记忆。
 每次执行（包括重规划）有独立 executionId，不依赖毫秒 planId 的唯一性。事件包含：
