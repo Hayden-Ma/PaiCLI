@@ -46,12 +46,16 @@ public final class InlineRenderer implements Renderer {
     private volatile boolean started;
     private volatile boolean closed;
 
+    private static final String CODE_HEADER = "┌─ code";
+    private static final String ANSWER_MARKER_GLYPH = "▪";
+
     // —— 代码块折叠状态机字段（仅供 createTranscriptStream 内部使用）——
     private final StringBuilder lineBuffer = new StringBuilder();
     private final List<String> codeBodyLines = new ArrayList<>();
     private boolean inCodeBlock;
     private String codeLanguage = "";
     private String codeHeaderLine;
+    private String codeHeaderPrefix = "";
     private int codeStartTranscriptIndex = -1;
     private boolean codeHeaderEmitted;
 
@@ -84,6 +88,7 @@ public final class InlineRenderer implements Renderer {
             codeBodyLines.clear();
             codeLanguage = "";
             codeHeaderLine = null;
+            codeHeaderPrefix = "";
             codeStartTranscriptIndex = -1;
             codeHeaderEmitted = false;
         }
@@ -407,10 +412,12 @@ public final class InlineRenderer implements Renderer {
 
     private void processStreamedLine(String line) {
         String stripped = stripAnsi(line).trim();
+        String headerPrefix = inCodeBlock ? null : codeHeaderPrefixOf(stripped);
 
-        if (!inCodeBlock && stripped.startsWith("┌─ code")) {
+        if (headerPrefix != null) {
             // 进入代码块：写出 header，记录 transcript 位置，body 之后会被吞掉
             inCodeBlock = true;
+            codeHeaderPrefix = headerPrefix;
             int colon = stripped.indexOf(':');
             codeLanguage = colon >= 0 ? stripped.substring(colon + 1).trim() : "";
             codeHeaderLine = stripTrailingNewline(line);
@@ -438,7 +445,7 @@ public final class InlineRenderer implements Renderer {
                 }
 
                 String label = codeLanguage.isEmpty() ? "code" : "code: " + codeLanguage;
-                String collapsedHeader = AnsiStyle.subtle(
+                String collapsedHeader = codeHeaderPrefix + AnsiStyle.subtle(
                         "⏵ " + label + " (" + bodyLineCount + " 行, ctrl+o to expand)");
 
                 List<String> expandedLines = new ArrayList<>();
@@ -471,6 +478,7 @@ public final class InlineRenderer implements Renderer {
 
                 codeBodyLines.clear();
                 codeHeaderLine = null;
+                codeHeaderPrefix = "";
                 codeStartTranscriptIndex = -1;
                 codeHeaderEmitted = false;
                 return;
@@ -484,6 +492,22 @@ public final class InlineRenderer implements Renderer {
         emit(line);
         transcript.add(new TextEntry(line));
         renderedRows += estimateRows(line);
+    }
+
+    /**
+     * 判断去掉 ANSI 后的行是否是代码块 header，返回折叠头前需要保留的前缀；不是 header 返回 null。
+     * 回答首行由 Agent 先打印 {@code ▪ } 标记且不换行，所以首个代码块的 header 会和标记同行，
+     * 折叠后要把标记补回折叠头前面。
+     */
+    private static String codeHeaderPrefixOf(String stripped) {
+        if (stripped.startsWith(CODE_HEADER)) {
+            return "";
+        }
+        if (stripped.startsWith(ANSWER_MARKER_GLYPH)
+                && stripped.substring(ANSWER_MARKER_GLYPH.length()).stripLeading().startsWith(CODE_HEADER)) {
+            return AnsiStyle.answerMarker() + " ";
+        }
+        return null;
     }
 
     private LineReader activePrintAboveReader() {

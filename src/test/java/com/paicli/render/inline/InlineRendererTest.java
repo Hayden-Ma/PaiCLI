@@ -4,6 +4,7 @@ import com.paicli.hitl.ApprovalRequest;
 import com.paicli.hitl.ApprovalResult;
 import com.paicli.llm.LlmClient;
 import com.paicli.render.StatusInfo;
+import com.paicli.util.AnsiStyle;
 import org.jline.reader.LineReader;
 import org.jline.terminal.Size;
 import org.jline.terminal.Terminal;
@@ -407,6 +408,46 @@ class InlineRendererTest {
             // body 暂存在 codeBodyLines，结束时只替换 header，不触碰底部 dock。
             assertFalse(emitted.contains("public class Main {"),
                     "代码体应被折叠后不再可见: " + emitted);
+        } finally {
+            renderer.close();
+        }
+    }
+
+    @Test
+    void firstCodeBlockSharingLineWithAnswerMarkerStillFolds() {
+        Terminal terminal = Mockito.mock(Terminal.class);
+        Mockito.when(terminal.getType()).thenReturn("xterm-256color");
+        Mockito.when(terminal.getSize()).thenReturn(new Size(120, 40));
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        InlineRenderer renderer = new InlineRenderer(terminal,
+                new PrintStream(sink, true, StandardCharsets.UTF_8));
+        try {
+            renderer.beginTurn();
+            // Agent 先打印不换行的回答标记，TerminalMarkdownRenderer 再输出带样式的代码块 header
+            renderer.stream().print(AnsiStyle.answerMarker() + " ");
+            renderer.stream().println(AnsiStyle.codeLabel("┌─ code: java"));
+            renderer.stream().println("    public class HelloWorld {");
+            renderer.stream().println("    }");
+            renderer.stream().println(AnsiStyle.codeLabel("└─ end"));
+            renderer.stream().println();
+            renderer.stream().println(AnsiStyle.codeLabel("┌─ code: text"));
+            renderer.stream().println("    Hello, World!");
+            renderer.stream().println(AnsiStyle.codeLabel("└─ end"));
+
+            String emitted = sink.toString(StandardCharsets.UTF_8);
+            String plain = emitted.replaceAll("\u001B\\[[0-9;?]*[A-Za-z]", "");
+            assertTrue(plain.contains("▪ ⏵ code: java (2 行, ctrl+o to expand)"),
+                    "首个代码块应折叠且保留回答标记: " + plain);
+            assertTrue(plain.contains("⏵ code: text (1 行, ctrl+o to expand)"), plain);
+            assertFalse(plain.contains("public class HelloWorld"), "代码体应被折叠: " + plain);
+            assertFalse(plain.contains("└─ end"), "footer 不应原样输出: " + plain);
+
+            sink.reset();
+            assertTrue(renderer.toggleLastBlock());
+            assertTrue(renderer.toggleLastBlock());
+            String redrawn = sink.toString(StandardCharsets.UTF_8)
+                    .replaceAll("\u001B\\[[0-9;?]*[A-Za-z]", "");
+            assertTrue(redrawn.contains("▪ ⏵ code: java"), "重绘后折叠头仍带回答标记: " + redrawn);
         } finally {
             renderer.close();
         }
