@@ -7,6 +7,7 @@ import com.paicli.render.PlainRenderer;
 import com.paicli.render.Renderer;
 import com.paicli.render.StatusInfo;
 import com.paicli.util.AnsiStyle;
+import com.paicli.util.TerminalInputLock;
 import org.jline.reader.LineReader;
 import org.jline.reader.Widget;
 import org.jline.terminal.Terminal;
@@ -317,7 +318,8 @@ public final class InlineRenderer implements Renderer {
         if (terminal == null) {
             return fallback.promptApproval(request);
         }
-        return new InlineApprovalPrompter(out, terminal).prompt(request);
+        // 审批在任务线程里读终端，期间主线程的 ESC 监听必须让出输入，否则按键会被抢走
+        return TerminalInputLock.exclusive(() -> new InlineApprovalPrompter(out, terminal).prompt(request));
     }
 
     @Override

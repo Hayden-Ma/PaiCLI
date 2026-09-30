@@ -2,6 +2,7 @@ package com.paicli.render.inline;
 
 import com.paicli.render.StatusInfo;
 import com.paicli.util.AnsiStyle;
+import org.jline.terminal.Size;
 import org.jline.terminal.Terminal;
 import org.jline.utils.InfoCmp;
 import org.jline.utils.AttributedString;
@@ -66,6 +67,7 @@ public final class BottomStatusBar implements AutoCloseable {
     private final PrintStream out;
     private volatile StatusInfo current;
     private Status status;
+    private Terminal.SignalHandler previousWinchHandler;
     private volatile boolean started;
     private volatile boolean closed;
 
@@ -88,9 +90,21 @@ public final class BottomStatusBar implements AutoCloseable {
         status = Status.getStatus(terminal);
         if (status != null) {
             status.setBorder(true);
+            // LineReader 只在 readLine 期间处理窗口缩放；任务运行、计划审阅时缩放也要重建底部保留区
+            previousWinchHandler = terminal.handle(Terminal.Signal.WINCH, this::onWindowResize);
         }
         started = true;
         renderDock();
+    }
+
+    private void onWindowResize(Terminal.Signal signal) {
+        renderDock();
+        Terminal.SignalHandler previous = previousWinchHandler;
+        if (previous != null
+                && previous != Terminal.SignalHandler.SIG_DFL
+                && previous != Terminal.SignalHandler.SIG_IGN) {
+            previous.handle(signal);
+        }
     }
 
     public void update(StatusInfo info) {
@@ -125,9 +139,12 @@ public final class BottomStatusBar implements AutoCloseable {
         if (info == null || dock == null || closed || !started) {
             return;
         }
-        int cols = TerminalCapabilities.safeSize(terminal).getColumns();
+        Size size = TerminalCapabilities.safeSize(terminal);
         synchronized (out) {
-            dock.update(formatStatusLines(info, cols));
+            // Status 缓存的是创建时的终端尺寸，缩放后不同步就会按旧行数保留底部区域，
+            // 而输入行按新行数定位，光标会落进 dock，正文从此叠在最后一行。尺寸没变时这是空操作。
+            dock.resize(size);
+            dock.update(formatStatusLines(info, size.getColumns()));
         }
     }
 
@@ -155,6 +172,8 @@ public final class BottomStatusBar implements AutoCloseable {
         Status dock = status;
         status = null;
         if (dock != null) {
+            terminal.handle(Terminal.Signal.WINCH,
+                    previousWinchHandler == null ? Terminal.SignalHandler.SIG_DFL : previousWinchHandler);
             dock.close();
         }
     }

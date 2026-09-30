@@ -138,6 +138,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - auto = `/hitl default`；plan = `/hitl default` + 普通输入走 Plan-and-Execute（显式 `/team` 与待执行 Team 任务优先）；ask = `/hitl on`
 - 当前模式由审批档位和 plan 开关推出，`/hitl` 改档位后显示会跟着变；Agent 通过 `setSessionModeSupplier` 在运行中也刷新状态栏模式
 - 计划审阅与任务运行中的原始按键读取把 `ESC [ Z` 归为控制序列，不会误判为 ESC 取消；运行中按 Shift+Tab 不切换模式
+- 任务运行期间主线程轮询终端监听 ESC；计划审阅、inline 工具审批等在任务线程里读终端的交互必须包在 `TerminalInputLock.exclusive(...)` 里，ESC 监听拿不到锁就跳过本轮，否则两边抢按键（I 没反应、补充要求丢字、回车被吞）
+- `BottomStatusBar` 每次重绘前用当前终端尺寸 `Status.resize`，并在非 readLine 期间自己处理 WINCH；JLine 只在 readLine 期间同步 Status 尺寸，任务运行中缩放窗口会让 dock 按旧行数保留、输入行按新行数定位，光标落进 dock 后正文叠在最后一行
 - 没有底部状态栏（plain 渲染）时，切换后在提示符上方打印一行模式说明；Lanterna TUI 尚未接入
 
 ### HITL System
