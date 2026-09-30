@@ -64,14 +64,12 @@ public class Planner {
     }
 
     /**
-     * 为复杂任务创建执行计划
+     * 为任务创建执行计划。所有目标都交给模型规划，不在调用模型前用关键词判断任务是否“简单”：
+     * 关键词判断会把“删除 src 下所有文件”“执行 mvn test，修复失败的测试”这类输入误判成单步任务，
+     * 一步就能完成的目标由规划提示词约束模型只给出最短计划。
      */
     public ExecutionPlan createPlan(String goal) throws IOException {
         out.println("📋 正在规划任务: " + goal + "\n");
-
-        if (isSimpleGoal(goal)) {
-            return createMinimalPlan(goal);
-        }
         return requestPlan(goal, "请为以下任务制定执行计划：\n" + goal);
     }
 
@@ -277,81 +275,6 @@ public class Planner {
         context.append("\n请制定新的执行计划，避开之前的问题。");
 
         return createPlan(context.toString());
-    }
-
-    private boolean isSimpleGoal(String goal) {
-        if (goal == null) {
-            return false;
-        }
-
-        String normalized = goal.trim();
-        if (normalized.isEmpty()) {
-            return false;
-        }
-
-        boolean hasMultiStepCue = normalized.contains("然后")
-                || normalized.contains("并且")
-                || normalized.contains("并")
-                || normalized.contains("再")
-                || normalized.contains("最后")
-                || normalized.contains("同时")
-                || normalized.contains("先")
-                || normalized.contains("之后")
-                || normalized.contains("接着")
-                || normalized.contains("以及");
-        if (hasMultiStepCue) {
-            return false;
-        }
-
-        if (normalized.length() > 30) {
-            return false;
-        }
-
-        return normalized.contains("列出")
-                || normalized.contains("查看")
-                || normalized.contains("读取")
-                || normalized.contains("显示")
-                || normalized.contains("执行")
-                || normalized.contains("运行")
-                || normalized.contains("搜索")
-                || normalized.contains("当前目录")
-                || normalized.contains("文件");
-    }
-
-    private ExecutionPlan createMinimalPlan(String goal) {
-        ExecutionPlan plan = new ExecutionPlan(generatePlanId(), goal);
-        plan.setSummary(buildMinimalSummary(goal));
-        plan.addTask(new Task("task_1", goal.trim(), inferSimpleTaskType(goal)));
-        if (!plan.computeExecutionOrder()) {
-            throw new IllegalStateException("简单计划不应出现循环依赖");
-        }
-        return plan;
-    }
-
-    private String buildMinimalSummary(String goal) {
-        String normalized = goal == null ? "" : goal.trim();
-        if (normalized.isEmpty()) {
-            return "执行简单任务";
-        }
-        return "直接执行简单任务：" + normalized;
-    }
-
-    private Task.TaskType inferSimpleTaskType(String goal) {
-        String normalized = goal == null ? "" : goal.trim();
-        if (normalized.contains("读取") || normalized.contains("打开") || normalized.contains("查看")
-                && normalized.contains("文件")) {
-            return Task.TaskType.FILE_READ;
-        }
-        if (normalized.contains("写入") || normalized.contains("修改") || normalized.contains("创建文件")) {
-            return Task.TaskType.FILE_WRITE;
-        }
-        if (normalized.contains("分析") || normalized.contains("总结") || normalized.contains("解释")) {
-            return Task.TaskType.ANALYSIS;
-        }
-        if (normalized.contains("验证") || normalized.contains("检查")) {
-            return Task.TaskType.VERIFICATION;
-        }
-        return Task.TaskType.COMMAND;
     }
 
     private static final class PlanningStreamRenderer implements LlmClient.StreamListener {

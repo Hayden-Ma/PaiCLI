@@ -450,7 +450,7 @@ Multi-Agent 编排器 / 三角色管理 / 按依赖分配 / 审查重试
 可配置角色子代理 / 独立对话历史 / Worker 用工具、Planner/Reviewer 不用
 
 ### Planner.java
-LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖计算
+LLM 生成计划 JSON（所有目标都走模型规划，不在调用前按关键词判断简单任务）/ 重编号 task_1..N / 依赖计算
 
 任务 JSON 必须是对象，tasks 为非空数组，任务 id 为唯一非空字符串；dependencies 可省略，
 但若出现必须为数组，每个元素必须精确引用已声明的原始字符串 id。前向引用正常重编号；

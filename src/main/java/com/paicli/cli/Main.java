@@ -1536,7 +1536,7 @@ public class Main {
         out.println("   - 回车：按当前计划执行");
         out.println("   - Ctrl+O：展开完整计划");
         out.println("   - ESC：折叠或取消本次计划");
-        out.println("   - I：输入补充要求后重新规划\n");
+        out.println("   - I：输入补充要求，在当前计划上修改\n");
 
         while (true) {
             KeyReadResult keyReadResult = readSingleKeyFromTerminal(terminal);

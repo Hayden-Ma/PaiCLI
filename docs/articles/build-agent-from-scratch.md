@@ -1,5 +1,5 @@
 ---
-title: 手搓一个 Java 版 Claude Code，先把 Agent 循环拆明白：工具调用、结果回传和防打转
+title: 手搓一个 Java 版 Claude Code，先把 Agent 循环拆明白：工具调用、结果回传和重复检测
 shortTitle: Agent 循环与工具注册
 description: PaiCLI 第 1 期，按最新源码拆解 Java Agent 的 ReAct 循环：工具如何注册给模型、流式工具调用如何拼接、工具结果如何安全交回模型、edit_file 如何容错，以及重复调用时如何提醒和兜底。
 keywords: ReAct, Tool Call, Agent 循环, 工具注册, PaiCLI
@@ -354,7 +354,7 @@ static Result apply(String content, String oldText, String newText, boolean repl
 
 长上下文模型一次任务连着调用几十次工具很正常，写死 10 轮或者 50 轮，复杂一点的任务可能还没做完就被截断了。所以 PaiCLI 默认让模型自己决定什么时候停。
 
-不设上限，就得防着模型原地打转。同一个命令跑了一遍又一遍，同一个网页抓一次失败一次，PaiCLI 用两道关卡处理这种情况。
+不设上限，就得防着模型一直重复同样的操作。同一个命令跑了一遍又一遍，同一个网页抓一次失败一次，PaiCLI 用两道关卡处理这种情况。
 
 ### 先提醒
 

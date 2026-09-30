@@ -13,16 +13,35 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class PlannerTest {
 
     @Test
-    void createsMinimalPlanForSimpleGoalWithoutCallingLlm() throws Exception {
-        Planner planner = new Planner(new FailingGLMClient());
+    void sendsEvenOneStepGoalsToLlmAndAcceptsSingleTaskPlan() throws Exception {
+        StubGLMClient client = new StubGLMClient("""
+                {
+                  "summary": "列出当前目录",
+                  "tasks": [
+                    {"id": "list", "description": "列出当前目录的文件", "type": "COMMAND", "dependencies": []}
+                  ]
+                }
+                """);
+        Planner planner = new Planner(client);
 
         ExecutionPlan plan = planner.createPlan("列出当前目录的文件");
 
-        assertEquals("直接执行简单任务：列出当前目录的文件", plan.getSummary());
+        assertEquals(1, client.calls, "一步就能完成的目标也由模型规划，不在调用前按关键词短路");
         assertEquals(List.of("task_1"), plan.getExecutionOrder());
-        Task task = plan.getTask("task_1");
-        assertEquals(Task.TaskType.COMMAND, task.getType());
-        assertEquals("列出当前目录的文件", task.getDescription());
+        assertEquals("列出当前目录的文件", plan.getTask("task_1").getDescription());
+    }
+
+    @Test
+    void doesNotTreatShortKeywordGoalsAsSimpleWithoutPlanning() throws Exception {
+        for (String goal : List.of("删除 src 下所有文件", "执行 mvn test，修复失败的测试", "查看 README")) {
+            StubGLMClient client = new StubGLMClient("""
+                    {"summary": "s", "tasks": [{"id": "t", "description": "d", "type": "ANALYSIS", "dependencies": []}]}
+                    """);
+
+            new Planner(client).createPlan(goal);
+
+            assertEquals(1, client.calls, goal);
+        }
     }
 
     @Test
@@ -57,20 +76,10 @@ class PlannerTest {
         assertTrue(client.lastSystemPrompt.contains("计划前必须读取项目规则"));
     }
 
-    private static final class FailingGLMClient extends GLMClient {
-        private FailingGLMClient() {
-            super("test-key");
-        }
-
-        @Override
-        public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
-            throw new IOException("simple goal should not call llm");
-        }
-    }
-
     private static final class StubGLMClient extends GLMClient {
         private final String content;
         private String lastSystemPrompt = "";
+        private int calls;
 
         private StubGLMClient(String content) {
             super("test-key");
@@ -80,6 +89,7 @@ class PlannerTest {
         @Override
         public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) {
             this.lastSystemPrompt = messages.get(0).content();
+            calls++;
             return new ChatResponse("assistant", content, null, 100, 20);
         }
     }

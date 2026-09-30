@@ -40,7 +40,7 @@ class PlannerRevisionTest {
 
         ExecutionPlan revised = planner.revisePlan(current, "再读一下 pom.xml，用中文输出报告");
 
-        assertEquals(1, requests.size(), "补充要求一定走模型，不走简单任务短路");
+        assertEquals(1, requests.size(), "补充要求一定交给模型修改计划");
         String request = requests.get(0);
         assertTrue(request.startsWith("请为以下任务制定执行计划：\n列出当前目录\n补充要求：再读一下 pom.xml"), request);
         assertTrue(request.contains("\"description\" : \"列出当前目录\""), "要把当前计划交给模型修改: " + request);
