@@ -183,17 +183,21 @@ public class Main {
         }
     }
 
-    private record KeyReadResult(Integer key, boolean ignoredControlSequence) {
+    private record KeyReadResult(Integer key, boolean ignoredControlSequence, String pastedText) {
         static KeyReadResult keyPressed(int key) {
-            return new KeyReadResult(key, false);
+            return new KeyReadResult(key, false, null);
         }
 
         static KeyReadResult ignoredSequence() {
-            return new KeyReadResult(null, true);
+            return new KeyReadResult(null, true, null);
         }
 
         static KeyReadResult unavailable() {
-            return new KeyReadResult(null, false);
+            return new KeyReadResult(null, false, null);
+        }
+
+        static KeyReadResult pasted(String text) {
+            return new KeyReadResult(null, false, text);
         }
     }
 
@@ -1544,6 +1548,14 @@ public class Main {
                 continue;
             }
 
+            // 审阅时粘贴的内容按补充要求处理：预填进“补充>”，用户确认后回车再提交
+            if (keyReadResult.pastedText() != null) {
+                out.println();
+                String supplementInput = lineReader.readLine(
+                        "补充> ", null, (MaskingCallback) null, keyReadResult.pastedText()).trim();
+                return mapReviewDecision(PlanReviewInputParser.parse(supplementInput));
+            }
+
             Integer key = keyReadResult.key();
             if (key != null) {
                 // Enter
@@ -1617,12 +1629,19 @@ public class Main {
                     if (escapeSequenceType == EscapeSequenceType.STANDALONE_ESC) {
                         return KeyReadResult.keyPressed(27);
                     }
-                    if (escapeSequenceType == EscapeSequenceType.CONTROL_SEQUENCE
-                            || escapeSequenceType == EscapeSequenceType.BRACKETED_PASTE) {
+                    if (escapeSequenceType == EscapeSequenceType.BRACKETED_PASTE) {
+                        return pastedOrIgnored(readBracketedPaste(terminal, escapeSequence));
+                    }
+                    if (escapeSequenceType == EscapeSequenceType.CONTROL_SEQUENCE) {
                         return KeyReadResult.ignoredSequence();
                     }
                 }
 
+                // 人手按键之间远大于 20ms；紧跟着还有输入，说明是没开 bracketed paste 时的粘贴
+                String burst = readInputBurst(terminal, 20, 25, 500);
+                if (!burst.isEmpty()) {
+                    return pastedOrIgnored(Character.toString((char) key) + burst);
+                }
                 return KeyReadResult.keyPressed(key);
             } finally {
                 terminal.setAttributes(originalAttributes);
@@ -1674,16 +1693,7 @@ public class Main {
         }
 
         if (escapeSequenceType == EscapeSequenceType.BRACKETED_PASTE) {
-            String pastedText = sequence.substring(BRACKETED_PASTE_BEGIN.length());
-            while (!pastedText.contains(BRACKETED_PASTE_END)) {
-                String burst = readInputBurst(terminal, 30, 25, 500);
-                if (burst.isEmpty()) {
-                    break;
-                }
-                pastedText += burst;
-            }
-
-            return PrefillResult.seed(prepareSeedBuffer(stripBracketedPasteEndMarker(pastedText)));
+            return PrefillResult.seed(prepareSeedBuffer(readBracketedPaste(terminal, sequence)));
         }
 
         if (escapeSequenceType == EscapeSequenceType.CONTROL_SEQUENCE) {
@@ -1691,6 +1701,26 @@ public class Main {
         }
 
         return PrefillResult.canceledInput();
+    }
+
+    /** 读完一次 bracketed paste（可能跨多个输入突发），返回去掉首尾标记的原文。 */
+    private static String readBracketedPaste(Terminal terminal, String sequence)
+            throws IOException, InterruptedException {
+        String pastedText = sequence.substring(BRACKETED_PASTE_BEGIN.length());
+        while (!pastedText.contains(BRACKETED_PASTE_END)) {
+            String burst = readInputBurst(terminal, 30, 25, 500);
+            if (burst.isEmpty()) {
+                break;
+            }
+            pastedText += burst;
+        }
+        return stripBracketedPasteEndMarker(pastedText);
+    }
+
+    /** 粘贴内容去掉末尾换行后作为补充要求预填；只粘了空白就当没按键。 */
+    private static KeyReadResult pastedOrIgnored(String rawPaste) {
+        String text = prepareSeedBuffer(rawPaste).stripTrailing();
+        return text.isBlank() ? KeyReadResult.ignoredSequence() : KeyReadResult.pasted(text);
     }
 
     private static String readInputBurst(Terminal terminal, long firstWaitMs, long idleWaitMs, long maxWaitMs)
