@@ -12,7 +12,16 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class CommandExecutionObservationTest {
     @TempDir Path temp;
+    // execute_command 的 shell 按平台分支（见 AGENTS.md）：Windows 用 cmd.exe，其余平台用 bash
+    private static final boolean IS_WINDOWS =
+            System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
     private final List<CommandExecutionObserver.Event> events = new CopyOnWriteArrayList<>();
+
+    private static List<String> expectedShellArguments(String command) {
+        return IS_WINDOWS
+                ? List.of("cmd.exe", "/d", "/s", "/c", command)
+                : List.of("bash", "-c", command);
+    }
 
     private ToolRegistry registry(long timeout) {
         var registry = new ToolRegistry(timeout);
@@ -32,7 +41,7 @@ class CommandExecutionObservationTest {
         var start = events.get(0); var end = events.get(1);
         assertEquals(CommandExecutionObserver.Phase.STARTED, start.phase());
         assertEquals(CommandExecutionObserver.Outcome.NONE, start.outcome());
-        assertEquals(List.of("bash", "-c", "printf '中文 diagnostic'"), start.arguments());
+        assertEquals(expectedShellArguments("printf '中文 diagnostic'"), start.arguments());
         assertTrue(start.processId() > 0); assertEquals(temp.toString(), start.workingDirectory());
         assertEquals(start.invocationId(), end.invocationId()); assertEquals(start.processId(), end.processId());
         assertEquals(start.arguments(), end.arguments()); assertEquals(0, end.exitCode());
@@ -65,7 +74,10 @@ class CommandExecutionObservationTest {
     }
 
     @Test void timeoutHasItsOwnTerminalDisposition() throws Exception {
-        assertFalse(run(registry(1), "exec sleep 10").successful()); assertEquals(2, events.size());
+        // Windows 的 cmd.exe 不支持 exec 前缀；pause 是 cmd 内建阻塞命令，无子进程，
+        // 超时杀掉 cmd 后不会残留孤儿进程锁住临时目录
+        String hang = IS_WINDOWS ? "pause" : "exec sleep 10";
+        assertFalse(run(registry(1), hang).successful()); assertEquals(2, events.size());
         assertEquals(CommandExecutionObserver.Outcome.TIMED_OUT, events.get(1).outcome());
     }
 
@@ -117,7 +129,7 @@ class CommandExecutionObservationTest {
         registry.setCommandExecutionObserver(event -> { events.add(event); if (event.phase() == CommandExecutionObserver.Phase.STARTED) started.countDown(); });
         var result = new java.util.concurrent.atomic.AtomicReference<ToolOutput>();
         Thread thread = new Thread(() -> {
-            try { result.set(run(registry, "exec sleep 30")); }
+            try { result.set(run(registry, IS_WINDOWS ? "pause" : "exec sleep 30")); }
             catch (Exception error) { throw new AssertionError(error); }
         });
         thread.start(); assertTrue(started.await(5, TimeUnit.SECONDS)); thread.interrupt(); thread.join(5000);
