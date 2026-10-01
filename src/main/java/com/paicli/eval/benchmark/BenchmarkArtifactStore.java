@@ -215,7 +215,11 @@ public final class BenchmarkArtifactStore {
                         throw new IOException(
                                 "unsafe benchmark artifact directory during purge: " + directory);
                     }
-                    Files.setPosixFilePermissions(directory, DIRECTORY_PERMISSIONS);
+                    try {
+                        Files.setPosixFilePermissions(directory, DIRECTORY_PERMISSIONS);
+                    } catch (UnsupportedOperationException e) {
+                        // 非 POSIX 文件系统（如 Windows）：无权限位语义，跳过收紧
+                    }
                     return FileVisitResult.CONTINUE;
                 }
 
@@ -499,20 +503,34 @@ public final class BenchmarkArtifactStore {
     }
 
     private static void requireSafeParentDirectory(Path parent) throws IOException {
+        Set<PosixFilePermission> permissions;
         try {
-            Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(parent);
-            if (permissions.contains(PosixFilePermission.GROUP_WRITE)
-                    || permissions.contains(PosixFilePermission.OTHERS_WRITE)) {
-                throw new IOException(
-                        "benchmark output parent must not be writable by group or others: " + parent);
-            }
-            Path userHome = Path.of(System.getProperty("user.home")).toAbsolutePath().normalize();
-            if (Files.exists(userHome)
-                    && !Files.getOwner(parent).equals(Files.getOwner(userHome))) {
-                throw new IOException("benchmark output parent is not owned by the current user: " + parent);
-            }
+            permissions = Files.getPosixFilePermissions(parent);
         } catch (UnsupportedOperationException e) {
-            throw new IOException("cannot prove benchmark output parent ownership: " + parent, e);
+            // Windows / FAT 等非 POSIX 文件系统没有权限位语义：退化为 owner 与当前用户一致的弱校验，
+            // 群组/他人写位由平台 ACL 决定，无法按 POSIX 位判定。
+            requireOwnerMatchesUserHome(parent, "benchmark output parent is not owned by the current user: " + parent);
+            return;
+        }
+        if (permissions.contains(PosixFilePermission.GROUP_WRITE)
+                || permissions.contains(PosixFilePermission.OTHERS_WRITE)) {
+            throw new IOException(
+                    "benchmark output parent must not be writable by group or others: " + parent);
+        }
+        requireOwnerMatchesUserHome(parent, "benchmark output parent is not owned by the current user: " + parent);
+    }
+
+    private static void requireOwnerMatchesUserHome(Path directory, String message) throws IOException {
+        // 非 POSIX 平台（Windows）上 user.home 的 owner 常是 SYSTEM / Administrators，
+        // 不能作为 owner 基准；退化为与当前 user.name 比较（允许 DOMAIN 加反斜杠前缀的用户名形式）。
+        String currentUser = System.getProperty("user.name");
+        String ownerName = Files.getOwner(directory).getName();
+        boolean ownerMatches = ownerName.equalsIgnoreCase(currentUser)
+                || (ownerName.length() > currentUser.length() + 1
+                        && ownerName.regionMatches(true, ownerName.length() - currentUser.length() - 1,
+                                "\\" + currentUser, 0, currentUser.length() + 1));
+        if (!ownerMatches) {
+            throw new IOException(message);
         }
     }
 
@@ -533,16 +551,10 @@ public final class BenchmarkArtifactStore {
                 throw new IOException("existing benchmark output root must already be owner-only (0700): "
                         + directory);
             }
-            Path userHome = Path.of(System.getProperty("user.home")).toAbsolutePath().normalize();
-            if (Files.exists(userHome)
-                    && !Files.getOwner(directory).equals(Files.getOwner(userHome))) {
-                throw new IOException("benchmark output root is not owned by the current user: " + directory);
-            }
         } catch (UnsupportedOperationException e) {
-            throw new IOException(
-                    "cannot prove owner-only permissions for existing benchmark output root: " + directory,
-                    e);
+            // 非 POSIX 文件系统：跳过 0700 权限位校验，仅保留 owner 弱校验（与 requireSafeParentDirectory 一致）。
         }
+        requireOwnerMatchesUserHome(directory, "benchmark output root is not owned by the current user: " + directory);
     }
 
     private static Path ensureSecureDirectory(Path directory) throws IOException {

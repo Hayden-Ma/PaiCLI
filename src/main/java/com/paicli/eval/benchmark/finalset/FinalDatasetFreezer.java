@@ -1,11 +1,13 @@
 package com.paicli.eval.benchmark.finalset;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
 import com.paicli.eval.benchmark.CaseDefinition;
 import com.paicli.eval.benchmark.SuiteDefinition;
 
@@ -88,6 +90,9 @@ public final class FinalDatasetFreezer {
             PosixFilePermission.OWNER_EXECUTE);
     private static final ObjectMapper MAPPER = new ObjectMapper(
             JsonFactory.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION).build())
+            // CaseDefinition 的 judge 字段是 Optional：需要 jdk8 模块，序列化时空值整体省略
+            .registerModule(new Jdk8Module())
+            .setSerializationInclusion(JsonInclude.Include.NON_NULL)
             .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
             .enable(DeserializationFeature.FAIL_ON_NULL_CREATOR_PROPERTIES)
             .enable(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES)

@@ -7,7 +7,6 @@ public class LlmClientFactory {
     private LlmClientFactory() {}
 
     public static LlmClient create(String provider, PaiCliConfig config) {
-    public static LlmClient create(String provider, PaiCliConfig config) {
         return create(provider, null, config);
     }
 

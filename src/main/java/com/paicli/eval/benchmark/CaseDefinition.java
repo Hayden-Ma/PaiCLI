@@ -54,6 +54,14 @@ public record CaseDefinition(
         rubrics = rubrics == null ? null : rubrics.map(List::copyOf);
     }
 
+    /** 兼容无 judge 字段的旧签名：judge 配置视为空，仅 command / trajectory verifier 可用。 */
+    public CaseDefinition(String id, String title, String category, Level level, int weight, Mode mode,
+                          String fixturePath, String prompt, VerifierType verifierType,
+                          List<String> verifierCommand, Status status) {
+        this(id, title, category, level, weight, mode, fixturePath, prompt, verifierType, verifierCommand,
+                Optional.empty(), Optional.empty(), Optional.empty(), status);
+    }
+
     void validate(Path suiteDirectory) {
         requireSafeIdentifier(id, "case id");
         requireText(title, "case title");
