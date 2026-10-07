@@ -115,6 +115,8 @@ src/main/java/com/paicli/
 
 - 共享 `prompts/handoff.md` 要求遵守用户的严格输出格式（只要 JSON/CSV/值时不加围栏和总结），但这不是确定性保证
 - Skill 索引注入 system prompt（上限 20 个 / 4KB）；`load_skill` 成功后同一轮在工具结果之后以独立 user 消息注入正文（`LoadedSkillMessages`），不要改回等下一条用户消息
+- Skill 注入首行带 `[PAICLI_SKILL_INJECTION]`：压缩不计轮次、不交给摘要、原样挂回；会话去重与 16KB 预算从消息历史推导，不另存状态。附属文件走 `load_skill(name, file)`，不放宽 PathGuard；未 `/skill trust` 的项目级 Skill 正文只进 untrusted 工具结果
+- system prompt 按稳定度排序（静态段 → Skills → runtime → Project Context），新增段落按变化频率插入，别放到随查询变化的记忆之前
 
 ## 修改联动
 

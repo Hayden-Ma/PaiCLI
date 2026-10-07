@@ -186,11 +186,15 @@ DeepSeek 的当前内置列表按[官方文档](https://api-docs.deepseek.com/zh
 
 - 三层加载位置（按优先级，后者整体覆盖同名 skill）：jar 内置 < 用户级 `~/.paicli/skills/<name>/` < 项目级 `<project>/.paicli/skills/<name>/`
 - 启动期把启用 skill 的 `name` + `description` 注入三处 Agent 系统提示词索引段（启用上限 20 个，索引段 ≤ 4KB）
-- 内置工具 `load_skill(name)`：LLM 在 system prompt 看到匹配 description 时主动调用，工具结果之后、同一轮下一次 LLM 请求之前，PaiCLI 把 SKILL.md 正文（5KB 截断）作为独立 user 消息注入（不进入 untrusted 工具结果，也不改 system prompt）
+- 内置工具 `load_skill(name)`：LLM 在 system prompt 看到匹配 description 时主动调用，工具结果之后、同一轮下一次 LLM 请求之前，PaiCLI 把 SKILL.md 正文（5KB 在行边界截断）作为独立 user 消息注入（不进入 untrusted 工具结果，也不改 system prompt）；注入头部带来源和 Skill 目录绝对路径
+- 附属文件：`load_skill(name, file="references/a.md")` 读取 Skill 目录内的文件（传目录则列出文件，支持 offset/limit）；只放行该 Skill 自己的目录，`read_file` 仍只能读项目内文件；截断提示也指向这个调用
+- 同一会话去重与预算：按对话历史判断，已注入过的 Skill 再加载只返回“已在本会话加载”；同一会话注入正文合计默认 16KB（`PAICLI_SKILL_BODY_BUDGET`），超出时不注入并提示先完成当前任务
+- 压缩保活：Skill 注入消息不计入压缩的用户轮次、不交给摘要模型，被切到摘要范围内时原样挂回摘要之后
+- 项目级 Skill 信任：未信任时正文只放在 untrusted 工具结果里作为参考数据；`/skill show` 确认后 `/skill trust <name>` 信任，信任绑定 SKILL.md 路径和正文 SHA-256，正文改动后需重新信任；内置和用户级 Skill 不需要
 - 内置 web-access skill：决策手册（浏览哲学四步法 + 工具选择表 + 浏览器优先级 + Jina 兜底说明）+ 6 个站点经验文件（mp.weixin / zhuanlan.zhihu / x.com / xiaohongshu / github / juejin）+ cdp-cheatsheet
 - frontmatter 走手写 YAML 子集解析，不引 SnakeYAML；解析失败 stderr 警告但不阻塞启动
-- CLI 命令：`/skill list` / `/skill show <name>` / `/skill on <name>` / `/skill off <name>` / `/skill reload`
-- 启用状态持久化：`~/.paicli/skills.json` 的 `disabled` 列表，默认全启用
+- CLI 命令：`/skill list` / `/skill show <name>` / `/skill on <name>` / `/skill off <name>` / `/skill trust <name>` / `/skill reload`
+- 状态持久化：`~/.paicli/skills.json` 的 `disabled` 列表（默认全启用）和 `trustedProjectSkills` 信任记录
 - 与 HITL 协同：Skill 内调用 `execute_command` 等危险工具仍走既有 HITL 审批，沿用 `execute_command` 工具维度全放行；不给 Skill 单独审批维度
 
 设计意图：从「写工具」演进到「打包专家手册」。当工具堆成山（PaiCLI 当前内置 9 个 + MCP 60+ 工具），用 Skill 给 LLM 一份按场景展开的"专家手册"，比往 system prompt 里塞更多规则更可扩展。
@@ -295,7 +299,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 ### 第十九期：Prompt 分层架构（MVP）
 
 - ReAct、Plan task executor、Multi-Agent 三角色、Planner 的 system prompt 已从 Java 硬编码抽离到 `src/main/resources/prompts/`
-- `PromptAssembler` 按 `base -> personality -> mode -> approval -> runtime_context -> project_context -> skills -> context_mgmt -> handoff` 组装；`runtime_context` 注入当前日期/时区，动态项目上下文靠后注入
+- `PromptAssembler` 按 `base -> personality -> mode -> approval -> context_mgmt -> handoff -> skills -> runtime_context -> project_context` 组装，按稳定度从高到低排列：Skill 索引只在 `/skill` 启停或重载时变，`runtime_context`（当前日期/时区）按天变，`project_context` 里的相关记忆随每条输入变化，放最后以保住前缀缓存
 - `project_context` 会先注入 `PAI.md` 项目记忆，再注入检索到的相关长期记忆（含自动提取后待核实的条目）和 MCP resource 索引
 - 支持用户级覆盖 `~/.paicli/prompts/...`，支持项目级覆盖 `.paicli/prompts/...`，项目级优先级最高
 - 覆盖是整文件替换；`base.md` 和最终 prompt 必须包含 `## Language`
@@ -835,7 +839,7 @@ I
 - `/index [路径]` - 索引代码库（默认当前目录）
 - `/search <查询>` - 语义检索代码（RAG 辅助路径）
 - `/graph <类名>` - 查看代码关系图谱
-- `/clear` - 清空当前 ReAct 对话历史、Session Memory 预计算状态、待注入 Skill 上下文和上一轮检索记忆注入；长期记忆保留
+- `/clear` - 清空当前 ReAct 对话历史（含已注入的 Skill 正文）、Session Memory 预计算状态和上一轮检索记忆注入；长期记忆保留
 - `/exit` / `/quit` - 退出程序
 
 ## 运行效果

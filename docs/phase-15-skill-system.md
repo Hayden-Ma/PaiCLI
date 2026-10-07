@@ -1,5 +1,7 @@
 # 第 15 期开发任务：Skill 系统 + 内置 web-access Skill
 
+> ⚠️ **注意**：本文是第 15 期的原始设计。§2.3、§3.5、§3.6、§3.8 中的注入时机、§5 文件清单里的 `SkillContextBuffer` / `LoadSkillTool` 已不是现行实现，见 `docs/skill-system-upgrade-plan.md`。
+
 > 这份文档是给执行 Agent 的开发任务说明书，自包含、可直接照着推进。
 >
 > **开工前必读**：
@@ -182,6 +184,9 @@ frontmatter 用 SnakeYAML（项目已经依赖 Jackson + 不依赖 SnakeYAML，*
 
 ### 3.5 `load_skill` 内置工具（lazy 展开机制）
 
+> ⚠️ **已废弃**：本节描述的 `SkillContextBuffer` / 下一轮注入 / 最多保留 3 个已在 `cc864aa` 删除，现行为见 `docs/skill-system-upgrade-plan.md` 和 `docs/agents-reference.md` 的 Skill System 一节：正文由 `LoadedSkillMessages` 同一轮注入，会话内按历史去重、16KB 预算、压缩保活。
+
+
 新增内置工具，与 `read_file` / `web_search` 等同级：
 
 ```json
@@ -208,6 +213,9 @@ frontmatter 用 SnakeYAML（项目已经依赖 Jackson + 不依赖 SnakeYAML，*
 - 同时 SkillContextBuffer 只保留**最近 1 轮**注入（防止累积）
 
 ### 3.6 SkillContextBuffer 生命周期
+
+> ⚠️ **已废弃**：本节描述的 `SkillContextBuffer` / 下一轮注入 / 最多保留 3 个已在 `cc864aa` 删除，现行为见 `docs/skill-system-upgrade-plan.md` 和 `docs/agents-reference.md` 的 Skill System 一节：正文由 `LoadedSkillMessages` 同一轮注入，会话内按历史去重、16KB 预算、压缩保活。
+
 
 ```
 LLM 调 load_skill("web-access") 
@@ -379,6 +387,9 @@ src/main/resources/skills/
 ## 5. 与现有架构的集成点（要修改 / 新增的文件）
 
 ### 5.1 新增类
+
+> ⚠️ **已废弃**：本节描述的 `SkillContextBuffer` / 下一轮注入 / 最多保留 3 个已在 `cc864aa` 删除，现行为见 `docs/skill-system-upgrade-plan.md` 和 `docs/agents-reference.md` 的 Skill System 一节：正文由 `LoadedSkillMessages` 同一轮注入，会话内按历史去重、16KB 预算、压缩保活。
+
 
 | 文件 | 职责 |
 |---|---|
