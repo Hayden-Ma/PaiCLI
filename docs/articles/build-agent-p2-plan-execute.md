@@ -506,7 +506,7 @@ java -jar target/paicli-1.0-SNAPSHOT.jar
 
 最后按 Shift+Tab 切到 plan 模式，直接输入一条普通任务，不用再敲 `/plan`。
 
-【截图：plan 模式下直接输入任务；风格：data-board；截图目标：状态栏显示 PLAN，普通输入直接进入规划；关键词：plan 模式、Shift+Tab、普通输入】
+![](https://cdn.paicoding.com/stutymore/build-agent-p2-plan-execute-20261001080217.png)
 
 ## 简历怎么写
 
