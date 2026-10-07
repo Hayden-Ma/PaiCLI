@@ -187,6 +187,8 @@ DeepSeek 的当前内置列表按[官方文档](https://api-docs.deepseek.com/zh
 - 三层加载位置（按优先级，后者整体覆盖同名 skill）：jar 内置 < 用户级 `~/.paicli/skills/<name>/` < 项目级 `<project>/.paicli/skills/<name>/`
 - 启动期把启用 skill 的 `name` + `description` 注入三处 Agent 系统提示词索引段（启用上限 20 个，索引段 ≤ 4KB）
 - 内置工具 `load_skill(name)`：LLM 在 system prompt 看到匹配 description 时主动调用，工具结果之后、同一轮下一次 LLM 请求之前，PaiCLI 把 SKILL.md 正文（5KB 截断）作为独立 user 消息注入（不进入 untrusted 工具结果，也不改 system prompt）
+- `load_skill(name, file)`：带 `file`（如 `references/site-patterns`）时列出或读取 Skill 的参考资料，合并 Skill 自带的 `references/` 与用户级补充目录 `~/.paicli/skills/<name>/references/`（补充目录不放 SKILL.md，不会覆盖内置 skill）；内容作为普通工具结果返回，不再注入 SKILL.md 正文。`~/.paicli/` 在项目根之外，`read_file` 读不到，参考资料只走这条路径
+- `save_skill_reference(name, file, content, overwrite)`：把新验证的站点经验写回用户级补充目录，只能写 `references/` 下的 `.md`，拒绝 `..`、隐藏段和符号链接，单次 ≤ 8000 字符、单文件 ≤ 64KB；默认追加，`overwrite=true` 只替换用户级补充文件，内置缓存不动。不经过也不放宽 PathGuard；与 `write_file` 同档：auto 直接执行，`/hitl on` 需确认，写入审计、按顺序串行
 - 内置 web-access skill：决策手册（浏览哲学四步法 + 工具选择表 + 浏览器优先级 + Jina 兜底说明）+ 6 个站点经验文件（mp.weixin / zhuanlan.zhihu / x.com / xiaohongshu / github / juejin）+ cdp-cheatsheet
 - frontmatter 走手写 YAML 子集解析，不引 SnakeYAML；解析失败 stderr 警告但不阻塞启动
 - CLI 命令：`/skill list` / `/skill show <name>` / `/skill on <name>` / `/skill off <name>` / `/skill reload`
@@ -774,6 +776,8 @@ I
 - `search_code` - 语义检索代码库（自然语言查询，适合作为模糊语义或常规搜索无果时的辅助）
 - `web_search` - 在用户目标明确且需要联网时搜索互联网信息
 - `web_fetch` - 抓取当前顶层用户原文提供或本执行分支成功 `web_search` 结果发现的 URL，并提取正文 Markdown
+- `load_skill` - 加载 Skill 完整指引；带 `file` 时列出或读取 Skill 的 `references/`（内置 + 用户级补充）
+- `save_skill_reference` - 把新验证的经验写回 Skill 的用户级参考资料 `~/.paicli/skills/<name>/references/`，只能写 `.md`
 - `revert_turn` - 恢复到最近第 N 个 pre-turn 快照（走 HITL 与审计）
 - `mcp__{server}__{tool}` - MCP server 动态提供的外部工具
 - `mcp__{server}__list_resources` / `mcp__{server}__read_resource` - 支持 resources 的 MCP server 自动注册的虚拟工具

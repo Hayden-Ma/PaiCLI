@@ -209,6 +209,10 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - system prompt 索引段注入到三处提示词末尾，上限 20 个 / 4KB
 - load_skill 工具只返回确认；ReAct / Plan 任务 / Team worker 在工具结果之后、同一轮下一次 LLM 请求前，由 `LoadedSkillMessages` 把成功加载的 SKILL.md 正文(5KB 截断)拼成独立 user 消息注入
 - 正文不放进工具结果（会被 `ToolResultBoundary` 包成 untrusted-data），也不改 system prompt（保留 prompt cache）；无共享待注入状态，并行任务互不串；同批重复加载只注入一次
+- references：`load_skill(name, file)` 由 `SkillReferences.read` 列目录或读文件，合并 skill 自带 `references/`（内置即 `~/.paicli/skills-cache/<name>/references/`）与用户级补充 `~/.paicli/skills/<name>/references/`；目录条目标注 `[builtin, user]` 来源，文件按“自带 → 用户补充”顺序拼接，单文件 20000 字符截断。补充目录没有 SKILL.md，`SkillRegistry` 不把它当 skill，不会整体覆盖内置版本。带 `file` 的调用不触发 `LoadedSkillMessages` 注入，结果留在 untrusted 工具结果里（补充内容是模型从网页经验写回的，不能升级成可信指引）
+- 写回：`save_skill_reference(name, file, content, overwrite)` 只写已启用 kebab-case skill 的用户级补充目录 `references/**.md`；路径段须 `[A-Za-z0-9][A-Za-z0-9._-]*`（拒绝 `..` / 隐藏段 / 绝对路径 / `~`），最多 4 层，`references` 及以下各级不能是符号链接；单次 ≤ 8000 字符，单文件 ≤ 64KB；默认 `APPEND` 单次写入（不读改写，多进程不互相覆盖），`overwrite=true` 临时文件 + 原子替换。PathGuard 语义不变，`read_file` / `write_file` 仍拒绝 `~/.paicli/`
+- `save_skill_reference` 在 `ApprovalPolicy.DANGEROUS_TOOLS` 与 `AUDIT_TOOLS` 内（🟡 中危，同 `write_file`：auto 直接执行，`/hitl on` 确认），不在 `PARALLEL_SAFE_TOOLS`；微信通道和 benchmark profile 未列入，默认不可用
+- 改内置 SKILL.md 或 references 要上调 `SkillBuiltinExtractor.CURRENT_VERSION`，否则已有缓存不会重建
 
 ### Better Harness
 

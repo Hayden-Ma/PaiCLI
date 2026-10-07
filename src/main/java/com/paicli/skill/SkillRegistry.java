@@ -20,6 +20,9 @@ import java.util.stream.Collectors;
  *   3. project：&lt;projectDir&gt;/.paicli/skills/&lt;name&gt;/SKILL.md
  *
  * 启用状态由 SkillStateStore 提供 disabled 列表过滤。
+ *
+ * 用户级目录下没有 SKILL.md 的 ~/.paicli/skills/&lt;name&gt;/ 不算 skill，只作为 references 补充目录，
+ * 由 {@link SkillReferences} 与 skill 自带的 references/ 合并读取。
  */
 public final class SkillRegistry {
 
@@ -76,6 +79,17 @@ public final class SkillRegistry {
 
     public synchronized List<String> warnings() {
         return List.copyOf(warnings);
+    }
+
+    /**
+     * 用户级 references 补充目录 ~/.paicli/skills/&lt;name&gt;/；未配置用户级目录，
+     * 或 frontmatter 里的 name 不是 kebab-case（可能带路径分隔符）时返回 null。
+     */
+    public Path userOverlayDir(Skill skill) {
+        if (userSkillsDir == null || skill == null || !skill.name().matches("[a-z0-9][a-z0-9-]*")) {
+            return null;
+        }
+        return userSkillsDir.resolve(skill.name());
     }
 
     public SkillStateStore stateStore() {

@@ -68,7 +68,13 @@ public final class LoadedSkillMessages {
             return null;
         }
         try {
-            JsonNode name = MAPPER.readTree(argumentsJson).path("name");
+            JsonNode args = MAPPER.readTree(argumentsJson);
+            // 带 file 的调用只读 references，结果留在 untrusted 工具结果里，不再注入 SKILL.md 正文
+            JsonNode file = args.path("file");
+            if (!file.isMissingNode() && !file.isNull() && !file.asText().isBlank()) {
+                return null;
+            }
+            JsonNode name = args.path("name");
             // 与 load_skill 执行器一致，按原值查找，避免工具报“未找到”却注入了正文
             return name.isTextual() && !name.asText().isBlank() ? name.asText() : null;
         } catch (Exception e) {

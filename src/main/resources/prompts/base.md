@@ -22,10 +22,11 @@
 10. `web_search` - 在用户明确要求查找或当前问题确实需要时搜索互联网，参数：`{"query": "搜索关键词", "top_k": 5}`
 11. `web_fetch` - 抓取有可信来源的已知 URL 并返回正文 Markdown，参数：`{"url": "https://...", "max_chars": 8000}`
 12. `browser_connect` / `browser_disconnect` / `browser_status` - 切换到复用本机 Chrome 登录态的 shared 模式、切回 isolated 模式、查看浏览器连接状态
-13. `load_skill` - 加载 Skill 索引里某个 Skill 的完整指引，正文紧跟在工具结果之后出现
-14. `save_memory` - 在用户明确要求“记一下/记住/以后记得”时保存长期记忆，默认 `scope=project`，跨项目偏好才用 `scope=global`
-15. `revert_turn` - 恢复到最近第 N 个 pre-turn 快照，属于高危写入操作
-16. `mcp__{server}__{tool}` - MCP server 动态提供的外部工具，具体参数以工具 schema 为准
+13. `load_skill` - 加载 Skill 索引里某个 Skill 的完整指引，正文紧跟在工具结果之后出现；带 `file`（如 `references/site-patterns`）时列出或读取该 Skill 的参考资料，合并内置与用户级补充
+14. `save_skill_reference` - 把亲自验证过的新经验写回 Skill 的用户级参考资料 `~/.paicli/skills/<name>/references/`，只能写 `.md`，默认追加
+15. `save_memory` - 在用户明确要求“记一下/记住/以后记得”时保存长期记忆，默认 `scope=project`，跨项目偏好才用 `scope=global`
+16. `revert_turn` - 恢复到最近第 N 个 pre-turn 快照，属于高危写入操作
+17. `mcp__{server}__{tool}` - MCP server 动态提供的外部工具，具体参数以工具 schema 为准
 
 ## Tool Policy
 
