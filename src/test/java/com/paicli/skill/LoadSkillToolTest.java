@@ -68,7 +68,61 @@ class LoadSkillToolTest {
 
         assertTrue(results.get(0).result().contains("已加载 skill 'huge'"));
         String message = LoadedSkillMessages.from(results, tools.getSkillRegistry());
-        assertTrue(message.contains("(skill body truncated"), "应包含截断标记");
+        assertTrue(message.contains("正文过长已截断"), "应包含截断标记");
+    }
+
+    @Test
+    void truncationHintPointsToCallableToolWithFileOffset(@TempDir Path tempDir) throws IOException {
+        StringBuilder big = new StringBuilder();
+        for (int line = 1; big.length() < 6 * 1024; line++) big.append("line-").append(line).append(" 0123456789\n");
+        ToolRegistry tools = toolsWith(registryWith(tempDir, "huge", "desc", big.toString()));
+
+        String message = LoadedSkillMessages.from(load(tools, "{\"name\":\"huge\"}"), tools.getSkillRegistry());
+
+        assertFalse(message.contains("/skill show"), "模型调用不了用户命令");
+        java.util.regex.Matcher offset = java.util.regex.Pattern
+                .compile("load_skill\\(name=\"huge\", file=\"SKILL.md\", offset=(\\d+)\\)").matcher(message);
+        assertTrue(offset.find(), message.substring(message.length() - 200));
+        String continued = tools.executeTool("load_skill",
+                "{\"name\":\"huge\",\"file\":\"SKILL.md\",\"offset\":" + offset.group(1) + ",\"limit\":1}");
+        String lastShown = message.substring(0, message.indexOf("...(正文过长已截断")).trim();
+        lastShown = lastShown.substring(lastShown.lastIndexOf('\n') + 1);
+        int lastShownNumber = Integer.parseInt(lastShown.substring(5, lastShown.indexOf(' ')));
+        assertTrue(continued.contains("line-" + (lastShownNumber + 1) + " "), continued);
+    }
+
+    @Test
+    void injectionCarriesSourceAndSkillDirectory(@TempDir Path tempDir) throws IOException {
+        Path projectSkills = tempDir.resolve("project").resolve(".paicli").resolve("skills");
+        Path skillDir = projectSkills.resolve("deploy");
+        Files.createDirectories(skillDir.resolve("references"));
+        Files.writeString(skillDir.resolve("SKILL.md"), "---\nname: deploy\ndescription: d\n---\n先读 references/a.md\n");
+        Files.writeString(skillDir.resolve("references").resolve("a.md"), "REFERENCE_A");
+        SkillRegistry registry = new SkillRegistry(null, null, projectSkills,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.reload();
+        ToolRegistry tools = toolsWith(registry);
+
+        String message = LoadedSkillMessages.from(load(tools, "{\"name\":\"deploy\"}"), registry);
+
+        assertTrue(message.contains("## 已加载 Skill：deploy（来源：project）"), message);
+        assertTrue(message.contains("Skill 目录：" + skillDir.toAbsolutePath().normalize()), message);
+        assertTrue(tools.executeTool("load_skill", "{\"name\":\"deploy\",\"file\":\"references/a.md\"}")
+                .contains("REFERENCE_A"));
+        assertTrue(tools.executeTool("load_skill", "{\"name\":\"deploy\",\"file\":\"references\"}")
+                .contains("references/a.md"));
+    }
+
+    @Test
+    void fileReadsCannotEscapeSkillDirectory(@TempDir Path tempDir) throws IOException {
+        ToolRegistry tools = toolsWith(registryWith(tempDir, "demo", "desc", "demo-body"));
+        Files.writeString(tempDir.resolve("secret.txt"), "SECRET");
+
+        List<ToolExecutionResult> results = load(tools, "{\"name\":\"demo\",\"file\":\"../../secret.txt\"}");
+
+        assertFalse(results.get(0).result().contains("SECRET"), results.get(0).result());
+        assertTrue(results.get(0).result().contains("不在 Skill 'demo' 的目录内"), results.get(0).result());
+        assertEquals("", LoadedSkillMessages.from(results, tools.getSkillRegistry()), "读附属文件不注入正文");
     }
 
     @Test

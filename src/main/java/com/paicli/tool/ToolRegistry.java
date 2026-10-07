@@ -816,30 +816,71 @@ public class ToolRegistry {
     private void registerSkillTools() {
         tools.put("load_skill", new Tool(
                 "load_skill",
-                "Load full SKILL.md instructions for a skill the system has indexed (see the \"可用 Skills\" section in this system prompt). Call this when a skill's description matches the current task. Pass the exact kebab-case skill name. The full body is appended right after this tool result, before your next step in the same turn, under \"## 已加载 Skill：<name>\". Don't reload the same skill twice in one session.",
-                createParameters(new Param("name", "string", "the exact kebab-case skill name (e.g. web-access)", true)),
-                args -> {
-                    String name = args.get("name");
-                    if (name == null || name.isBlank()) {
-                        return "load_skill 失败: name 不能为空";
-                    }
-                    if (skillRegistry == null) {
-                        return "load_skill 失败: Skill 系统未初始化";
-                    }
-                    Skill skill = skillRegistry.findSkill(name);
-                    if (skill == null) {
-                        Skill any = skillRegistry.findAnySkill(name);
-                        if (any == null) {
-                            return "Skill '" + name + "' 未找到，可用 /skill list 查看可用 skill";
-                        }
-                        return "Skill '" + name + "' 已被禁用，可用 /skill on " + name + " 启用";
-                    }
-                    // 正文由调用方通过 LoadedSkillMessages 紧跟在本结果之后注入，这里只返回确认
-                    int originalLen = skill.body() == null ? 0 : skill.body().length();
-                    return "已加载 skill '" + name + "' 的完整指引（" + originalLen
-                            + " 字符），正文紧跟在本工具结果之后，以 \"## 已加载 Skill：" + name + "\" 段出现。";
-                }
+                "Load full SKILL.md instructions for a skill the system has indexed (see the \"可用 Skills\" section in this system prompt). Call this when a skill's description matches the current task. Pass the exact kebab-case skill name. The full body is appended right after this tool result, before your next step in the same turn, under \"## 已加载 Skill：<name>\"; a skill already loaded in this conversation is not injected again. Pass `file` (relative to the skill directory, e.g. references/a.md, SKILL.md, or a directory to list it) to read a supporting file instead; offset/limit page through long files.",
+                createParameters(
+                        new Param("name", "string", "the exact kebab-case skill name (e.g. web-access)", true),
+                        new Param("file", "string", "optional path relative to the skill directory, e.g. references/a.md; omit to load the SKILL.md instructions", false),
+                        new Param("offset", "integer", "with file: 1-based start line", false),
+                        new Param("limit", "integer", "with file: max lines to read, up to 2000", false)
+                ),
+                this::loadSkill
         ));
+    }
+
+    private String loadSkill(Map<String, String> args) {
+        String name = args.get("name");
+        if (name == null || name.isBlank()) {
+            return "load_skill 失败: name 不能为空";
+        }
+        if (skillRegistry == null) {
+            return "load_skill 失败: Skill 系统未初始化";
+        }
+        Skill skill = skillRegistry.findSkill(name);
+        if (skill == null) {
+            Skill any = skillRegistry.findAnySkill(name);
+            if (any == null) {
+                return "Skill '" + name + "' 未找到，可用 /skill list 查看可用 skill";
+            }
+            return "Skill '" + name + "' 已被禁用，可用 /skill on " + name + " 启用";
+        }
+        String file = args.get("file");
+        if (file != null && !file.isBlank()) {
+            try {
+                return readSkillFile(skill, file, args);
+            } catch (Exception e) {
+                return "load_skill 读取文件失败: " + e.getMessage();
+            }
+        }
+        // 正文由调用方通过 LoadedSkillMessages 紧跟在本结果之后注入，这里只返回确认
+        int originalLen = skill.body() == null ? 0 : skill.body().length();
+        return "已加载 skill '" + name + "' 的完整指引（" + originalLen
+                + " 字符），正文紧跟在本工具结果之后，以 \"## 已加载 Skill：" + name + "\" 段出现。";
+    }
+
+    /** 读取 Skill 目录内的附属文件；路径围栏只放行当前 Skill 自己的目录，不扩大 read_file 的范围。 */
+    private String readSkillFile(Skill skill, String file, Map<String, String> args) throws IOException {
+        Path skillDir = skill.directory();
+        if (skillDir == null || !Files.isDirectory(skillDir)) {
+            return "load_skill 失败: Skill '" + skill.name() + "' 没有可读取的目录";
+        }
+        Path realDir = skillDir.toRealPath();
+        Path target = realDir.resolve(file).normalize();
+        if (!target.startsWith(realDir) || !Files.exists(target) || !target.toRealPath().startsWith(realDir)) {
+            return "load_skill 失败: " + file + " 不在 Skill '" + skill.name() + "' 的目录内或不存在";
+        }
+        if (Files.isDirectory(target)) {
+            try (var stream = Files.walk(target, 3)) {
+                List<String> entries = stream.filter(Files::isRegularFile)
+                        .map(path -> realDir.relativize(path).toString())
+                        .sorted()
+                        .limit(200)
+                        .toList();
+                return entries.isEmpty()
+                        ? "目录 " + file + " 下没有文件"
+                        : "Skill '" + skill.name() + "' 的 " + file + " 下的文件:\n" + String.join("\n", entries);
+            }
+        }
+        return readFileForTool(target, args);
     }
 
     private void registerMemoryTools() {

@@ -82,13 +82,13 @@ curl -s 'https://r.jina.ai/https://example.com/article'
 
 `references/site-patterns/<domain>.md` 按域名累积已知陷阱与有效模式。
 
-**用法**：确定目标站点后先列目录看有没有命中：
+**用法**：确定目标站点后先列目录看有没有命中（`read_file` 只能读项目内文件，Skill 附属文件统一用 `load_skill` 的 `file` 参数读）：
 
-```bash
-ls ~/.paicli/skills-cache/web-access/references/site-patterns/
+```
+load_skill(name="web-access", file="references/site-patterns")
 ```
 
-命中的话先 `read_file` 读对应文件，把"已知陷阱"和"有效模式"作为先验。已有：
+命中的话用 `load_skill(name="web-access", file="references/site-patterns/<domain>.md")` 读对应文件，把"已知陷阱"和"有效模式"作为先验。已有：
 
 - `mp.weixin.qq.com.md`（微信公众号文章）
 - `zhuanlan.zhihu.com.md`（知乎专栏）
@@ -101,7 +101,7 @@ ls ~/.paicli/skills-cache/web-access/references/site-patterns/
 
 ## CDP 工具速查
 
-完整 28 个 chrome-devtools MCP 工具速查见 `references/cdp-cheatsheet.md`。常用流：
+完整 28 个 chrome-devtools MCP 工具速查见 `references/cdp-cheatsheet.md`（用 `load_skill(name="web-access", file="references/cdp-cheatsheet.md")` 读取）。常用流：
 
 ```
 navigate_page → wait_for（等关键元素出现）→ take_snapshot → 抽取

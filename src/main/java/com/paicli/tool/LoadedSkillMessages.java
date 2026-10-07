@@ -7,6 +7,7 @@ import com.paicli.memory.InternalUserMessages;
 import com.paicli.skill.Skill;
 import com.paicli.skill.SkillRegistry;
 
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -96,7 +97,8 @@ public final class LoadedSkillMessages {
             for (String line : message.content().split("\n")) {
                 if (line.startsWith(SECTION_PREFIX)) {
                     String rest = line.substring(SECTION_PREFIX.length());
-                    names.add(rest.trim());
+                    int sourceStart = rest.indexOf('（');
+                    names.add((sourceStart < 0 ? rest : rest.substring(0, sourceStart)).trim());
                 }
             }
         }
@@ -104,7 +106,14 @@ public final class LoadedSkillMessages {
     }
 
     private static String section(Skill skill) {
-        return SECTION_PREFIX + skill.name() + '\n' + truncatedBody(skill).trim();
+        StringBuilder section = new StringBuilder(SECTION_PREFIX).append(skill.name())
+                .append("（来源：").append(skill.displaySource()).append("）\n");
+        if (skill.directory() != null) {
+            section.append("Skill 目录：").append(skill.directory()).append('\n')
+                    .append("文中 references/、scripts/ 等相对路径都以 Skill 目录为基准：读取附属文件用 load_skill(name=\"")
+                    .append(skill.name()).append("\", file=\"references/xxx.md\")，执行脚本用 execute_command 并写出绝对路径。\n");
+        }
+        return section.append('\n').append(truncatedBody(skill).trim()).toString();
     }
 
     static String truncatedBody(Skill skill) {
@@ -112,15 +121,45 @@ public final class LoadedSkillMessages {
         if (body.length() <= MAX_BODY_CHARS) {
             return body;
         }
-        return body.substring(0, MAX_BODY_CHARS)
-                + "\n\n...(skill body truncated, full content via /skill show " + skill.name() + ")";
+        int lineEnd = body.lastIndexOf('\n', MAX_BODY_CHARS - 1);
+        String shown = lineEnd >= MAX_BODY_CHARS / 2 ? body.substring(0, lineEnd + 1) : body.substring(0, MAX_BODY_CHARS);
+        String hint = "load_skill(name=\"" + skill.name() + "\", file=\"SKILL.md\"";
+        int continueLine = continuationLine(skill, shown);
+        hint += continueLine > 0 ? ", offset=" + continueLine + ")" : ") 配合 offset/limit 分段";
+        return shown + "\n\n...(正文过长已截断，剩余部分用 " + hint + " 继续读取)";
+    }
+
+    /** SKILL.md 中截断处下一行的行号；文件读不到或与正文对不上时返回 0。 */
+    private static int continuationLine(Skill skill, String shown) {
+        if (skill.skillMdPath() == null || !shown.endsWith("\n")) {
+            return 0;
+        }
+        try {
+            String content = Files.readString(skill.skillMdPath()).replace("\r\n", "\n").replace('\r', '\n');
+            if (!content.endsWith(skill.body())) {
+                return 0;
+            }
+            String beforeBody = content.substring(0, content.length() - skill.body().length());
+            return lineCount(beforeBody) + lineCount(shown) + 1;
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    private static int lineCount(String text) {
+        return (int) text.chars().filter(c -> c == '\n').count();
     }
 
     private static Skill injectableSkill(ToolRegistry.ToolExecutionResult result, SkillRegistry registry) {
         if (result == null || !TOOL_NAME.equals(result.name()) || !result.successful()) {
             return null;
         }
-        JsonNode name = parse(result.argumentsJson()).path("name");
+        JsonNode args = parse(result.argumentsJson());
+        // 带 file 的调用是读附属文件，内容已在工具结果里
+        if (args.hasNonNull("file")) {
+            return null;
+        }
+        JsonNode name = args.path("name");
         // 与 load_skill 执行器一致，按原值查找，避免工具报“未找到”却注入了正文
         if (!name.isTextual() || name.asText().isBlank()) {
             return null;
