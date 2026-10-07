@@ -691,6 +691,12 @@ class ToolRegistryTest {
     }
 
     @Test
+    void skillReferenceWriteIsNotParallelSafe() {
+        assertTrue(ToolRegistry.isParallelSafeTool("load_skill"));
+        assertFalse(ToolRegistry.isParallelSafeTool("save_skill_reference"));
+    }
+
+    @Test
     void shouldRunSideEffectToolsSeriallyBetweenParallelReadOnlyRuns() {
         AtomicInteger current = new AtomicInteger();
         AtomicInteger writePeak = new AtomicInteger();

@@ -210,8 +210,11 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - load_skill 工具只返回确认；ReAct / Plan 任务 / Team worker 在工具结果之后、同一轮下一次 LLM 请求前，由 `LoadedSkillMessages.prepare` 把成功加载的 SKILL.md 正文(5KB 行边界截断)拼成独立 user 消息注入，首行是 `InternalUserMessages.SKILL_INJECTION_MARKER`，头部带来源和 Skill 目录
 - 正文不放进工具结果（会被 `ToolResultBoundary` 包成 untrusted-data），也不改 system prompt（保留 prompt cache）；已激活集合和 16KB 会话预算（`PAICLI_SKILL_BODY_BUDGET`）都从调用方传入的消息历史推导，无共享状态，并行任务互不串；重复加载改写工具结果为“已在本会话加载”
 - 压缩：`ConversationHistoryCompactor.userIndices` 跳过 Skill 注入和 `[runaway guard]` 提醒，摘要输入剔除二者，`rebuildWithSummary` 把被移出的 Skill 注入原样挂回摘要之后（Session Memory 路径共用）
-- `load_skill(name, file)` 读取 Skill 目录内附属文件（目录则列出），realpath 校验不得逃出该目录；PathGuard 不变，`read_file` 读不到 `~/.paicli` 下的 Skill
+- `load_skill(name, file)` 读取 Skill 目录内附属文件（目录则列出），realpath 校验不得逃出该目录；PathGuard 不变，`read_file` 读不到 `~/.paicli` 下的 Skill。`references/` 下的路径再由 `SkillReferences.resolveOverlay` 定位用户级补充 `~/.paicli/skills/<name>/references/`：目录分两段列出（Skill 自带 / 用户级补充），文件先给自带版本（受 offset/limit 分页），再整份附上补充文件；只有补充里有的文件也能读。补充目录没有 SKILL.md，`SkillRegistry` 不把它当 skill
 - 项目级 Skill 未 `/skill trust` 时正文由执行器放进工具结果（untrusted），不注入；信任按 SKILL.md 绝对路径 + 正文 SHA-256 记在 `skills.json` 的 `trustedProjectSkills`
+- 写回：`save_skill_reference(name, file, content, overwrite)` 只写已启用 kebab-case skill 的用户级补充目录 `references/**.md`；路径段须 `[A-Za-z0-9][A-Za-z0-9._-]*`（拒绝 `..` / 隐藏段 / 绝对路径 / `~`），最多 4 层，`references` 及以下各级不能是符号链接；单次 ≤ 8000 字符，单文件 ≤ 64KB；默认 `APPEND` 单次写入（不读改写，多进程不互相覆盖），`overwrite=true` 临时文件 + 原子替换。PathGuard 语义不变，`read_file` / `write_file` 仍拒绝 `~/.paicli/`
+- `save_skill_reference` 在 `ApprovalPolicy.DANGEROUS_TOOLS` 与 `AUDIT_TOOLS` 内（🟡 中危，同 `write_file`：auto 直接执行，`/hitl on` 确认），不在 `PARALLEL_SAFE_TOOLS`；微信通道和 benchmark profile 未列入，默认不可用
+- 改内置 SKILL.md 或 references 要上调 `SkillBuiltinExtractor.CURRENT_VERSION`，否则已有缓存不会重建
 
 ### Better Harness
 

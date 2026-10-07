@@ -55,7 +55,7 @@ src/main/java/com/paicli/
 └── eval/ (LLM-as-a-Judge + benchmark)
 ```
 
-- 内置工具 17 个：`read_file` / `write_file` / `edit_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `browser_connect` / `browser_disconnect` / `browser_status` / `save_memory` / `load_skill` / `revert_turn`；MCP 工具动态注册为 `mcp__{server}__{tool}`
+- 内置工具 18 个：`read_file` / `write_file` / `edit_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `browser_connect` / `browser_disconnect` / `browser_status` / `save_memory` / `load_skill` / `save_skill_reference` / `revert_turn`；MCP 工具动态注册为 `mcp__{server}__{tool}`
 - `edit_file` 默认只替换唯一匹配的 `old_text`，`replace_all=true` 时全部精确替换；精确匹配失败后按逐行归一化（NFKC、行尾空白、引号、横线、特殊空格）模糊匹配，仍失败且片段每行都带 read_file 行号前缀时剥前缀重试一次；CRLF 文件保留原换行；新建文件用 `write_file`
 - 代码理解默认 `glob_files` → `grep_code` → `read_file`；`search_code`（RAG）只做模糊语义辅助
 - MCP 配置合并 `~/.paicli/mcp.json` 与项目 `.paicli/mcp.json`；检测到 `STEP_API_KEY` 自动内置 `step_search`
@@ -115,7 +115,7 @@ src/main/java/com/paicli/
 
 - 共享 `prompts/handoff.md` 要求遵守用户的严格输出格式（只要 JSON/CSV/值时不加围栏和总结），但这不是确定性保证
 - Skill 索引注入 system prompt（上限 20 个 / 4KB）；`load_skill` 成功后同一轮在工具结果之后以独立 user 消息注入正文（`LoadedSkillMessages`），不要改回等下一条用户消息
-- Skill 注入首行带 `[PAICLI_SKILL_INJECTION]`：压缩不计轮次、不交给摘要、原样挂回；会话去重与 16KB 预算从消息历史推导，不另存状态。附属文件走 `load_skill(name, file)`，不放宽 PathGuard；未 `/skill trust` 的项目级 Skill 正文只进 untrusted 工具结果
+- Skill 注入首行带 `[PAICLI_SKILL_INJECTION]`：压缩不计轮次、不交给摘要、原样挂回；会话去重与 16KB 预算从消息历史推导，不另存状态。附属文件走 `load_skill(name, file)`，`references/` 下合并用户级补充 `~/.paicli/skills/<name>/references/`；经验写回只走 `save_skill_reference`（只写补充目录的 `references/**.md`）。不放宽 PathGuard，不让 SKILL.md 指示模型用 `read_file` / `execute_command` 访问 `~/.paicli/`；未 `/skill trust` 的项目级 Skill 正文只进 untrusted 工具结果
 - system prompt 按稳定度排序（静态段 → Skills → runtime → Project Context），新增段落按变化频率插入，别放到随查询变化的记忆之前
 
 ## 修改联动
