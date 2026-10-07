@@ -788,6 +788,10 @@ public class Main {
                         renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
+                    case SKILL_TRUST -> {
+                        ui.println(SkillCommandHandler.trust(skillRegistry, command.payload()));
+                        continue;
+                    }
                     case SKILL_RELOAD -> {
                         skillRegistry.reload();
                         ui.println("🔄 已重新扫描 skill 目录");
@@ -1848,6 +1852,7 @@ public class Main {
                 new SlashCommandHint("/skill show ", "/skill show <name>", "查看 SKILL.md 全文"),
                 new SlashCommandHint("/skill on ", "/skill on <name>", "启用 skill"),
                 new SlashCommandHint("/skill off ", "/skill off <name>", "禁用 skill"),
+                new SlashCommandHint("/skill trust ", "/skill trust <name>", "信任当前项目的项目级 skill"),
                 new SlashCommandHint("/skill reload", "/skill reload", "重新扫描 skill 目录"),
                 new SlashCommandHint("/better-harness", "/better-harness", "审查当前项目的 AI 编码工作流"),
                 new SlashCommandHint("/better-harness quick", "/better-harness quick", "快速生成 Better Harness 报告"),

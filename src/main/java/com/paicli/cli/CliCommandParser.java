@@ -48,6 +48,7 @@ final class CliCommandParser {
         SKILL_ON,
         SKILL_OFF,
         SKILL_RELOAD,
+        SKILL_TRUST,
         BETTER_HARNESS,
         CONFIG,
         EXPORT
@@ -304,6 +305,10 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/skill off ", 0, 11)) {
             return new ParsedCommand(CommandType.SKILL_OFF, trimmed.substring(11).trim());
+        }
+
+        if (trimmed.regionMatches(true, 0, "/skill trust ", 0, 13)) {
+            return new ParsedCommand(CommandType.SKILL_TRUST, trimmed.substring(13).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/export")) {

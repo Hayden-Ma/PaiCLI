@@ -204,11 +204,12 @@ final class PaiCliCompleter implements Completer {
                     option("show ", "查看 SKILL.md 全文"),
                     option("on ", "启用 skill"),
                     option("off ", "禁用 skill"),
+                    option("trust ", "信任项目级 skill"),
                     option("reload", "重新扫描 skill 目录"));
             return true;
         }
         String sub = parts.length == 0 ? "" : parts[0].toLowerCase();
-        if (List.of("show", "on", "off").contains(sub)) {
+        if (List.of("show", "on", "off", "trust").contains(sub)) {
             String prefix = payload.endsWith(" ") ? "" : parts.length >= 2 ? parts[parts.length - 1] : "";
             addSkillCandidates(candidates, prefix);
             return true;

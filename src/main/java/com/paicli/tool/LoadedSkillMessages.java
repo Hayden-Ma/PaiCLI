@@ -20,7 +20,8 @@ import java.util.Set;
  * 让同一轮的下一次 LLM 请求就能看到 SKILL.md 正文。
  *
  * <p>正文不放进工具结果本身：工具结果统一经 {@link ToolResultBoundary} 包成 untrusted-data，
- * 模型会被要求不执行其中的指令，而 Skill 恰恰是本地可信的操作指引。</p>
+ * 模型会被要求不执行其中的指令，而内置、用户级和已信任的项目级 Skill 是本地可信的操作指引。
+ * 未信任的项目级 Skill 由 load_skill 执行器直接把正文放进工具结果，这里不注入。</p>
  *
  * <p>已激活集合从调用方传入的消息历史推导，不持有任何共享状态：ReAct 会话、
  * 每个 Plan 任务和每个 Team worker 各自只看自己的历史；压缩会把 Skill 注入原样挂回，
@@ -164,7 +165,8 @@ public final class LoadedSkillMessages {
         if (!name.isTextual() || name.asText().isBlank()) {
             return null;
         }
-        return registry.findSkill(name.asText());
+        Skill skill = registry.findSkill(name.asText());
+        return skill != null && registry.isTrusted(skill) ? skill : null;
     }
 
     private static JsonNode parse(String argumentsJson) {

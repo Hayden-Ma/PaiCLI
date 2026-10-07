@@ -1,10 +1,14 @@
 package com.paicli.skill;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -80,6 +84,33 @@ public final class SkillRegistry {
 
     public SkillStateStore stateStore() {
         return stateStore;
+    }
+
+    /**
+     * 内置和用户级 Skill 由用户自己安装，视为可信；项目级 Skill 随仓库分发，
+     * 只有用户对当前这份正文执行过 /skill trust 才可信，正文改动后需要重新信任。
+     */
+    public boolean isTrusted(Skill skill) {
+        if (skill == null) return false;
+        if (skill.source() != Skill.Source.PROJECT) return true;
+        return stateStore != null && stateStore.isTrusted(skill.skillMdPath(), contentHash(skill));
+    }
+
+    public void trust(Skill skill) {
+        if (stateStore == null) {
+            throw new IllegalStateException("Skill 状态存储未初始化");
+        }
+        stateStore.trust(skill.skillMdPath(), contentHash(skill));
+    }
+
+    static String contentHash(Skill skill) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(skill.body().getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 不可用", e);
+        }
     }
 
     private void loadDirectory(Path dir, Skill.Source source) {

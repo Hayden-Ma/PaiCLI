@@ -518,6 +518,13 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesSkillTrustCommand() {
+        CliCommandParser.ParsedCommand trust = CliCommandParser.parse("/skill trust deploy-checklist");
+        assertEquals(CliCommandParser.CommandType.SKILL_TRUST, trust.type());
+        assertEquals("deploy-checklist", trust.payload());
+    }
+
+    @Test
     void parsesMemoryVerifyAndReplaceCommands() {
         CliCommandParser.ParsedCommand verify = CliCommandParser.parse("/memory verify fact-abcd1234");
         CliCommandParser.ParsedCommand replace = CliCommandParser.parse("/memory replace fact-abcd1234 项目使用 Java 21");

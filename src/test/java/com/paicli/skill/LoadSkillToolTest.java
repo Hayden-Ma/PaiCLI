@@ -2,6 +2,7 @@ package com.paicli.skill;
 
 import com.paicli.llm.LlmClient;
 import com.paicli.tool.LoadedSkillMessages;
+import com.paicli.tool.ToolResultBoundary;
 import com.paicli.tool.ToolRegistry;
 import com.paicli.tool.ToolRegistry.ToolExecutionResult;
 import com.paicli.tool.ToolRegistry.ToolInvocation;
@@ -101,6 +102,7 @@ class LoadSkillToolTest {
         SkillRegistry registry = new SkillRegistry(null, null, projectSkills,
                 new SkillStateStore(tempDir.resolve("skills.json")));
         registry.reload();
+        registry.trust(registry.findSkill("deploy"));
         ToolRegistry tools = toolsWith(registry);
 
         String message = LoadedSkillMessages.from(load(tools, "{\"name\":\"deploy\"}"), registry);
@@ -140,6 +142,33 @@ class LoadSkillToolTest {
         assertEquals("", second.message());
         assertTrue(second.results().get(0).result().contains("已在本会话加载"), second.results().get(0).result());
         assertTrue(second.results().get(0).successful());
+    }
+
+    @Test
+    void untrustedProjectSkillStaysInUntrustedToolResultUntilTrusted(@TempDir Path tempDir) throws IOException {
+        Path projectSkills = tempDir.resolve("project").resolve(".paicli").resolve("skills");
+        Files.createDirectories(projectSkills.resolve("deploy"));
+        Path skillMd = projectSkills.resolve("deploy").resolve("SKILL.md");
+        Files.writeString(skillMd, "---\nname: deploy\ndescription: d\n---\nPROJECT_BODY rm -rf build\n");
+        SkillRegistry registry = new SkillRegistry(null, null, projectSkills,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.reload();
+        ToolRegistry tools = toolsWith(registry);
+
+        List<ToolExecutionResult> untrusted = load(tools, "{\"name\":\"deploy\"}");
+        assertTrue(untrusted.get(0).result().contains("尚未被用户信任"), untrusted.get(0).result());
+        assertTrue(untrusted.get(0).result().contains("PROJECT_BODY"), "正文作为不可信数据留在工具结果里");
+        assertTrue(ToolResultBoundary.wrap(untrusted.get(0)).contains("untrusted-data"));
+        assertEquals("", LoadedSkillMessages.from(untrusted, registry));
+
+        registry.trust(registry.findSkill("deploy"));
+        List<ToolExecutionResult> trusted = load(tools, "{\"name\":\"deploy\"}");
+        assertFalse(trusted.get(0).result().contains("PROJECT_BODY"));
+        assertTrue(LoadedSkillMessages.from(trusted, registry).contains("PROJECT_BODY"));
+
+        Files.writeString(skillMd, "---\nname: deploy\ndescription: d\n---\nPROJECT_BODY v2\n");
+        registry.reload();
+        assertFalse(registry.isTrusted(registry.findSkill("deploy")), "正文改动后需要重新信任");
     }
 
     @Test
