@@ -19,12 +19,13 @@ import java.util.Locale;
  *
  * 算法：
  * 1. 估算 conversationHistory 当前 token，未达 trigger 直接返回 false
- * 2. 找出所有 user message 的索引；保留最近 retainRecentRounds 个 user 起算的尾部
- * 3. 把 system 之后、splitIdx 之前的全部消息喂给 LLM 摘要
+ * 2. 找出所有真实用户输入的索引（Skill 注入、runaway 提醒不算轮次）；保留最近 retainRecentRounds 个起算的尾部
+ * 3. 把 system 之后、splitIdx 之前除 Skill 注入和 runaway 提醒外的消息喂给 LLM 摘要
  * 4. 重建：[system] + [user("[已压缩的历史对话摘要]\n" + summary)] +
- *         [assistant("好的，已了解上下文。请继续。")] + [尾部保留消息]
+ *         [assistant("好的，已了解上下文。请继续。")] + [被移出的 Skill 注入原样挂回] + [尾部保留消息]
  *
  * 关键约束：分割点必然落在 user message 边界，避免切断 tool_call / tool_result 的成对协议。
+ * Skill 正文原样挂回而不是交给摘要：模型被要求同一会话不重复加载，正文一旦被摘要掉，指引就永久丢失。
  */
 public class ConversationHistoryCompactor {
 
@@ -144,7 +145,9 @@ public class ConversationHistoryCompactor {
         int splitIdx = userIndices.get(userIndices.size() - effectiveRetainRounds);
         if (splitIdx <= systemEnd) return false;
 
-        List<LlmClient.Message> oldMsgs = new ArrayList<>(history.subList(systemEnd, splitIdx));
+        List<LlmClient.Message> oldMsgs = history.subList(systemEnd, splitIdx).stream()
+                .filter(message -> !InternalUserMessages.isInternal(message))
+                .toList();
         if (oldMsgs.isEmpty()) return false;
 
         String summary;
@@ -317,7 +320,8 @@ public class ConversationHistoryCompactor {
         List<Integer> indices = new ArrayList<>();
         if (history == null) return indices;
         for (int i = Math.max(0, start); i < history.size(); i++) {
-            if ("user".equals(history.get(i).role())) {
+            LlmClient.Message message = history.get(i);
+            if ("user".equals(message.role()) && !InternalUserMessages.isInternal(message)) {
                 indices.add(i);
             }
         }
@@ -335,6 +339,9 @@ public class ConversationHistoryCompactor {
         }
         rebuilt.add(LlmClient.Message.user(summaryMessage));
         rebuilt.add(LlmClient.Message.assistant("好的，我已了解之前的上下文，请继续。"));
+        history.subList(systemEnd, splitIdx).stream()
+                .filter(InternalUserMessages::isSkillInjection)
+                .forEach(rebuilt::add);
         rebuilt.addAll(history.subList(splitIdx, history.size()));
         return rebuilt;
     }

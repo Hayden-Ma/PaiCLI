@@ -88,6 +88,62 @@ class LoadSkillSameTurnTest {
         assertSkillVisibleOnlyAfterLoad(llm);
     }
 
+    @Test
+    void reactSkillBodySurvivesManualCompactionAndIsNotReinjected() throws IOException {
+        QueueClient llm = new QueueClient(List.of(
+                loadSkillCall("call-1"),
+                answer("第一轮完成"),
+                answer("第二轮完成"),
+                answer("## 当前目标与成功条件\n读文章\n## 用户要求与已确认决定\n无\n"
+                        + "## 已完成工作及证据\n已读\n## 未解决问题与下一步\n无"),
+                loadSkillCall("call-2"),
+                answer("第三轮完成")));
+        Agent agent = new Agent(llm, toolsWithSkill());
+
+        agent.run("帮我读一篇微信文章");
+        agent.run("继续");
+        assertTrue(agent.compactHistoryNow().compacted());
+        agent.run("再按 skill 处理一次");
+
+        assertFalse(containsBody(llm.requests.get(3)), "Skill 正文不应交给摘要模型");
+        List<LlmClient.Message> last = llm.requests.get(llm.requests.size() - 1);
+        assertEquals(1, last.stream().filter(m -> m.content() != null && m.content().contains(BODY_MARKER)).count(),
+                "压缩后正文仍在，且重复加载不会再注入一份");
+        assertTrue(last.stream().anyMatch(m -> "tool".equals(m.role()) && m.content().contains("已在本会话加载")));
+    }
+
+    @Test
+    void parallelPlanTasksEachGetTheirOwnSkillInjection() throws IOException {
+        TaskAwareClient llm = new TaskAwareClient();
+        MemoryManager memory = new MemoryManager(llm, 4096, 128000,
+                new LongTermMemory(tempDir.resolve("plan-memory").toFile()));
+        PlanExecuteAgent agent = new PlanExecuteAgent(llm, toolsWithSkill(), new TwoParallelTaskPlanner(llm),
+                memory, (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                new PrintStream(new ByteArrayOutputStream()));
+
+        agent.run("同时读两篇微信文章");
+
+        List<List<LlmClient.Message>> afterLoad = llm.requests.stream()
+                .filter(LoadSkillSameTurnTest::endsWithSkillInjection)
+                .toList();
+        assertEquals(2, afterLoad.size(), "两个并行任务都应各自拿到正文");
+        afterLoad.forEach(request -> assertTrue(containsBody(request)));
+    }
+
+    private static boolean endsWithSkillInjection(List<LlmClient.Message> request) {
+        LlmClient.Message last = request.get(request.size() - 1);
+        return com.paicli.memory.InternalUserMessages.isSkillInjection(last);
+    }
+
+    private static LlmClient.ChatResponse loadSkillCall(String id) {
+        return new LlmClient.ChatResponse("assistant", "", List.of(new LlmClient.ToolCall(id,
+                new LlmClient.ToolCall.Function("load_skill", "{\"name\":\"web-access\"}"))), 10, 2);
+    }
+
+    private static LlmClient.ChatResponse answer(String content) {
+        return new LlmClient.ChatResponse("assistant", content, null, 10, 2);
+    }
+
     private static void assertSkillVisibleOnlyAfterLoad(QueueClient llm) {
         assertEquals(2, llm.requests.size(), "load_skill 之后应在同一轮再请求一次模型");
         assertFalse(containsBody(llm.requests.get(0)), "加载前的请求不应包含正文");
@@ -137,6 +193,52 @@ class LoadSkillSameTurnTest {
             plan.addTask(new Task("task_1", goal, Task.TaskType.ANALYSIS));
             plan.computeExecutionOrder();
             return plan;
+        }
+    }
+
+    private static final class TwoParallelTaskPlanner extends Planner {
+        private TwoParallelTaskPlanner(LlmClient llmClient) {
+            super(llmClient);
+        }
+
+        @Override
+        public ExecutionPlan createPlan(String goal) {
+            ExecutionPlan plan = new ExecutionPlan("plan-skill-parallel", goal);
+            plan.addTask(new Task("task_1", "读第一篇", Task.TaskType.ANALYSIS));
+            plan.addTask(new Task("task_2", "读第二篇", Task.TaskType.ANALYSIS));
+            plan.computeExecutionOrder();
+            return plan;
+        }
+    }
+
+    /** 并行任务的请求交错到达，按每个请求自己的最后一条消息决定回复，与调度顺序无关。 */
+    private static final class TaskAwareClient implements LlmClient {
+        private final List<List<Message>> requests = new ArrayList<>();
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools) {
+            return chat(messages, tools, StreamListener.NO_OP);
+        }
+
+        @Override
+        public synchronized ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) {
+            requests.add(List.copyOf(messages));
+            return endsWithSkillInjection(messages) ? answer("已按 skill 完成") : loadSkillCall("call-" + requests.size());
+        }
+
+        @Override
+        public String getModelName() {
+            return "test-model";
+        }
+
+        @Override
+        public String getProviderName() {
+            return "test";
+        }
+
+        @Override
+        public int maxContextWindow() {
+            return 256_000;
         }
     }
 

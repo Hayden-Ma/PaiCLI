@@ -1,5 +1,6 @@
 package com.paicli.skill;
 
+import com.paicli.llm.LlmClient;
 import com.paicli.tool.LoadedSkillMessages;
 import com.paicli.tool.ToolRegistry;
 import com.paicli.tool.ToolRegistry.ToolExecutionResult;
@@ -10,6 +11,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -67,6 +69,23 @@ class LoadSkillToolTest {
         assertTrue(results.get(0).result().contains("已加载 skill 'huge'"));
         String message = LoadedSkillMessages.from(results, tools.getSkillRegistry());
         assertTrue(message.contains("(skill body truncated"), "应包含截断标记");
+    }
+
+    @Test
+    void skillAlreadyInHistoryIsNotInjectedAgain(@TempDir Path tempDir) throws IOException {
+        ToolRegistry tools = toolsWith(registryWith(tempDir, "demo", "desc", "demo-body"));
+        List<LlmClient.Message> history = new ArrayList<>();
+        LoadedSkillMessages.Injection first = LoadedSkillMessages.prepare(
+                load(tools, "{\"name\":\"demo\"}"), tools.getSkillRegistry(), history);
+        history.add(LlmClient.Message.user(first.message()));
+
+        LoadedSkillMessages.Injection second = LoadedSkillMessages.prepare(
+                load(tools, "{\"name\":\"demo\"}"), tools.getSkillRegistry(), history);
+
+        assertTrue(first.message().contains("demo-body"));
+        assertEquals("", second.message());
+        assertTrue(second.results().get(0).result().contains("已在本会话加载"), second.results().get(0).result());
+        assertTrue(second.results().get(0).successful());
     }
 
     @Test

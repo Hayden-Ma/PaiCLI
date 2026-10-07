@@ -272,15 +272,18 @@ public class Agent {
                     renderer().appendToolCalls(
                             turnToolPolicy.visibleToolCalls(response.toolCalls(), toolExposure));
 
-                    List<ToolExecutionResult> toolResults = executeToolCalls(
-                            response.toolCalls(), iteration, turnToolPolicy, toolExposure);
+                    LoadedSkillMessages.Injection skills = LoadedSkillMessages.prepare(
+                            executeToolCalls(response.toolCalls(), iteration, turnToolPolicy, toolExposure),
+                            toolRegistry.getSkillRegistry(),
+                            conversationHistory);
+                    List<ToolExecutionResult> toolResults = skills.results();
                     for (ToolExecutionResult toolResult : toolResults) {
                         appendConversationMessage(
                                 LlmClient.Message.tool(toolResult.id(), ToolResultBoundary.wrap(toolResult)),
                                 "tool_execution");
                     }
                     appendImageToolMessages(toolResults);
-                    appendLoadedSkillMessage(toolResults);
+                    appendLoadedSkillMessage(skills.message());
                     runawayGuard.observe(toolResults).ifPresent(this::appendRunawayReminder);
                     pushStatus(budget, startNanos, "running");
 
@@ -548,8 +551,7 @@ public class Agent {
     }
 
     /** load_skill 成功后，同一轮下一次 LLM 请求前就把 Skill 正文追加进历史。 */
-    private void appendLoadedSkillMessage(List<ToolExecutionResult> toolResults) {
-        String skills = LoadedSkillMessages.from(toolResults, toolRegistry.getSkillRegistry());
+    private void appendLoadedSkillMessage(String skills) {
         if (!skills.isEmpty()) {
             appendConversationMessage(LlmClient.Message.user(skills), "skill_injection");
         }
