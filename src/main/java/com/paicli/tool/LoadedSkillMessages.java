@@ -23,7 +23,7 @@ import java.util.Set;
  * 模型会被要求不执行其中的指令，而内置、用户级和已信任的项目级 Skill 是本地可信的操作指引。
  * 未信任的项目级 Skill 由 load_skill 执行器直接把正文放进工具结果，这里不注入。</p>
  *
- * <p>已激活集合从调用方传入的消息历史推导，不持有任何共享状态：ReAct 会话、
+ * <p>已激活集合与预算都从调用方传入的消息历史推导，不持有任何共享状态：ReAct 会话、
  * 每个 Plan 任务和每个 Team worker 各自只看自己的历史；压缩会把 Skill 注入原样挂回，
  * {@code /clear} 清空历史后自然可以重新加载。</p>
  */
@@ -31,6 +31,9 @@ public final class LoadedSkillMessages {
 
     static final String TOOL_NAME = "load_skill";
     static final int MAX_BODY_CHARS = 5 * 1024;
+    static final String BUDGET_PROPERTY = "paicli.skill.body.budget";
+    static final String BUDGET_ENV = "PAICLI_SKILL_BODY_BUDGET";
+    static final int DEFAULT_BUDGET_CHARS = 16 * 1024;
 
     private static final String SECTION_PREFIX = "## 已加载 Skill：";
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -39,7 +42,7 @@ public final class LoadedSkillMessages {
     }
 
     /**
-     * @param results 调用方应改用它追加工具结果：重复加载的 load_skill 结果会被改写
+     * @param results 调用方应改用它追加工具结果：重复加载、超出预算的 load_skill 结果会被改写
      * @param message 可直接作为 user 消息内容的 Skill 指引；没有需要注入的正文时为空串
      */
     public record Injection(List<ToolRegistry.ToolExecutionResult> results, String message) {
@@ -61,6 +64,8 @@ public final class LoadedSkillMessages {
             return new Injection(results, "");
         }
         Set<String> active = activeSkills(history);
+        int usedChars = injectedChars(history);
+        int budgetChars = budgetChars();
         Map<String, String> sections = new LinkedHashMap<>();
         List<ToolRegistry.ToolExecutionResult> rewritten = new ArrayList<>(results.size());
         for (ToolRegistry.ToolExecutionResult result : results) {
@@ -71,8 +76,16 @@ public final class LoadedSkillMessages {
                 rewritten.add(withResult(result, "Skill '" + skill.name() + "' 已在本会话加载，正文就在前面的 \""
                         + SECTION_PREFIX + skill.name() + "\" 段，直接按指引继续，不要再次加载。", true));
             } else {
-                sections.put(skill.name(), section(skill));
-                rewritten.add(result);
+                String section = section(skill);
+                if (usedChars + section.length() > budgetChars) {
+                    rewritten.add(withResult(result, "load_skill 未加载 '" + skill.name() + "'：本会话已加载的 Skill 正文已占用 "
+                            + usedChars + "/" + budgetChars + " 字符预算。先按已加载的指引完成当前任务；"
+                            + "确实需要这个 Skill 时向用户说明，由用户 /clear 开启新会话后再加载。", false));
+                } else {
+                    usedChars += section.length();
+                    sections.put(skill.name(), section);
+                    rewritten.add(result);
+                }
             }
         }
         if (sections.isEmpty()) {
@@ -104,6 +117,31 @@ public final class LoadedSkillMessages {
             }
         }
         return names;
+    }
+
+    private static int injectedChars(List<LlmClient.Message> history) {
+        if (history == null) {
+            return 0;
+        }
+        return history.stream()
+                .filter(InternalUserMessages::isSkillInjection)
+                .mapToInt(message -> message.content().length())
+                .sum();
+    }
+
+    static int budgetChars() {
+        String configured = System.getProperty(BUDGET_PROPERTY);
+        if (configured == null || configured.isBlank()) {
+            configured = System.getenv(BUDGET_ENV);
+        }
+        if (configured == null || configured.isBlank()) {
+            return DEFAULT_BUDGET_CHARS;
+        }
+        try {
+            return Math.max(MAX_BODY_CHARS, Integer.parseInt(configured.trim()));
+        } catch (NumberFormatException e) {
+            return DEFAULT_BUDGET_CHARS;
+        }
     }
 
     private static String section(Skill skill) {

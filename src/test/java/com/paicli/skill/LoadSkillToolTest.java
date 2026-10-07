@@ -145,6 +145,36 @@ class LoadSkillToolTest {
     }
 
     @Test
+    void sessionBudgetRejectsNewSkillOnceExhausted(@TempDir Path tempDir) throws IOException {
+        Path userRoot = tempDir.resolve("user-skills");
+        for (String name : List.of("alpha", "beta")) {
+            Files.createDirectories(userRoot.resolve(name));
+            Files.writeString(userRoot.resolve(name).resolve("SKILL.md"),
+                    "---\nname: " + name + "\ndescription: d\n---\n" + "x".repeat(4_000) + "\n");
+        }
+        SkillRegistry registry = new SkillRegistry(null, userRoot, null, new SkillStateStore(tempDir.resolve("s.json")));
+        registry.reload();
+        ToolRegistry tools = toolsWith(registry);
+        String old = System.getProperty("paicli.skill.body.budget");
+        System.setProperty("paicli.skill.body.budget", "6000");
+        try {
+            List<LlmClient.Message> history = new ArrayList<>();
+            history.add(LlmClient.Message.user(LoadedSkillMessages.prepare(
+                    load(tools, "{\"name\":\"alpha\"}"), registry, history).message()));
+
+            LoadedSkillMessages.Injection beta = LoadedSkillMessages.prepare(
+                    load(tools, "{\"name\":\"beta\"}"), registry, history);
+
+            assertEquals("", beta.message());
+            assertFalse(beta.results().get(0).successful());
+            assertTrue(beta.results().get(0).result().contains("字符预算"), beta.results().get(0).result());
+        } finally {
+            if (old == null) System.clearProperty("paicli.skill.body.budget");
+            else System.setProperty("paicli.skill.body.budget", old);
+        }
+    }
+
+    @Test
     void untrustedProjectSkillStaysInUntrustedToolResultUntilTrusted(@TempDir Path tempDir) throws IOException {
         Path projectSkills = tempDir.resolve("project").resolve(".paicli").resolve("skills");
         Files.createDirectories(projectSkills.resolve("deploy"));
