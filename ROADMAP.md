@@ -508,7 +508,7 @@
   - `modes/agent.md` / `modes/plan.md` / `modes/planner.md` / `modes/team-planner.md` / `modes/team-worker.md` / `modes/team-reviewer.md`：各模式的工作流预期和权限
   - `approvals/suggest.md` / `approvals/auto.md` / `approvals/never.md`：审批策略
   - `personalities/calm.md`：语调（保留现有 `AGENTS.md` 中的 Personality 规范）
-- `PromptAssembler`：按固定顺序组装（base → personality → mode → approval → project_context → skills → context_mgmt → handoff），遵循"volatile content last"原则以最大化 KV prefix cache 命中率
+- `PromptAssembler`：按稳定度从高到低组装（base → personality → mode → approval → context_mgmt → handoff → skills → runtime_context → project_context），遵循"volatile content last"原则以最大化 KV prefix cache 命中率
 - 用户级覆盖：`~/.paicli/prompts/base.md` 可整体替换内置 base.md；`~/.paicli/prompts/modes/agent.md` 可覆盖特定模式；项目级 `.paicli/prompts/...` 优先级更高
 - 启动时校验：必含 `## Language` section（保证 reasoning_content 语言跟随）
 - 兼容旧有 API：`Agent.java` / `PlanExecuteAgent.java` / `SubAgent.java` / `Planner.java` 不再手写运行模式 prompt，改为调 `PromptAssembler.assemble(mode, context)`
