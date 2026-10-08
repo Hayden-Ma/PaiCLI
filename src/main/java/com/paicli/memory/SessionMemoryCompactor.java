@@ -124,7 +124,7 @@ public class SessionMemoryCompactor {
                 return false;
             }
 
-            // Skill 正文由重建时原样挂回，runaway 提醒只对当次任务有效，二者都不进入会话记忆
+            // Skill 正文压缩后由模型按需重新加载，runaway 提醒只对当次任务有效，二者都不进入会话记忆
             List<LlmClient.Message> delta = history.subList(coveredUntil, preserveFrom).stream()
                     .filter(message -> !InternalUserMessages.isInternal(message))
                     .toList();

@@ -12,7 +12,7 @@
 
 比如说，让 PaiCLI 抓一篇未知的 URL。
 
-合理的决策是：先用 web_fetch 试试能不能直接抓到正文，抓不到就切 Chrome DevTools MCP 上浏览器，浏览器也抓不到就走 Jina Reader 兜底。
+合理的决策是：先用 web_fetch 试试能不能直接抓到文章内容，抓不到就切 Chrome DevTools MCP 上浏览器，浏览器也抓不到就走 Jina Reader 兜底。
 
 
 ![](https://cdn.paicoding.com/paicoding/93e5d621981c12922ebb6ee6ef02fa0f.png)
@@ -116,7 +116,7 @@ rm -rf ~/.paicli/skills/web-access
 
 ## 03、SKILL.md 的结构
 
-每个 Skill 的核心就是一个 `SKILL.md` 文件，分两部分：YAML frontmatter（元数据）和 Markdown body（决策手册正文）。
+每个 Skill 的核心就是一个 `SKILL.md` 文件，分两部分：YAML frontmatter（元数据）和 frontmatter 之后的 Markdown 决策手册。后文把前者里的 name + description 叫“索引”，把后者叫“SKILL.md 正文”，代码里对应 `Skill.body()`。
 
 ```markdown
 ---
@@ -205,7 +205,7 @@ LLM 的 system prompt 里会有一段 Skill 索引：
 
 判断准则：当任务描述匹配某个 skill 的触发场景时，调用 load_skill(name) 加载完整指引；
 加载后完整指引会紧跟在 load_skill 工具结果之后，以 "## 已加载 Skill" 段落出现，先读指引再继续当前任务。
-不要重复加载同一 skill；同一会话内一次足够。
+正文还在上下文里时直接按它做；上下文压缩后正文会被移出，还需要时重新 load_skill。
 ```
 
 LLM 看到问题涉及联网操作，就自己调 `load_skill("web-access")`。
@@ -222,20 +222,18 @@ LLM 看到问题涉及联网操作，就自己调 `load_skill("web-access")`。
 ![](https://cdn.paicoding.com/paicoding/7cc51f041891c44a1556b44a87657f52.jpg)
 
 
-模型先用 web_fetch 试了一次（微信文章是 SPA，抓不到正文），接着切 Chrome DevTools MCP 用浏览器打开页面拿到了完整内容。
+模型先用 web_fetch 试了一次（微信文章是 SPA，抓不到文章内容），接着切 Chrome DevTools MCP 用浏览器打开页面拿到了完整内容。
 
-不过这张截图是早期版本录的，仔细看思考过程，模型这一次其实没有调用 load_skill，它说的是“According to my instructions”，依据的是 system prompt 里的联网路由规则。“先 web_fetch、失败再切浏览器”这条规则 system prompt 里本来就有。Skill 真正派上用场的，是 system prompt 没有覆盖、只写在 SKILL.md 里的经验，比如各站点的登录态处理、Jina 兜底的时机。
+不过仔细看思考过程，模型这一次其实没有调用 load_skill，它说的是“According to my instructions”，依据的是 system prompt 里的联网路由规则。“先 web_fetch、失败再切浏览器”这条规则 system prompt 里本来就有。Skill 真正派上用场的，是 system prompt 没有覆盖、只写在 SKILL.md 里的经验，比如各站点的登录态处理、Jina 兜底的时机。
 
 **这就是 Skill 的价值——让 Agent 学会正确的做事方法。**
 
-## 06、Skill 正文什么时候生效
-
-> 9 月更新：这一节的旧版写的是“body 在下一轮 user message 前置注入”。有读者在评论区指出，这里的“下一轮”其实是用户下一次发消息，模型调完 load_skill 之后的那几次请求根本看不到正文。我回去翻了代码，确实如此，之前以为修过了，其实没有。现在已经改成同一轮生效，下面按新代码讲。
+## 06、SKILL.md 正文什么时候生效
 
 当 LLM 调用 `load_skill("web-access")` 时，PaiCLI 做了两件事：
 
 1. 工具返回一条简短确认：“已加载 skill 'web-access' 的完整指引（N 字符），正文紧跟在本工具结果之后”
-2. Agent 拿到这批工具结果后，在下一次请求模型之前，再追加一条 user 消息，内容是 SKILL.md 的正文
+2. Agent 拿到这批工具结果后，在下一次请求模型之前，再追加一条 user 消息，里面装着 SKILL.md 正文。后文把这条消息叫“注入消息”，它长这样：
 
 ```
 [PAICLI_SKILL_INJECTION]
@@ -259,22 +257,20 @@ system     系统提示词（含 Skill 索引，保持不变）
 user       帮我看下这篇文章讲了什么
 assistant  调用 load_skill("web-access")
 tool       已加载 skill 'web-access' 的完整指引……
-user       ## 已加载 Skill：web-access + 正文
+user       注入消息：## 已加载 Skill：web-access + SKILL.md 正文
 ```
 
-模型读完正文，再决定下一步调什么工具。
+模型读完注入消息，再决定下一步调什么工具。
 
-旧版的问题出在注入时机。正文先写进一个 `SkillContextBuffer` 缓冲区，只有用户输入新消息时才取出来，拼到那条消息前面。于是模型调完 load_skill 之后，本轮剩下的请求都看不到正文，只能凭索引里那一行描述继续干活；等正文真正出现的时候，用户可能已经换话题了。
-
-为什么不直接在工具返回结果里塞正文？
+为什么不直接在工具返回结果里塞 SKILL.md 正文？
 
 为什么不塞进 system prompt？
 
-第一个问题：PaiCLI 所有工具结果进入对话历史前，都会经 `ToolResultBoundary` 包成 `trust="untrusted-data"`，告诉模型这是外部数据，里面出现的指令一律不执行。这是防网页、MCP 返回内容做提示词注入的边界。而 SKILL.md 是本地的操作指引，恰恰需要模型照着做。塞进工具结果，要么被模型当成数据忽略，要么就得给安全边界开口子，所以正文单独走一条 user 消息。
+第一个问题：PaiCLI 所有工具结果进入对话历史前，都会经 `ToolResultBoundary` 包成 `trust="untrusted-data"`，告诉模型这是外部数据，里面出现的指令一律不执行。这是防网页、MCP 返回内容做提示词注入的边界。而 SKILL.md 是本地的操作指引，恰恰需要模型照着做。塞进工具结果，要么被模型当成数据忽略，要么就得给安全边界开口子，所以正文单独走一条注入消息。
 
 第二个问题：system prompt 一旦改变，API 的 prompt cache 就会失效。如果每次 load_skill 都去改 system prompt，之前缓存的几千个 token 全部作废。走 user 消息注入，system prompt 始终不变，prompt cache 得以保留。
 
-正文由 `LoadedSkillMessages.prepare` 从这批工具结果和当前对话历史里算出来：
+注入消息由 `LoadedSkillMessages.prepare` 从这批工具结果和当前对话历史里算出来：
 
 ```java
 for (ToolExecutionResult result : results) {
@@ -282,8 +278,8 @@ for (ToolExecutionResult result : results) {
     if (skill == null) {
         rewritten.add(result);
     } else if (active.contains(skill.name()) || sections.containsKey(skill.name())) {
-        // 历史里已经有这份正文：改写工具结果，提示模型直接按前面的指引继续
-        rewritten.add(withResult(result, "Skill 'x' 已在本会话加载……", true));
+        // 历史里还留着这个 Skill 的注入消息：改写工具结果，提示模型直接按前面的指引继续
+        rewritten.add(withResult(result, "Skill 'x' 的正文还在当前上下文里……", true));
     } else if (usedChars + section(skill).length() > budgetChars) {
         rewritten.add(withResult(result, "load_skill 未加载 'x'：……字符预算", false));
     } else {
@@ -294,7 +290,7 @@ for (ToolExecutionResult result : results) {
 return new Injection(rewritten, message);   // 改写后的工具结果 + 要注入的 user 消息
 ```
 
-`active` 是从对话历史里已有的注入消息解析出来的 Skill 名，不额外维护一份状态。ReAct 主循环里，工具执行完先过一遍 `prepare`，再把改写后的结果写进历史：
+`active` 是从对话历史里现存的注入消息解析出来的 Skill 名，`usedChars` 是这些注入消息的总字符数，都不额外维护一份状态。ReAct 主循环里，工具执行完先过一遍 `prepare`，再把改写后的结果写进历史：
 
 ```java
 LoadedSkillMessages.Injection skills = LoadedSkillMessages.prepare(
@@ -308,7 +304,7 @@ for (ToolExecutionResult toolResult : toolResults) {
             "tool_execution");
 }
 appendImageToolMessages(toolResults);
-appendLoadedSkillMessage(skills.message());   // 同一轮就把 Skill 正文交给模型
+appendLoadedSkillMessage(skills.message());   // 同一轮就把注入消息交给模型
 continue;
 ```
 
@@ -316,19 +312,19 @@ Plan 模式的每个任务、Team 模式的每个 Worker 都有自己的工具�
 
 ## 07、几个细节
 
-①、**失败不注入**：只看成功的 load_skill 结果，并且按参数重新从 SkillRegistry 查一遍。Skill 不存在、已禁用，或者这次调用被策略拒绝，都不会注入正文。
+①、**失败不注入**：只看成功的 load_skill 结果，并且按参数重新从 SkillRegistry 查一遍。Skill 不存在、已禁用，或者这次调用被策略拒绝，都不会生成注入消息。
 
-②、**同一会话只注入一次**：去重按对话历史判断，不靠提示词。模型在同一会话里再调一次 load_skill，工具结果会被改写成“已在本会话加载，正文就在前面”，不会再塞一份正文。
+②、**上下文里只留一份**：去重按对话历史判断。某个 Skill 的注入消息还在历史里时，模型再调 load_skill，工具结果会被改写成“正文还在当前上下文里”，不会再追加一条。注入消息被压缩删掉之后，再加载就是正常注入。
 
-③、**5KB 截断**：正文超过 5KB 会在行边界截断，末尾提示 `load_skill(name="x", file="SKILL.md", offset=N)`，模型照着调用就能从截断处接着读。这里不能提示 `/skill show`，那是给用户敲的命令，模型调不了。
+③、**5KB 截断**：SKILL.md 正文超过 5KB 会在行边界截断，末尾提示 `load_skill(name="x", file="SKILL.md", offset=N)`，模型照着调用就能从截断处接着读。这里不能提示 `/skill show`，那是给用户敲的命令，模型调不了。
 
-④、**会话级预算**：同一会话里注入的 Skill 正文合计默认不超过 16KB（`PAICLI_SKILL_BODY_BUDGET` 可调）。超出时新的 load_skill 不注入，返回提示让模型先按已加载的指引把当前任务做完。不按数量设上限，也不做先进先出淘汰：淘汰掉的正文模型还以为在，比没加载更糟。
+④、**上下文预算**：历史里注入消息合计默认不超过 16KB（`PAICLI_SKILL_BODY_BUDGET` 可调）。超出时新的 load_skill 不注入，返回提示让模型先按已加载的指引把当前任务做完；`/compact` 或 `/clear` 删掉注入消息后，预算自然释放。不按数量设上限，也不在超预算时自动淘汰旧的注入消息：淘汰发生在模型不知情的时候，它还以为指引在，比没加载更糟。压缩删除不一样，摘要里会写明哪些 Skill 被移出。
 
-⑤、**没有共享状态**：旧版 ReAct、Plan、Team 共用同一个缓冲区，Plan 模式里并行任务 A 加载的 Skill，可能被并行任务 B 或者下一次 ReAct 输入取走。旧版文章还说 Planner、Worker、Reviewer 各持有独立的缓冲区，这也不是实情，`AgentOrchestrator` 里三个角色用的是同一个实例。现在正文只从当前这批工具结果里算出来，谁加载谁拿到，并行任务之间不会串。另外，Team 模式的 Planner 和 Reviewer 请求本来就不暴露工具，调不了 load_skill。
+⑤、**没有共享状态**：注入消息只从当前这批工具结果和调用方自己的对话历史里算出来，谁加载谁拿到。Plan 模式的并行任务、Team 模式的各个 Worker 各看各的历史，互不串。Team 模式的 Planner 和 Reviewer 请求不暴露工具，调不了 load_skill。
 
-⑥、**压缩不丢正文**：注入之后，正文留在对话历史里，后续轮次模型都能看到，直到 `/clear` 清空。上下文压缩按 user 消息切分轮次，带 `[PAICLI_SKILL_INJECTION]` 标记的注入消息不算轮次，也不交给摘要模型；被切到摘要范围里的注入消息原样挂回摘要之后。否则一次 load_skill 就会多出一个假轮次挤掉真实上下文，正文还会被压成一两句，而模型又被告知不要重复加载，指引就永久丢了。改了 SKILL.md 之后，先 `/skill reload`，再 `/clear`，才能让模型读到新版本。
+⑥、**压缩时丢了再读**：注入消息留在对话历史里，后续请求模型都能看到。上下文压缩按 user 消息切分轮次，带 `[PAICLI_SKILL_INJECTION]` 标记的注入消息不算轮次，否则一次 load_skill 就多出一个假轮次，挤掉真实的用户上下文。被切到摘要范围里的注入消息也不交给摘要模型（摘要会把操作指引压成一两句，甚至记成用户要求），而是直接删除，摘要末尾列出对应的 Skill 名，模型还需要时重新 load_skill。改了 SKILL.md 之后，先 `/skill reload`，再 `/compact` 或 `/clear`，才能让模型读到新版本。
 
-⑦、**项目级 Skill 要先信任**：`.paicli/skills/` 随仓库分发，克隆一个陌生仓库，里面的 SKILL.md 不该直接以可信指引的身份进上下文。未信任的项目级 Skill 被加载时，正文放在工具结果里，跟网页内容一样包成 untrusted-data，模型只能拿来参考。用户先 `/skill show` 看过正文，再 `/skill trust <name>` 信任，之后加载才走正常注入。信任绑定 SKILL.md 路径和正文指纹，仓库更新改了正文就要重新信任。内置和用户级 Skill 是你自己装的，不需要这一步。
+⑦、**项目级 Skill 要先信任**：`.paicli/skills/` 随仓库分发，克隆一个陌生仓库，里面的 SKILL.md 不该直接以可信指引的身份进上下文。未信任的项目级 Skill 被加载时，不生成注入消息，SKILL.md 正文放在工具结果里，跟网页内容一样包成 untrusted-data，模型只能拿来参考。用户先 `/skill show` 看过正文，再 `/skill trust <name>` 信任，之后加载才生成注入消息。信任绑定 SKILL.md 路径和 SKILL.md 正文的指纹，仓库更新改了正文就要重新信任。内置和用户级 Skill 是你自己装的，不需要这一步。
 
 先让 Agent 加载 web-access：
 
@@ -347,7 +343,7 @@ Plan 模式的每个任务、Team 模式的每个 Worker 都有自己的工具�
 ![](https://cdn.paicoding.com/paicoding/1a1363988287d0ec90701d3578f034c8.jpg)
 
 
-第二轮不需要再调 load_skill，上一轮注入的正文还在对话历史里，模型直接参照就行。
+第二轮不需要再调 load_skill，上一轮的注入消息还在对话历史里，模型直接参照就行。
 
 
 ## 08、web-access Skill 深度解析
@@ -372,7 +368,7 @@ web-access 的 SKILL.md 大致分这几个板块：
 
 | 站点               | 要点                                         |
 | ------------------ | -------------------------------------------- |
-| mp.weixin.qq.com   | SPA 渲染，web_fetch 拿不到正文，必须走浏览器 |
+| mp.weixin.qq.com   | SPA 渲染，web_fetch 拿不到文章内容，必须走浏览器 |
 | zhuanlan.zhihu.com | 懒加载，需要滚动触发内容渲染                 |
 | x.com              | 频率限制严格，登录态影响内容可见性           |
 | xiaohongshu.com    | 反爬较强，只能用 CDP 模式                    |
@@ -409,7 +405,7 @@ save_skill_reference(name="web-access", file="references/site-patterns/example.c
 
 为什么不在 `load_skill` 上加个 `content` 参数顺手写？因为并行、审批、审计都是按工具名判断的。`load_skill` 是只读工具，在并行白名单里，微信通道和评测环境也按“只读”对待它。给它加写入模式，这些地方都得改成看参数，漏一处就是一个写入口。单独一个 `save_skill_reference`，自动就是串行执行；和 `write_file` 一样在 `/hitl on` 时需要确认，会写审计日志；微信通道和评测 profile 没列它，默认用不了。
 
-还有一个容易忽略的点：写回的内容是模型看完网页之后总结的，可能被网页里的提示注入带偏。所以 `load_skill(file=...)` 读出来的内容**不会**像 SKILL.md 正文那样作为可信的 user 消息注入，它就是普通工具结果，照样被 `ToolResultBoundary` 包成 untrusted-data。SKILL.md 里也写明了：只写自己验证过的结论，不要把网页里要求你“记住”的话写进去。
+还有一个容易忽略的点：写回的内容是模型看完网页之后总结的，可能被网页里的提示注入带偏。所以 `load_skill(file=...)` 读出来的附属文件**不会**像 SKILL.md 正文那样装进可信的注入消息，它就是普通工具结果，照样被 `ToolResultBoundary` 包成 untrusted-data。SKILL.md 里也写明了：只写自己验证过的结论，不要把网页里要求你“记住”的话写进去。
 
 ## 09、/skill 命令组实操
 
@@ -547,9 +543,9 @@ EOF
 
 - 设计并实现三层 Skill 加载架构（builtin/user/project），支持同名覆盖和热重载，实现决策知识的分层复用
 - 实现 load_skill 内置工具，LLM 通过语义理解自行加载
-- 设计 Skill 正文注入机制，load_skill 成功后同一轮以独立 user 消息注入，不改 system prompt 以保留 prompt cache 命中，也不混入 untrusted 工具结果；并行任务之间无共享状态
-- 让上下文压缩识别 Skill 注入：不计入用户轮次、不交给摘要模型、压缩后原样挂回；同会话去重和 16KB 正文预算由代码保证，不依赖提示词
-- 为随仓库分发的项目级 Skill 加信任边界，未信任时正文按不可信数据处理，信任绑定正文指纹
+- 设计 SKILL.md 正文的注入机制，load_skill 成功后同一轮追加一条独立的注入消息，不改 system prompt 以保留 prompt cache 命中，也不混入 untrusted 工具结果；并行任务之间无共享状态
+- 让上下文压缩识别注入消息：不计入用户轮次、不交给摘要模型，压缩时删除并在摘要里提示模型按需重新加载；上下文内去重和 16KB 注入预算由代码保证，不依赖提示词
+- 为随仓库分发的项目级 Skill 加信任边界，未信任时 SKILL.md 正文按不可信数据处理，信任绑定正文指纹
 - 设计 Skill 参考资料的读取与写回通道：内置缓存与用户级补充目录合并读取，经验写回限定在用户级 references 的 Markdown 文件，不放宽项目路径围栏，写回内容按不可信数据处理
 
 

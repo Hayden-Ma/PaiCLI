@@ -31,7 +31,7 @@ class CompactorIgnoresInternalUserMessagesTest {
     }
 
     @Test
-    void retainsRealRoundsKeepsSkillBodyOutOfSummaryAndReattachesIt() {
+    void retainsRealRoundsAndDropsSkillBodyWithReloadHint() {
         List<LlmClient.Message> history = new ArrayList<>();
         history.add(LlmClient.Message.system("system"));
         addRound(history, "Q1");
@@ -51,14 +51,16 @@ class CompactorIgnoresInternalUserMessagesTest {
         assertTrue(compactor.summarized.stream().anyMatch(m -> m.content().startsWith("Q1")));
 
         assertTrue(history.get(1).content().contains("SUMMARY"));
+        assertTrue(history.get(1).content().contains("Skill 正文已随压缩移出上下文：web-access"),
+                "摘要应提示哪些 Skill 需要重新加载");
         assertEquals("assistant", history.get(2).role());
-        assertSame(injection, history.get(3), "被移出的 Skill 正文应原样挂回摘要之后");
-        assertTrue(history.get(4).content().startsWith("Q2"), "保留的应是最近 3 个真实轮次");
+        assertFalse(history.contains(injection), "被切到摘要范围的 Skill 正文应移出上下文");
+        assertTrue(history.get(3).content().startsWith("Q2"), "保留的应是最近 3 个真实轮次");
         assertTrue(history.stream().noneMatch(m -> m.content() != null && m.content().contains("换个思路")));
     }
 
     @Test
-    void sessionMemoryRebuildAlsoReattachesSkillBody() {
+    void sessionMemoryRebuildAlsoDropsSkillBody() {
         StubSessionMemoryCompactor compactor = new StubSessionMemoryCompactor();
         List<LlmClient.Message> history = new ArrayList<>();
         history.add(LlmClient.Message.system("system"));
@@ -77,7 +79,8 @@ class CompactorIgnoresInternalUserMessagesTest {
         assertTrue(compactor.compactIfReady(history, trigger));
 
         assertTrue(history.get(1).content().contains("[会话记忆摘要]"));
-        assertTrue(history.contains(injection), "会话记忆路径同样要保留 Skill 正文");
+        assertFalse(history.contains(injection), "会话记忆路径同样把 Skill 正文移出上下文");
+        assertTrue(history.get(1).content().contains("Skill 正文已随压缩移出上下文：web-access"));
     }
 
     private static void addRound(List<LlmClient.Message> history, String question) {

@@ -128,7 +128,7 @@ class LoadSkillToolTest {
     }
 
     @Test
-    void skillAlreadyInHistoryIsNotInjectedAgain(@TempDir Path tempDir) throws IOException {
+    void skillStillInHistoryIsNotInjectedTwice(@TempDir Path tempDir) throws IOException {
         ToolRegistry tools = toolsWith(registryWith(tempDir, "demo", "desc", "demo-body"));
         List<LlmClient.Message> history = new ArrayList<>();
         LoadedSkillMessages.Injection first = LoadedSkillMessages.prepare(
@@ -140,7 +140,7 @@ class LoadSkillToolTest {
 
         assertTrue(first.message().contains("demo-body"));
         assertEquals("", second.message());
-        assertTrue(second.results().get(0).result().contains("已在本会话加载"), second.results().get(0).result());
+        assertTrue(second.results().get(0).result().contains("正文还在当前上下文里"), second.results().get(0).result());
         assertTrue(second.results().get(0).successful());
     }
 

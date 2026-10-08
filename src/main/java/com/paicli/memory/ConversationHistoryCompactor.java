@@ -6,8 +6,10 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * 完整对话摘要压缩器，直接压缩 Agent 实际发给 LLM 的
@@ -22,10 +24,10 @@ import java.util.Locale;
  * 2. 找出所有真实用户输入的索引（Skill 注入、runaway 提醒不算轮次）；保留最近 retainRecentRounds 个起算的尾部
  * 3. 把 system 之后、splitIdx 之前除 Skill 注入和 runaway 提醒外的消息喂给 LLM 摘要
  * 4. 重建：[system] + [user("[已压缩的历史对话摘要]\n" + summary)] +
- *         [assistant("好的，已了解上下文。请继续。")] + [被移出的 Skill 注入原样挂回] + [尾部保留消息]
+ *         [assistant("好的，已了解上下文。请继续。")] + [尾部保留消息]
  *
  * 关键约束：分割点必然落在 user message 边界，避免切断 tool_call / tool_result 的成对协议。
- * Skill 正文原样挂回而不是交给摘要：模型被要求同一会话不重复加载，正文一旦被摘要掉，指引就永久丢失。
+ * Skill 正文不交给摘要，随压缩直接移出上下文，摘要末尾列出被移出的 Skill 名，模型需要时重新 load_skill。
  */
 public class ConversationHistoryCompactor {
 
@@ -337,11 +339,14 @@ public class ConversationHistoryCompactor {
         for (int i = 0; i < systemEnd; i++) {
             rebuilt.add(history.get(i));
         }
-        rebuilt.add(LlmClient.Message.user(summaryMessage));
+        Set<String> removedSkills = new LinkedHashSet<>();
+        history.subList(systemEnd, splitIdx)
+                .forEach(message -> removedSkills.addAll(InternalUserMessages.skillNames(message)));
+        String summary = removedSkills.isEmpty() ? summaryMessage : summaryMessage
+                + "\n\n[Skill 正文已随压缩移出上下文：" + String.join("、", removedSkills)
+                + "。还需要按这些 Skill 操作时，重新调用 load_skill 加载。]";
+        rebuilt.add(LlmClient.Message.user(summary));
         rebuilt.add(LlmClient.Message.assistant("好的，我已了解之前的上下文，请继续。"));
-        history.subList(systemEnd, splitIdx).stream()
-                .filter(InternalUserMessages::isSkillInjection)
-                .forEach(rebuilt::add);
         rebuilt.addAll(history.subList(splitIdx, history.size()));
         return rebuilt;
     }

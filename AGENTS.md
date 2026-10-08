@@ -114,8 +114,8 @@ src/main/java/com/paicli/
 ### 输出与 Skill
 
 - 共享 `prompts/handoff.md` 要求遵守用户的严格输出格式（只要 JSON/CSV/值时不加围栏和总结），但这不是确定性保证
-- Skill 索引注入 system prompt（上限 20 个 / 4KB）；`load_skill` 成功后同一轮在工具结果之后以独立 user 消息注入正文（`LoadedSkillMessages`），不要改回等下一条用户消息
-- Skill 注入首行带 `[PAICLI_SKILL_INJECTION]`：压缩不计轮次、不交给摘要、原样挂回；会话去重与 16KB 预算从消息历史推导，不另存状态。附属文件走 `load_skill(name, file)`，`references/` 下合并用户级补充 `~/.paicli/skills/<name>/references/`；经验写回只走 `save_skill_reference`（只写补充目录的 `references/**.md`）。不放宽 PathGuard，不让 SKILL.md 指示模型用 `read_file` / `execute_command` 访问 `~/.paicli/`；未 `/skill trust` 的项目级 Skill 正文只进 untrusted 工具结果
+- Skill 分三样：索引（frontmatter 的 name + description）常驻 system prompt（上限 20 个 / 4KB）；SKILL.md 正文（frontmatter 之后的部分）在 `load_skill(name)` 成功后，同一轮紧跟工具结果追加一条注入消息（独立 user 消息，`LoadedSkillMessages`），不要改回等下一条用户消息；附属文件走 `load_skill(name, file)`，以普通工具结果返回
+- 注入消息首行带 `[PAICLI_SKILL_INJECTION]`：压缩不计轮次、不交给摘要，被切到摘要范围的注入消息直接删除，摘要末尾列出其中的 Skill 名，模型需要时重新 `load_skill`（不要恢复“原样挂回”或提示词禁止重复加载）；某个 Skill 的注入消息还在历史里时，重复加载不再追加；去重与 16KB 预算（历史里注入消息的总字符数）都从消息历史推导，不另存状态。`references/` 下合并用户级补充 `~/.paicli/skills/<name>/references/`；经验写回只走 `save_skill_reference`（只写补充目录的 `references/**.md`）。不放宽 PathGuard，不让 SKILL.md 指示模型用 `read_file` / `execute_command` 访问 `~/.paicli/`；未 `/skill trust` 的项目级 Skill 不生成注入消息，SKILL.md 正文只进 untrusted 工具结果
 - system prompt 按稳定度排序（静态段 → Skills → runtime → Project Context），新增段落按变化频率插入，别放到随查询变化的记忆之前
 
 ## 修改联动

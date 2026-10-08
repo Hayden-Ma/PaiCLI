@@ -89,7 +89,7 @@ class LoadSkillSameTurnTest {
     }
 
     @Test
-    void reactSkillBodySurvivesManualCompactionAndIsNotReinjected() throws IOException {
+    void reactSkillBodyCanBeReloadedAfterManualCompaction() throws IOException {
         QueueClient llm = new QueueClient(List.of(
                 loadSkillCall("call-1"),
                 answer("第一轮完成"),
@@ -107,9 +107,12 @@ class LoadSkillSameTurnTest {
 
         assertFalse(containsBody(llm.requests.get(3)), "Skill 正文不应交给摘要模型");
         List<LlmClient.Message> last = llm.requests.get(llm.requests.size() - 1);
+        List<LlmClient.Message> beforeReload = llm.requests.get(4);
+        assertFalse(containsBody(beforeReload), "压缩后正文应移出上下文");
+        assertTrue(beforeReload.stream().anyMatch(m -> m.content() != null
+                && m.content().contains("Skill 正文已随压缩移出上下文")), "摘要应提示可以重新加载");
         assertEquals(1, last.stream().filter(m -> m.content() != null && m.content().contains(BODY_MARKER)).count(),
-                "压缩后正文仍在，且重复加载不会再注入一份");
-        assertTrue(last.stream().anyMatch(m -> "tool".equals(m.role()) && m.content().contains("已在本会话加载")));
+                "压缩后重新加载应再注入一份正文");
     }
 
     @Test

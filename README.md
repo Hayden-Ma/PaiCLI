@@ -186,11 +186,11 @@ DeepSeek 的当前内置列表按[官方文档](https://api-docs.deepseek.com/zh
 
 - 三层加载位置（按优先级，后者整体覆盖同名 skill）：jar 内置 < 用户级 `~/.paicli/skills/<name>/` < 项目级 `<project>/.paicli/skills/<name>/`
 - 启动期把启用 skill 的 `name` + `description` 注入三处 Agent 系统提示词索引段（启用上限 20 个，索引段 ≤ 4KB）
-- 内置工具 `load_skill(name)`：LLM 在 system prompt 看到匹配 description 时主动调用，工具结果之后、同一轮下一次 LLM 请求之前，PaiCLI 把 SKILL.md 正文（5KB 在行边界截断）作为独立 user 消息注入（不进入 untrusted 工具结果，也不改 system prompt）；注入头部带来源和 Skill 目录绝对路径
+- 内置工具 `load_skill(name)`：LLM 在 system prompt 看到匹配 description 时主动调用，工具结果之后、同一轮下一次 LLM 请求之前，PaiCLI 把 SKILL.md 正文（frontmatter 之后的部分，5KB 在行边界截断）包成一条注入消息追加进历史（独立 user 消息，不进入 untrusted 工具结果，也不改 system prompt）；注入消息头部带来源和 Skill 目录绝对路径
 - 附属文件：`load_skill(name, file="references/a.md")` 读取 Skill 目录内的文件（传目录则列出文件，支持 offset/limit）；只放行该 Skill 自己的目录，`read_file` 仍只能读项目内文件；截断提示也指向这个调用。`references/` 下的路径同时合并用户级补充目录 `~/.paicli/skills/<name>/references/`（先 Skill 自带、后用户补充；补充目录不放 SKILL.md，不会覆盖内置 skill）
-- 同一会话去重与预算：按对话历史判断，已注入过的 Skill 再加载只返回“已在本会话加载”；同一会话注入正文合计默认 16KB（`PAICLI_SKILL_BODY_BUDGET`），超出时不注入并提示先完成当前任务
-- 压缩保活：Skill 注入消息不计入压缩的用户轮次、不交给摘要模型，被切到摘要范围内时原样挂回摘要之后
-- 项目级 Skill 信任：未信任时正文只放在 untrusted 工具结果里作为参考数据；`/skill show` 确认后 `/skill trust <name>` 信任，信任绑定 SKILL.md 路径和正文 SHA-256，正文改动后需重新信任；内置和用户级 Skill 不需要
+- 去重与预算：按对话历史判断，某个 Skill 的注入消息还在历史里时，再加载只返回“正文还在当前上下文里”；历史里注入消息合计默认 16KB（`PAICLI_SKILL_BODY_BUDGET`），超出时不注入并提示先完成当前任务
+- 压缩：注入消息不计入压缩的用户轮次、不交给摘要模型，被切到摘要范围内时直接删除，摘要末尾列出对应的 Skill，模型需要时重新加载
+- 项目级 Skill 信任：未信任时不生成注入消息，SKILL.md 正文只放在 untrusted 工具结果里作为参考数据；`/skill show` 确认后 `/skill trust <name>` 信任，信任绑定 SKILL.md 路径和 SKILL.md 正文 SHA-256，正文改动后需重新信任；内置和用户级 Skill 不需要
 - `save_skill_reference(name, file, content, overwrite)`：把新验证的站点经验写回用户级补充目录，只能写 `references/` 下的 `.md`，拒绝 `..`、隐藏段和符号链接，单次 ≤ 8000 字符、单文件 ≤ 64KB；默认追加，`overwrite=true` 只替换用户级补充文件，内置缓存不动。不经过也不放宽 PathGuard；与 `write_file` 同档：auto 直接执行，`/hitl on` 需确认，写入审计、按顺序串行
 - 内置 web-access skill：决策手册（浏览哲学四步法 + 工具选择表 + 浏览器优先级 + Jina 兜底说明）+ 6 个站点经验文件（mp.weixin / zhuanlan.zhihu / x.com / xiaohongshu / github / juejin）+ cdp-cheatsheet
 - frontmatter 走手写 YAML 子集解析，不引 SnakeYAML；解析失败 stderr 警告但不阻塞启动

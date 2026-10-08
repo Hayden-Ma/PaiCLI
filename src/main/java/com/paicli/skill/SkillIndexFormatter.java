@@ -48,7 +48,7 @@ public final class SkillIndexFormatter {
         sb.append('\n');
         sb.append("判断准则：当任务描述匹配某个 skill 的触发场景时，调用 load_skill(name) 加载完整指引；")
                 .append("加载后完整指引会紧跟在 load_skill 工具结果之后，以 \"## 已加载 Skill\" 段落出现，先读指引再继续当前任务。")
-                .append("不要重复加载同一 skill；同一会话内一次足够。\n");
+                .append("正文还在上下文里时直接按它做；上下文压缩后正文会被移出，还需要时重新 load_skill。\n");
 
         if (sb.length() > MAX_INDEX_BYTES) {
             String truncated = sb.substring(0, MAX_INDEX_BYTES) + "\n...(skill 索引段被截断)\n";
