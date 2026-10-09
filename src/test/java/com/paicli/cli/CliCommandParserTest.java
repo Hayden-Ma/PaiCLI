@@ -212,6 +212,17 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesResumeSlashCommand() {
+        CliCommandParser.ParsedCommand list = CliCommandParser.parse("/resume");
+        CliCommandParser.ParsedCommand pick = CliCommandParser.parse("/resume  2 ");
+
+        assertEquals(CliCommandParser.CommandType.RESUME, list.type());
+        assertNull(list.payload());
+        assertEquals(CliCommandParser.CommandType.RESUME, pick.type());
+        assertEquals("2", pick.payload());
+    }
+
+    @Test
     void parsesBetterHarnessSlashCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/better-harness");
 

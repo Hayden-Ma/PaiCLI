@@ -1,6 +1,6 @@
 # 第 21 期：图片复制粘贴输入
 
-> 当前状态：MVP 已落地。第 20 期后台任务 + Runtime API 仍未纳入本次实现；本期只打通图片输入协议与 Agent 回灌链路。
+> 当前状态：MVP 已落地。第 20 期后台任务 + Runtime API 仍未纳入本次实现；本期只打通图片输入协议，以及把图片放回 Agent 对话的流程。
 
 ## 目标
 
@@ -21,7 +21,7 @@
   - provider API 负责最终接收或返回错误
 - MCP image content 结构化保留：
   - `McpContent` 读取 `data` / `mimeType`
-  - `McpCallToolResult.toToolOutput()` 生成文本 fallback + 图片附件
+  - `McpCallToolResult.toToolOutput()` 生成备用文本 + 图片附件
   - `ToolRegistry.executeTools()` 返回的 `ToolExecutionResult` 保留 image parts
 - 图片预处理采用 Claude Code 同类策略：
   - 图片不是 OCR 成文本，而是以 `base64 + mimeType` 作为图片块发送
@@ -29,13 +29,13 @@
   - 带 alpha 通道的小 PNG 会先铺白底重编码，避免不同 provider 对透明背景处理不一致
   - 大图先等比缩放到 2000x2000 范围内，并压缩到 5MB base64 API 上限内
   - 额外注入图片来源、原始尺寸、缩放后尺寸和坐标映射提示，不注入图片内容描述
-  - Agent 回灌链路：
+  - 把图片放回 Agent 对话：
   - ReAct / Plan task executor / SubAgent 在工具结果后追加图片 user message
-  - 本地 `@image:` 消息按「文本说明 / source 元信息 / 图片 block」顺序发送，图片 block 保持最后，避免模型优先盯着路径文本走工具兜底
+  - 本地 `@image:` 消息按「文本说明 / source 元信息 / 图片 block」顺序发送，图片 block 保持最后，避免模型优先盯着路径文本、改用工具去读图
   - 本地 `@image:` 文本会明确要求优先分析本轮图片；除非用户要求结合历史，历史对话、历史工具结果、网页 / 仓库信息只能作为背景，不能替代当前图片内容
-  - 新一轮 ReAct / SubAgent 任务开始前会把历史里的 image payload 替换为文本占位，保留 `Image source` 元信息，避免旧截图在同一会话里反复消耗上下文并污染新图分析
+  - 新一轮 ReAct / SubAgent 任务开始前会把历史里的图片数据替换为文本占位，保留 `Image source` 元信息，避免旧截图在同一会话里反复消耗上下文并污染新图分析
   - CLI 输入层不按模型名拦截图片，统一附加为图片块
-  - tool message 仍保留文本 fallback，保证工具调用协议不被破坏
+  - tool message 仍保留备用文本，保证工具调用协议不被破坏
 - 用户输入层：
   - 支持 `@image:file:///abs/path.png`
   - 支持 `@image:/abs/path.png` / `@image:relative/path.png`

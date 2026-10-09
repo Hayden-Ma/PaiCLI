@@ -23,7 +23,7 @@
 | [paicli-cdp-session-reuse.md](paicli-cdp-session-reuse.md) | 第 14 期：CDP 会话复用 |
 | [paicli-skill-system.md](paicli-skill-system.md) | 第 15 期：Skill 系统 |
 | [paicli-image-input.md](paicli-image-input.md) | 第 21 期：图片输入 |
-| [paicli-agentbench.md](paicli-agentbench.md) | 自建评测集：28 道题、证据门禁与 LLM-as-a-Judge |
+| [paicli-agentbench.md](paicli-agentbench.md) | 自建评测集：28 道题、证据检查与 LLM-as-a-Judge |
 
 ## 面试题
 

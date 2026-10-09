@@ -51,7 +51,8 @@ final class CliCommandParser {
         SKILL_TRUST,
         BETTER_HARNESS,
         CONFIG,
-        EXPORT
+        EXPORT,
+        RESUME
     }
 
     record ParsedCommand(CommandType type, String payload) {
@@ -313,6 +314,14 @@ final class CliCommandParser {
 
         if (trimmed.equalsIgnoreCase("/export")) {
             return new ParsedCommand(CommandType.EXPORT, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/resume")) {
+            return new ParsedCommand(CommandType.RESUME, null);
+        }
+
+        if (trimmed.regionMatches(true, 0, "/resume ", 0, 8)) {
+            return new ParsedCommand(CommandType.RESUME, trimmed.substring(8).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/better-harness")) {

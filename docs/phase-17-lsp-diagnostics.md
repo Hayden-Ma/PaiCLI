@@ -1,6 +1,6 @@
 # 第 17 期：LSP 诊断注入
 
-> 当前状态：MVP 已接入。先用 JavaParser 做 Java 语法诊断，打通 post-edit hook 和下一轮 LLM 注入链路；真实 LSP server 进程池留给后续增强。
+> 当前状态：MVP 已接入。先用 JavaParser 做 Java 语法诊断，打通 post-edit hook 和下一轮注入给 LLM 的流程；真实 LSP server 进程池留给后续增强。
 
 ## 目标
 

@@ -10,9 +10,9 @@
 > 3. `src/main/java/com/paicli/agent/Agent.java`、`PlanExecuteAgent.java`、`SubAgent.java`（系统提示词构造路径）
 > 4. `src/main/java/com/paicli/tool/ToolRegistry.java`（本期新增内置工具 `load_skill` 的注册位置）
 > 5. `src/main/java/com/paicli/cli/Main.java` / `CliCommandParser.java`（本期新增 `/skill` 命令组）
-> 6. 参考品：Anthropic 公开的 Claude Code skills（`~/.claude/skills/web-access/` 是用户本机已有的优秀范例，开发 Agent 可读取参考结构与文风，但**不能直接搬代码**——许可与工程化口径都不一样）
+> 6. 参考品：Anthropic 公开的 Claude Code skills（`~/.claude/skills/web-access/` 是用户本机已有的优秀范例，开发 Agent 可读取参考结构与文风，但**不能直接搬代码**——许可和工程做法都不一样）
 >
-> **核心原则**：本期不是写工具，是把「Agent 该怎么思考」沉淀成可复用单元。Skill 是**决策手册** + **按需取用的资料库** + **可执行依赖**三件套，不是 prompt 片段。
+> **核心原则**：本期不是写工具，是把「Agent 该怎么思考」整理成可复用单元。Skill 是**决策手册** + **按需取用的资料库** + **可执行依赖**三件套，不是 prompt 片段。
 >
 > **必读判断准则**：实现过程中若 Skill 内容看起来像「LLM 系统提示词的另一种表达」，方向就错了。Skill 的核心价值在 references/ 的可累积、scripts/ 的可执行、SKILL.md 的决策框架——三者不可分开。
 
@@ -22,7 +22,7 @@
 
 让 PaiCLI 拥有自己的 Skill 体系。Skill 是一个目录（含 `SKILL.md` + 可选 `references/` + 可选 `scripts/`），其中：
 
-- `SKILL.md` 是 Agent 的决策手册（哲学 + 工具选择表 + 优先级 + 兜底策略）
+- `SKILL.md` 是 Agent 的决策手册（哲学 + 工具选择表 + 优先级 + 备用方案）
 - `references/` 是按需读取的资料库（典型用法：站点经验目录 `references/site-patterns/<domain>.md`）
 - `scripts/` 是可执行依赖（通过 `execute_command` 调用，沿用既有 HITL 流程）
 
@@ -38,7 +38,7 @@
 - Banner 升 `v15.0.0`，标语 `Skill-Driven Agent CLI`
 
 **明确不做**（拆给后续期次或永远不做）：
-- 改 `web_fetch` 工具内部链路（**不**做"本地 → Jina → 浏览器"三档级联，违背第 9 期纯本地约定）
+- 改 `web_fetch` 工具内部流程（**不**做"本地 → Jina → 浏览器"三档级联，违背第 9 期纯本地约定）
 - Skill 间依赖声明（`requires` 字段，YAGNI）
 - Skill marketplace / 远程下载 / 自动更新
 - 把 Skill body 全部一次性注入 system prompt（token 成本失控）
@@ -648,7 +648,7 @@ body
 ### 已决策（不要再讨论）
 
 - **不**做 SKILL.md 字段级 merge（用户级整体覆盖内置）
-- **不**改 web_fetch 工具内部链路（Jina 只在 web-access 提示词里）
+- **不**改 web_fetch 工具内部流程（Jina 只在 web-access 提示词里）
 - **不**给 Skill 单独 HITL 维度
 - **不**做 `requires` / 依赖解析
 - **不**实现 `/skill use <name>` 强制路径（用提示词触发即可）
@@ -713,7 +713,7 @@ body
   - 浏览哲学四步法（自己组织语言）
   - 工具选择表（基于 PaiCLI 第 9 / 13 / 14 期能力）
   - 浏览器优先级（先 web_fetch → chrome-devtools isolated → /browser connect 切 shared）
-  - Jina Reader 兜底说明（execute_command + curl r.jina.ai/）
+  - Jina Reader 备用方案说明（execute_command + curl r.jina.ai/）
   - 站点经验目录使用说明
 - **写 6 个 site-patterns**（`mp.weixin.qq.com.md` / `zhuanlan.zhihu.com.md` / `x.com.md` / `xiaohongshu.com.md` / `github.com.md` / `juejin.cn.md`），每个按 §3.7 三段式模板，控制在 60-100 行
 - `references/cdp-cheatsheet.md`：第 13 期 28 工具速查 + 第 14 期 `/browser connect` 用法
@@ -866,12 +866,12 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 
 ---
 
-## 16. 必跑端到端用例：微信公众号文章 + Jina 兜底
+## 16. 必跑端到端用例：微信公众号文章 + Jina 备用方案
 
 这是**第 15 期最关键的端到端用例**，因为它同时验证：
 - LLM 真的会主动调 `load_skill`（验 description 写法）
 - web-access 指引真的影响后续工具选择（验 buffer 注入路径）
-- Jina 兜底真的走 execute_command + HITL（验不绕过安全边界）
+- Jina 备用方案真的走 execute_command + HITL（验不绕过安全边界）
 - 三层覆盖 + reload 真的能用（验生命周期）
 
 **前置**：

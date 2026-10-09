@@ -14,7 +14,7 @@
 
 ---
 
-## 1. 基础链路
+## 1. 基础流程
 
 ### Case 1 — 普通模型也应附加图片块
 
@@ -106,7 +106,7 @@
 
 ## 4. MCP 浏览器截图
 
-### Case 10 — take_screenshot 走图片附件回灌
+### Case 10 — take_screenshot 的截图以图片附件放回对话
 
 ```
 打开 https://www.apple.com 然后用 take_screenshot 截图，告诉我首页主视觉里有什么

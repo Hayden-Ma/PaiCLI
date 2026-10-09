@@ -26,13 +26,13 @@
 | `mcp__*` 全部 MCP 工具 | 默认 HITL | **拒绝** | setup 配置 server/tool 维度允许清单 |
 | 只读工具（`read_file`/`glob_files`/`grep_code`/`list_dir`/`search_code`/`web_search`/`web_fetch`） | 直接执行 | 直接执行 | — |
 
-- 被拒绝的工具调用：把「策略拒绝 + 原因」作为工具结果回灌给模型（让它换路），并写一行审计 JSONL，approver 记 `policy`、outcome 记 `deny`。
+- 被拒绝的工具调用：把「策略拒绝 + 原因」作为工具结果放回对话交给模型（让它换个做法），并写一行审计 JSONL，approver 记 `policy`、outcome 记 `deny`。
 - **`/help` 必须显式声明当前通道的策略级别**，让用户知道自己开了多大口子。
 - 删除原计划里「固定 no-HITL / 最大权限」表述——HITL 是策略层核心环节，不存在「绕过 HITL 但保留策略层」。
 
 ### 2. 绑定与鉴权（解决「谁能敲门」）
 
-iLink 扫码登录的是一个微信账号，`getupdates` 会收到**所有**给该号发消息的人，`boundUserId` 必须是硬门禁：
+iLink 扫码登录的是一个微信账号，`getupdates` 会收到**所有**给该号发消息的人，`boundUserId` 必须是硬性的放行条件：
 
 - **setup 扫码确认**：iLink 二维码由目标微信扫码确认后，直接使用扫码返回的 `ilink_user_id` 作为 `boundUserId`；不再额外要求验证码，避免 setup 完成前出现一次临时对话又退出的困惑。
 - **非绑定用户消息**：一律 drop，**但必须写审计日志**（记录 senderId 脱敏值 + 时间 + "unbound_drop"），不能静默——静默等于不知道有人在试探。
@@ -63,7 +63,7 @@ getupdates → [鉴权: boundUserId?] → [分类]
 ### 5. 合规与隐私边界（文档必须显式声明）
 
 - **封号风险**：iLink 走协议号 / hook 形态，违反微信使用条款，存在封号先例。文档显著位置声明，**建议用户使用小号**，不要绑定主力微信。
-- **第三方可见**：分块发送的文本会经过 iLink / 微信链路，等于明文经过第三方。文档必须写明这条隐私边界，敏感内容不要走微信通道。
+- **第三方可见**：分块发送的文本会经过 iLink / 微信的传输通道，等于明文经过第三方。文档必须写明这条隐私边界，敏感内容不要走微信通道。
 - **iLink 客户端供应链**：依赖的安装器是「运行时拉取本体」的 installer，Assumptions 里**锁定具体版本号，禁止 `@latest`**，并在文档说明「插件本体运行时下载」这一事实。
 
 ## Key Changes
@@ -88,7 +88,7 @@ getupdates → [鉴权: boundUserId?] → [分类]
   - `WechatTerminalRenderer` 对微信侧分片做 Markdown 结构感知：未闭合代码块、表格中间不提前 flush，避免客户端收到半个块后渲染失败。
   - turn 取消复用 ReAct `/cancel` 的 cancellation token；普通消息运行中排队。
 - 媒体规则：
-  - 图片下载解密后保存本地，再用现有 `@image:<path>` 链路进入 `ImageReferenceParser`。
+  - 图片下载解密后保存本地，再用现有 `@image:<path>` 流程进入 `ImageReferenceParser`。
   - 非图片文件保存本地，并把文件名和路径注入提示词；是否读取由 Agent 工具决定。
   - **文件推送只走显式 `/send <path>` 或「本 turn 工具产物登记表」**；不再「检测到回复里出现的本地路径就自动上传」——避免把 `~/.ssh/id_rsa`、`~/.paicli/config.json` 等路径无意外发。推送路径同样受 workspace / 白名单约束。
 
@@ -98,7 +98,7 @@ getupdates → [鉴权: boundUserId?] → [分类]
   - top-level `wechat` 命令不要求 API Key、不初始化 Terminal/MCP、不进入 REPL。
   - iLink headers、`context_token`、`get_updates_buf`、`longpolling_timeout_ms`、`ret:-2`、`errcode:-14`。
   - **鉴权**：非 boundUserId 消息被 drop 且写审计；setup 以扫码返回的 `ilink_user_id` 绑定；换绑需重新扫码确认。
-  - **策略**：`execute_command` 默认拒绝、命中白名单放行；MCP 工具默认拒绝；`write_file` 越界被 PathGuard 拒；拒绝结果回灌模型 + 审计 approver=policy/outcome=deny。
+  - **策略**：`execute_command` 默认拒绝、命中白名单放行；MCP 工具默认拒绝；`write_file` 越界被 PathGuard 拒；拒绝结果放回对话交给模型 + 审计 approver=policy/outcome=deny。
   - 微信命令白名单、`/cwd` workspace 限制。
   - **控制命令旁路**：`/stop` 排在普通消息之后仍能立即取消当前 turn；`/pause /resume` 正确暂停/恢复队列消费。
   - 单并发 turn：A/B 消息排队、`/stop` 取消后队列继续。
@@ -125,4 +125,4 @@ getupdates → [鉴权: boundUserId?] → [分类]
 - `/cwd` 只允许切到 setup workspace root 内的目录。
 - 文件推送只来自显式 `/send` 或工具产物登记表；不做「路径出现即上传」。
 - iLink 客户端依赖**锁定具体版本号**（非 `@latest`），且知悉「本体运行时下载」；绑定建议使用微信小号，知悉封号风险。
-- 微信 / iLink 链路可见分块发送的文本内容，敏感内容不应走微信通道。
+- 微信 / iLink 传输过程中能看到分块发送的文本内容，敏感内容不应走微信通道。

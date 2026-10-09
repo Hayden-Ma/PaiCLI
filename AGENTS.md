@@ -1,31 +1,33 @@
 # AGENTS.md
 
-PaiCLI 仓库给 Agent / 新线程的首读入口，Codex 直接读取，Claude Code 通过 `CLAUDE.md` 的 `@AGENTS.md` 导入。这里只放每次改动都要遵守的规则；实现细节见 `docs/agents-reference.md`，评测历史见 `benchmarks/paicli-native-agentbench-v0.1/AGENTS-SNAPSHOT-ARCHIVE.md`。本文件保持在 200 行以内，新增内容优先写进上面两个文件。
+AI 编码助手进入 PaiCLI 仓库时先读这个文件：Codex 直接读取，Claude Code 通过 `CLAUDE.md` 里的 `@AGENTS.md` 导入。这里只放每次改动都要遵守的规则；实现细节写在 `docs/agents-reference.md`，评测历史写在 `benchmarks/paicli-native-agentbench-v0.1/AGENTS-SNAPSHOT-ARCHIVE.md`。本文件控制在 200 行以内，新内容优先写进那两个文件。
+
+写文档和回复用户都用大白话：类名、内部叫法、英文术语第一次出现时说明它是什么；不要生造“账本”“合同”“门禁”这类让人看不懂的叫法。
 
 ## 信息优先级
 
-代码实际行为 > `AGENTS.md` > `PAI.md` > `README.md` > `ROADMAP.md` > `CLAUDE.md`。`ROADMAP.md` 是演进方向，不代表已交付。
+代码实际行为 > `AGENTS.md` > `PAI.md` > `README.md` > `ROADMAP.md` > `CLAUDE.md`。`ROADMAP.md` 写的是打算做什么，不代表已经做完。
 
-## 项目快照
+## 项目概况
 
-- 面向商业使用的 Java Agent CLI，对标 Claude Code；已交付 23 期（ReAct → Plan+DAG → Memory → RAG → Multi-Agent → HITL → 并行工具 → 多模型 → 联网 → MCP → 长上下文 → Chrome DevTools → CDP 复用 → Skill → TUI → LSP 诊断 → Side-Git 快照 → Prompt 分层 → Runtime API → 图片输入 → 微信 iLink 文本 MVP）
-- Banner 版本 `v16.1.0`，Maven 产物 `paicli-1.0-SNAPSHOT.jar`（两者不一致是正常状态）
-- `PAI.md` 是项目级记忆，启动时注入 system prompt，放团队共享的稳定规则；个人或会变化的事实用 `/save` 长期记忆
-- 下一步：MCP OAuth / sampling / recovery
-- 配套教程与面试文章的唯一源在 `docs/articles/`，改完用 `tools/sync-articles-to-javabetter.sh` 同步到 javabetter.cn 副本
+- 面向商业使用的 Java Agent 命令行工具，对标 Claude Code。已交付 23 期：ReAct → Plan+DAG → Memory → RAG → Multi-Agent → HITL → 并行工具 → 多模型 → 联网 → MCP → 长上下文 → Chrome DevTools → CDP 复用 → Skill → TUI → LSP 诊断 → Side-Git 快照 → Prompt 分层 → Runtime API → 图片输入 → 微信 iLink 文本消息（最小可用版）
+- 启动画面显示的版本是 `v16.1.0`，Maven 打出的 jar 是 `paicli-1.0-SNAPSHOT.jar`，两者不一致是正常的
+- `PAI.md` 是项目级记忆，启动时放进 system prompt，写团队共享、长期不变的规则；个人的、会变化的事实用 `/save` 存成长期记忆
+- 下一步：MCP 的 OAuth 登录、sampling、server 断线恢复
+- 配套教程和面试文章以 `docs/articles/` 为准，改完用 `tools/sync-articles-to-javabetter.sh` 同步到 javabetter.cn 的副本
 
 ### 评测（Native AgentBench）
 
-- 2026-09-05 起用户因 Token 消耗暂停评测：**不主动恢复评测实现、真实模型调用或 Docker 运行**，只按用户逐阶段明确授权单次执行，默认不启子代理
-- generator 已接 25/28 题（原权重 88/100），缺 D5/E3/E4；`formalScores=null`、`publishable=false`、`NOT_INTEGRATED` 不变，不得宣传为正式榜单
-- 正式评测只评 DeepSeek V4 Flash 与 GLM-5.3-Flash；证据缺失属于评测无效，不计成 PaiCLI 的 0 分；零 provider 调用是有效失败；禁止 best-of、挑子集、自动重试
-- 已知问题：E2 的 `validators/final/E2` 输出原始判定 JSON，不是统一的 `VerifierScoringReport`，`FinalSourceGeneratorTest.referencePrototypes…` 因此失败，修复需授权
-- 评测工具证据从 `ToolRegistry.onPolicyToolResults` 采集（含策略拒绝、保持原顺序），不能只看 `executeTools` 的已放行子集
-- 细节：`benchmarks/paicli-native-agentbench-v0.1/` 下的 RUNBOOK、FINAL-DATASET-RUNBOOK 与 AGENTS-SNAPSHOT-ARCHIVE
+- 2026-09-05 起，用户因为 Token 消耗太大暂停了评测：**不要主动继续做评测代码，也不要主动调用真实模型或跑 Docker**。只在用户明确同意某一步时执行那一步，默认不开子代理
+- 题目生成器已接入 25/28 题（按原权重是 88/100），还缺 D5、E3、E4。`formalScores=null`、`publishable=false`、`NOT_INTEGRATED` 这些状态不变，不能对外说成正式榜单
+- 正式评测只评 DeepSeek V4 Flash 和 GLM-5.3-Flash。缺少证据算评测无效，不算 PaiCLI 得 0 分；模型一次都没被调用，算 PaiCLI 失败。禁止多跑几次挑最好的、禁止只挑部分题、禁止自动重试
+- 已知问题：E2 的 `validators/final/E2` 输出的是原始判定 JSON，不是统一格式的 `VerifierScoringReport`，所以 `FinalSourceGeneratorTest.referencePrototypes…` 失败；修它需要用户同意
+- 评测统计工具调用时，从 `ToolRegistry.onPolicyToolResults` 取数据（包括被策略拒绝的调用，顺序不变），不能只看 `executeTools` 里被放行的那部分
+- 细节见 `benchmarks/paicli-native-agentbench-v0.1/` 下的 RUNBOOK、FINAL-DATASET-RUNBOOK 和 AGENTS-SNAPSHOT-ARCHIVE
 
 ## 运行与命令
 
-Java 17+ / Maven；可选 `ripgrep`（`grep_code` 优先用，缺失时回退 Java 扫描）；至少一个 API Key：`DEEPSEEK_API_KEY` / `GLM_API_KEY` / `HUNYUAN_API_KEY` / `STEP_API_KEY` / `KIMI_API_KEY` / `FREELLMAPI_API_KEY` / `XFYUN_MAAS_API_KEY` / `AGNES_API_KEY`。
+需要 Java 17+ 和 Maven；`ripgrep` 可选（`grep_code` 优先用它，没装就用 Java 自己扫描）。至少配一个 API Key：`DEEPSEEK_API_KEY`、`GLM_API_KEY`、`HUNYUAN_API_KEY`、`STEP_API_KEY`、`KIMI_API_KEY`、`FREELLMAPI_API_KEY`、`XFYUN_MAAS_API_KEY`、`AGNES_API_KEY`。
 
 ```bash
 cp .env.example .env
@@ -38,13 +40,13 @@ mvn test -Dtest=XxxTest -DskipTests=false   # 针对性（必须带 -DskipTests=
 mvn test -DskipTests=false                  # 全量
 ```
 
-交互命令：`/plan`、`/team`、`/mode auto|plan|ask`（Shift+Tab 循环）、`/hitl on|default`、`/save`、`/memory`、`/compact`、`/context`、`/init`、`/export`、`/better-harness`、`/wechat`。未识别的 `/xxx` 在 CLI 层报“未知命令”，不回退给 Agent。
+交互命令：`/plan`、`/team`、`/mode auto|plan|ask`（Shift+Tab 轮流切换）、`/hitl on|default`、`/save`、`/memory`、`/compact`、`/context`、`/init`、`/export`、`/resume`、`/better-harness`、`/wechat`。不认识的 `/xxx` 由命令行直接报“未知命令”，不交给模型处理。
 
-`mvn test -Pquick` 当前有一批评测包（`eval.benchmark.*`）和 `TerminalMarkdownRendererTest` 的既有失败，`ToolRegistryTest.macSandboxAllowsDevelopmentRuntimesAndDevNull` 在较新 macOS 上 Seatbelt 内 JVM 以 139 退出。判断回归要对比改动前后的失败集合，不要只看总数。
+`mvn test -Pquick` 目前有一批原本就失败的测试：评测包（`eval.benchmark.*`）和 `TerminalMarkdownRendererTest`；`ToolRegistryTest.macSandboxAllowsDevelopmentRuntimesAndDevNull` 在较新的 macOS 上，JVM 在 Seatbelt 沙箱里会以 139 退出。判断有没有引入新问题，要对比改动前后失败的测试名单，不要只看失败总数。
 
 ## 架构
 
-三条执行路径共享 ToolRegistry / MemoryManager / SnapshotService / ConversationLedger：ReAct（`Agent.java`，默认）、Plan-and-Execute（`PlanExecuteAgent.java`，`/plan`）、Multi-Agent（`AgentOrchestrator.java`，`/team`）。
+三种执行方式共用 ToolRegistry、MemoryManager、SnapshotService、ConversationLedger：ReAct（`Agent.java`，默认）、Plan-and-Execute（`PlanExecuteAgent.java`，`/plan`）、Multi-Agent（`AgentOrchestrator.java`，`/team`）。
 
 ```
 src/main/java/com/paicli/
@@ -55,89 +57,103 @@ src/main/java/com/paicli/
 └── eval/ (LLM-as-a-Judge + benchmark)
 ```
 
-- 内置工具 18 个：`read_file` / `write_file` / `edit_file` / `list_dir` / `glob_files` / `grep_code` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `browser_connect` / `browser_disconnect` / `browser_status` / `save_memory` / `load_skill` / `save_skill_reference` / `revert_turn`；MCP 工具动态注册为 `mcp__{server}__{tool}`
-- `edit_file` 默认只替换唯一匹配的 `old_text`，`replace_all=true` 时全部精确替换；精确匹配失败后按逐行归一化（NFKC、行尾空白、引号、横线、特殊空格）模糊匹配，仍失败且片段每行都带 read_file 行号前缀时剥前缀重试一次；CRLF 文件保留原换行；新建文件用 `write_file`
-- 代码理解默认 `glob_files` → `grep_code` → `read_file`；`search_code`（RAG）只做模糊语义辅助
-- MCP 配置合并 `~/.paicli/mcp.json` 与项目 `.paicli/mcp.json`；检测到 `STEP_API_KEY` 自动内置 `step_search`
-- 思考模型（DeepSeek Flash / V4 Pro、GLM-5.3、混元 Hy4、Kimi thinking）的 `reasoning_content` 必须随下一轮带回；各 provider 协议差异、重试策略见 `docs/agents-reference.md`
-- 手动模型管理：`/model list [provider]` / `/model refresh <provider>` / `/model add <provider> <id> [--like <同供应商模型>]`；模型能力保存在 `providers.<provider>.models`。刷新只追加、添加不切换、未知能力按 128k 文本处理；用户显式切换后才应用，保存失败保留旧选择，不用推理请求探测能力
-- DeepSeek 是默认 provider（`PaiCliConfig.defaultProvider`，Key 回退顺序 deepseek 在前），默认模型 DeepSeek V4.1 Flash（模型 ID `deepseek-flash`），支持图片；官方兼容旧名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 由 V4.1 Flash 提供服务，同样支持图片；只列为兼容说明，不作为独立内置模型或刷新新增项，已有选择/手动配置保留并标注映射，`deepseek-v4-pro` 仍为文本模型。历史评测合同的模型标识不随交互默认值改写
-- 模型 / MCP / Skill 列表统一使用 `TerminalTable`，按显示列宽处理中文和 ANSI，窄屏下移末列或转纵向条目，不省略模型 ID；列表只保留比较字段，模型配置详情走 `/model info`
-- 启动模型：环境变量 → 项目 `.env` → 用户 `.env` → 保存的模型 → 默认值（`getStartupModel`）；会话内 `/model` 显式选择仍优先。显示名只用于启动页和状态栏，不能改写 API 请求、工具策略或历史评测 ID
-- 交互期输出走 `Renderer.stream()`，主路径不要新增裸 `System.out.println`；inline 渲染约定见 `docs/agents-reference.md`
+- 内置工具 18 个：`read_file`、`write_file`、`edit_file`、`list_dir`、`glob_files`、`grep_code`、`execute_command`、`create_project`、`search_code`、`web_search`、`web_fetch`、`browser_connect`、`browser_disconnect`、`browser_status`、`save_memory`、`load_skill`、`save_skill_reference`、`revert_turn`。MCP 工具运行时注册，名字是 `mcp__{server}__{tool}`
+- `edit_file` 默认只替换唯一一处匹配的 `old_text`，`replace_all=true` 时全部替换。精确匹配失败后，逐行统一写法再匹配（NFKC、行尾空白、引号、横线、特殊空格）；还失败、并且片段每行都带着 read_file 输出的行号前缀时，去掉行号前缀再试一次。CRLF 文件保留原来的换行符。新建文件用 `write_file`
+- 读代码默认顺序：`glob_files` → `grep_code` → `read_file`；`search_code`（RAG）只用来做模糊的语义查找
+- MCP 配置合并 `~/.paicli/mcp.json` 和项目里的 `.paicli/mcp.json`；检测到 `STEP_API_KEY` 时自动加上 `step_search`
+- 思考模型（DeepSeek Flash / V4 Pro、GLM-5.3、混元 Hy4、Kimi thinking）返回的思考内容 `reasoning_content` 必须在下一轮请求里带回去；各家接口差异和重试策略见 `docs/agents-reference.md`
+- 手动管理模型：`/model list [provider]`、`/model refresh <provider>`、`/model add <provider> <id> [--like <同供应商模型>]`；模型支持什么能力保存在 `providers.<provider>.models`。刷新只新增不删除，添加后不自动切换，不知道能力的模型按 128k 纯文本处理；用户主动切换后才生效，保存失败时保留原来的选择；不靠实际调用模型来探测它支持什么
+- DeepSeek 是默认供应商（`PaiCliConfig.defaultProvider`，多个 Key 都有时优先用 DeepSeek），默认模型 DeepSeek V4.1 Flash（模型 ID `deepseek-flash`），支持图片。官方旧名 `deepseek-v4-flash`、`deepseek-v4-flash-vision-exp` 现在也由 V4.1 Flash 提供服务，同样支持图片；它们只写成兼容说明，不作为单独的内置模型，刷新时也不新增，用户已有的选择和手动配置保留并注明对应关系。`deepseek-v4-pro` 仍然只支持文本。以前评测记录里写的模型标识不跟着改
+- 模型、MCP、Skill 列表统一用 `TerminalTable` 显示：按实际显示宽度处理中文和颜色控制符；窗口窄时把最后一列挪到下一行，或改成一条一条竖着显示，不截断模型 ID。列表只放用来比较的字段，单个模型的详细配置用 `/model info` 看
+- 启动时用哪个模型：环境变量 → 项目 `.env` → 用户 `.env` → 上次保存的模型 → 默认值（`getStartupModel`）；会话里用 `/model` 主动选的优先。显示名只用在启动画面和状态栏，不能影响 API 请求、工具策略和评测记录里的模型 ID
+- 交互过程中的输出走 `Renderer.stream()`，主流程不要新增直接的 `System.out.println`；inline 界面的显示约定见 `docs/agents-reference.md`
 
 ## 关键行为约束
 
 ### Memory 与上下文
 
-- 短期上下文只有各 Agent 实际发给 LLM 的 `conversationHistory`，不要再维护影子消息副本
-- 压缩按代价从小到大：超大工具结果落盘（默认 32000 字符）→ 旧工具结果清理（`min(100k, 摘要阈值×0.6)`，只换正文、保留 `tool_call_id`）→ 摘要（Session Memory 实验路径默认关，失败回退四栏目完整摘要）。摘要阈值 `window - min(20k, window/4) - min(13k, window/8)`；栏目不全或 Token 不降时保留原历史
-- 长期记忆默认 project 作用域，跨项目偏好才用 global；只存稳定事实。显式写入走去重 → 冲突检测（数字/版本差异或 Dice ≥ 0.8 不写入，由用户选 replace / force），模型不得替用户选择；超过 30 天未核实标“可能已过时”
-- 长期记忆文件被多个实例和进程共享：变更必须走 `withStorageLock`（锁内重读 → 修改 → 原子写回），不要绕开直接写盘
-- 自动提取只从用户原文逐字抽取，最多 3 条、只写 project、标待核实，重复或冲突一律跳过；读过 web / browser / MCP / curl 等外部内容后暂停自动写入，`save_memory` 需用户本轮明确要求记住
-- system prompt 的 Memory Policy：记忆是线索不是事实，行动前对照当前文件核实
-- 循环不设固定轮数上限；同一动作或同类错误连续 3 步时由 `RunawayGuard` 注入一次 `[runaway guard]` 提醒（不拦截工具），停滞兜底默认窗口 5，须大于提醒阈值；预算或停滞检测命中后关闭工具做一次部分完成收尾，不丢弃已有工作
+- 短期上下文就是各个 Agent 实际发给模型的 `conversationHistory`，不要再额外维护一份消息副本
+- 会话记录（`~/.paicli/history/raw/`，由 `ConversationLedger` 写入）只追加、不改写；`/resume` 靠它还原 ReAct 对话。所以任何直接改动 `conversationHistory` 的操作（压缩、清理旧工具结果、恢复会话）之后，都要写一条 `view_checkpoint`，否则恢复出来的对话和模型当时看到的对不上
+- 上下文压缩按代价从小到大分三步：单个工具结果太大（默认超过 32000 字符）就写入文件，对话里只留说明 → 清理旧工具结果（触发线 `min(100k, 摘要阈值×0.6)`，只替换正文，保留 `tool_call_id`）→ 生成摘要（会话记忆摘要是实验功能，默认关；它失败时改用分四个栏目的完整摘要）。摘要阈值 = `window - min(20k, window/4) - min(13k, window/8)`；摘要栏目不全或压缩后 Token 没减少，就保留原来的历史
+- 长期记忆默认只对当前项目生效（project），跨项目都适用的偏好才存成 global；只存长期不变的事实。用户明确要求保存时，先去重，再检查冲突（数字、版本号不同，或 Dice 相似度 ≥ 0.8 时不写入，由用户选 replace 或 force），模型不能替用户选；超过 30 天没核实的记忆标“可能已过时”
+- 长期记忆文件会被多个 PaiCLI 进程同时读写：修改必须通过 `withStorageLock`（加锁后重新读取 → 修改 → 整体写回），不要绕过它直接写文件
+- 自动提取记忆只能从用户原话里逐字摘取，最多 3 条、只存为 project 级、标“待核实”，重复或冲突的一律跳过；会话里读过网页、浏览器、MCP、curl 等外部内容后，暂停自动写入。`save_memory` 只在用户本轮明确要求“记住”时调用
+- system prompt 里的记忆规则：记忆只是线索，不一定还对，行动前要对照当前文件核实
+- Agent 循环不设固定轮数上限。同一个动作或同一类错误连续出现 3 步时，`RunawayGuard` 往对话里加一次 `[runaway guard]` 提醒（只提醒，不拦工具）；停滞检测默认看最近 5 步，这个数必须大于提醒的 3 步。超出预算或判定停滞后，关掉工具，让模型把已完成的部分整理成结果，不丢弃已有工作
 
 ### 工具执行
 
-- 三条路径都走 `executeTools()`，不手写 for-loop
-- 只有 `ToolRegistry.PARALLEL_SAFE_TOOLS` 里的只读工具并行（最多 4 个）；写文件、命令、MCP、`save_memory`、`revert_turn`、未知工具按原顺序串行；新增只读工具要加入白名单。含浏览器工具的批次整体串行。结果保持原始顺序
-- 工具结果进入历史前统一经 `ToolResultBoundary.wrap()` 包成 `trust="untrusted-data"`，边界不产生任何授权；超大结果由 `ToolResultOffloader` 写入 `.paicli/tool-outputs/`
+- 三种执行方式都通过 `executeTools()` 执行工具，不要自己写循环挨个调用
+- 只有 `ToolRegistry.PARALLEL_SAFE_TOOLS` 里的只读工具可以并行（最多同时 4 个）；写文件、执行命令、MCP、`save_memory`、`revert_turn` 和不认识的工具都按原顺序一个一个执行。新增只读工具要加进这个名单。一批调用里只要有浏览器工具，整批都一个一个执行。结果按原来的顺序返回
+- 工具结果放进对话前，统一用 `ToolResultBoundary.wrap()` 包一层 `trust="untrusted-data"` 标记，表示这是外部数据，不代表允许做任何事；太大的结果由 `ToolResultOffloader` 写进 `.paicli/tool-outputs/`
 
-### HITL 与策略
+### HITL（人工确认）与安全策略
 
-- 拦截顺序 HitlToolRegistry → ToolRegistry → PathGuard / CommandGuard；用户无法批准策略拒绝的请求
-- 会话模式（`SessionMode` / `SessionModeController`）：Shift+Tab 按 auto → plan → ask 循环，`/mode` 同效；交互式 CLI 不提供“全部放行”，最宽松就是 auto；模式只是审批档位与 plan 开关的组合，不另存权限状态。plan 模式让普通输入走 Plan-and-Execute，显式 `/team` 优先；启动默认 auto。当前只在 inline CLI 生效，Lanterna TUI 未接
-- auto（`/hitl default`，启动默认）：读写文件直接执行；`execute_command` 先经 `LlmApprovalClassifier`（当前供应商、关闭思考的轻量请求，可用 `PAICLI_AUTO_CLASSIFIER_MODEL` 换模型）审查，放行则执行并写 `auto-classifier` 审计；不放行、审查失败（超时 / 异常 / 非约定 JSON / 参数超 32000 字符 / 无分类器），以及 `revert_turn`、全部 `mcp__*`、敏感页面改写，都以 `[AUTO]` 失败结果交回模型，不弹框；同一轮连续被拦 3 次（`AUTO_ESCALATE_AFTER`）才转人工审批，放行或新一轮输入（`startAutoReviewTurn`）清零。分类器只看用户本轮原话 + 工具名 + 参数，不看工具结果；绝不 fail-open；放行结论只在同一请求内缓存；PathGuard / CommandGuard 在分类器之后照常生效。ask（`/hitl on`）额外确认 `write_file`、`edit_file`、`create_project`，不走分类器。默认确认只由 `SwitchableHitlHandler` 开启，评测等非交互处理器保持关闭，不能让无人值守通道卡在审批上
-- PathGuard 强制路径在项目根内；CommandGuard 只是辅助黑名单，不是主防线；命令沙箱 `PAICLI_COMMAND_SANDBOX=off|auto|required`，默认 off
-- 微信通道无人工审批面板，走非交互默认拒绝：只读工具允许，`execute_command` / `mcp__*` 必须命中白名单，`revert_turn` 与浏览器会话切换拒绝
+- 检查顺序：HitlToolRegistry → ToolRegistry → PathGuard / CommandGuard。被安全策略拒绝的操作，用户也无法批准
+- 会话模式（`SessionMode`、`SessionModeController`）：Shift+Tab 按 auto → plan → ask 轮流切换，`/mode` 效果相同。交互式命令行没有“全部放行”，最宽松的就是 auto。模式只是“确认严格程度 + 是否走 plan”的组合，不另外保存权限状态。plan 模式下普通输入走 Plan-and-Execute，用户明确输入的 `/team` 优先；启动时默认 auto。目前只在 inline 命令行界面生效，Lanterna 全屏界面还没接
+- auto 模式（`/hitl default`，启动默认）：
+  - 读写文件直接执行
+  - `execute_command` 先交给 `LlmApprovalClassifier` 审查：用当前供应商发一个关闭思考的小请求，可用 `PAICLI_AUTO_CLASSIFIER_MODEL` 换模型。通过就执行，并写一条 `auto-classifier` 审计记录
+  - 没通过、审查出错（超时、异常、返回的不是约定格式的 JSON、参数超过 32000 字符、没有可用的审查模型），以及 `revert_turn`、所有 `mcp__*` 工具、改动敏感页面，都直接以 `[AUTO]` 开头的失败结果还给模型，不弹确认框
+  - 同一轮里连续被拦 3 次（`AUTO_ESCALATE_AFTER`）才转成人工确认；有一次通过或用户输入新一轮（`startAutoReviewTurn`）就重新计数
+  - 审查只看用户本轮原话、工具名和参数，不看工具结果；审查出错时绝不放行；“通过”的结论只在同一个请求里复用；审查之后 PathGuard、CommandGuard 照常检查
+- ask 模式（`/hitl on`）：额外要求确认 `write_file`、`edit_file`、`create_project`，不经过审查模型
+- 默认的人工确认只由 `SwitchableHitlHandler` 打开；评测这类无人值守的处理器保持关闭，不能让没人看着的流程卡在等待确认上
+- PathGuard 强制所有路径都在项目根目录内；CommandGuard 只是辅助的命令黑名单，不是主要的安全措施。命令沙箱由 `PAICLI_COMMAND_SANDBOX=off|auto|required` 控制，默认 off
+- 微信通道没有人工确认界面，默认拒绝：只读工具允许；`execute_command`、`mcp__*` 必须在白名单里；`revert_turn` 和切换浏览器会话一律拒绝
 
 ### Web 与浏览器
 
-- 搜索 provider 显式 `SEARCH_PROVIDER` 优先；自动选择顺序为 GLM Key → SerpAPI Key → SearXNG URL → DeepSeek Key，保留已有配置优先级。DeepSeek 搜索走独立 Anthropic Messages 请求，模型由 `DEEPSEEK_SEARCH_MODEL` 指定（默认 `deepseek-flash`）；URL 只从结构化搜索结果提取，缺少结果块或工具报错直接失败，不从模型正文提取链接
-
-- `web_fetch` 和浏览器导航的 URL 只能来自用户顶层原文或本分支 `web_search` 的结构化 `discoveredUrls`；工具正文、模型输出都不能扩充授权，被拒绝的调用不能换工具绕过
-- Plan 并行任务和 Team worker 各用独立策略副本，只有 DAG 声明的依赖才继承上游 `web_search` URL
-- 自然语言判断只能收紧、不能授予能力：工具默认开放，不要再用动作词表决定是否给模型工具（漏判会让正常任务因缺工具静默失败）。只有命中高精度的标题标记（`《…》`、`# `、“（附…面试题）”后缀、“X：Y？”）且没有请求前缀和 URL 时，收掉联网工具并提示用户；没有标记的裸标题由提示词要求模型先澄清。“当前项目/文件”类问题优先本地工具
-- 最终回复正文里残留未执行的工具调用文本（如 DeepSeek DSML）时，由 `LlmClient.looksLikeUnexecutedToolCall` 识别并提示“工具调用未执行”，三条路径都要提示
-- 已知 URL 先 `web_fetch`，SPA / 防爬再用 Chrome DevTools MCP；读取优先 `take_snapshot`；公开页面不提前切 shared 模式
+- 搜索服务：设置了 `SEARCH_PROVIDER` 就用它；否则按 GLM Key → SerpAPI Key → SearXNG URL → DeepSeek Key 的顺序自动选，已有配置的优先级不变。DeepSeek 搜索单独发一个 Anthropic Messages 格式的请求，模型由 `DEEPSEEK_SEARCH_MODEL` 指定（默认 `deepseek-flash`）；链接只从返回的结构化搜索结果里取，缺少搜索结果或工具报错就直接失败，不从模型写的正文里找链接
+- `web_fetch` 和浏览器能打开的网址，只能来自用户本轮亲手输入的原文，或者本次执行分支里 `web_search` 返回的结构化结果 `discoveredUrls`。工具返回的正文、模型的输出都不能让新网址变成可访问；被拒绝的调用不能换个工具绕过去
+- Plan 的并行任务和 Team 的每个 worker 各用一份独立的策略副本；只有在 DAG 里声明了依赖，才能用上游任务 `web_search` 找到的网址
+- 根据用户说的话做判断，只能用来少给工具，不能用来多给工具。工具默认全部开放，不要再用“动作词表”决定给不给模型工具（漏判会让正常任务因为缺工具悄悄失败）。只有输入明显像一个标题（`《…》`、`# `、“（附…面试题）”结尾、“X：Y？”），并且前面没有“帮我…”这类请求、也没有网址时，才关掉联网工具并提示用户；没有这些标记的纯标题，由提示词要求模型先问清楚。问“当前项目/文件”的问题优先用本地工具
+- 最终回复里如果残留着没被执行的工具调用文本（比如 DeepSeek 的 DSML 格式），由 `LlmClient.looksLikeUnexecutedToolCall` 识别，并提示用户“工具调用未执行”；三种执行方式都要提示
+- 已知网址先用 `web_fetch`；单页应用或有反爬时再用 Chrome DevTools MCP，读取页面优先 `take_snapshot`；公开页面不要提前切到 shared 模式（复用用户自己的浏览器）
 
 ### Plan 与 Team
 
-- 审阅交互：`Enter` 执行 / `Ctrl+O` 展开 / `ESC` 取消 / `I` 补充要求后在当前计划基础上修改（`Planner.revisePlan`）；方向键不能误判为 ESC；改动要连 raw mode 和行模式回退一起验证
-- 所有 `/plan` 目标都交给模型规划，不在调用模型前用关键词判断“简单任务”并短路（关键词会把破坏性或多步输入误判成单步）；最短计划由规划提示词约束
-- Planner 计划严格校验：非空 tasks、唯一非空字符串 id、依赖精确引用已声明 id、无环；不合法直接失败，不静默删边或猜测别名。`parsePlan` 的围栏正则与 `e1_replay.py` 逐字对齐，改动前同步重放器
-- 用户取消打断的任务不算失败，不触发重规划；失败且完成度 < 50% 时重规划，最多 `PAICLI_PLAN_MAX_REPLANS`（默认 2）次；到上限立即停止启动新任务、其余标 SKIPPED（与 e1_replay 的“触发点后无新工作”一致）；完成度 ≥ 50% 时失败任务的传递下游标 SKIPPED；汇总先列已完成结果，再列失败和跳过原因
-- Team planner 由 `TeamPlanParser` 按同一套规则校验；Reviewer 只认 JSON 布尔 `approved: true`，不要恢复关键词兜底
-- planner / reviewer 请求不暴露工具是评测审计约束，引入 `submit_*` 工具或 `response_format` 前先改审计合同
+- 计划审阅时的按键：`Enter` 执行、`Ctrl+O` 展开、`ESC` 取消、`I` 补充要求后在当前计划上修改（`Planner.revisePlan`）；方向键不能被误认成 ESC。改这块要在 raw mode 和退回的普通行输入模式下都验证一遍
+- 所有 `/plan` 目标都交给模型规划，不要在调模型之前用关键词判断“这是简单任务”而跳过规划（关键词会把危险操作或多步任务误判成一步）；计划尽量短，靠规划提示词来约束
+- Planner 生成的计划要严格校验：tasks 不能为空，id 必须是唯一、非空的字符串，依赖只能引用已声明的 id，不能有环。不合格就直接失败，不要悄悄删掉依赖或猜测 id。`parsePlan` 里提取 ``` 代码块的正则必须和 `e1_replay.py` 完全一致，改之前先改 `e1_replay.py`
+- 用户取消导致中断的任务不算失败，不触发重新规划。任务失败且完成度低于 50% 时重新规划，最多 `PAICLI_PLAN_MAX_REPLANS` 次（默认 2）；到达上限后立刻不再启动新任务，剩下的标 SKIPPED（和 `e1_replay` 的“触发后不再有新工作”一致）。完成度不低于 50% 时，失败任务下游所有依赖它的任务标 SKIPPED。汇总时先列已完成的结果，再列失败和跳过的原因
+- Team 的规划结果由 `TeamPlanParser` 按同一套规则校验；Reviewer 只认 JSON 里的布尔值 `approved: true`，不要再加“看到某些关键词就算通过”的退路
+- planner 和 reviewer 的请求不提供工具，这是评测审计的要求；想引入 `submit_*` 工具或 `response_format` 之前，先改评测的审计约定
 
 ### 输出与 Skill
 
-- 共享 `prompts/handoff.md` 要求遵守用户的严格输出格式（只要 JSON/CSV/值时不加围栏和总结），但这不是确定性保证
-- Skill 分三样：索引（frontmatter 的 name + description）常驻 system prompt（上限 20 个 / 4KB）；SKILL.md 正文（frontmatter 之后的部分）在 `load_skill(name)` 成功后，同一轮紧跟工具结果追加一条注入消息（独立 user 消息，`LoadedSkillMessages`），不要改回等下一条用户消息；附属文件走 `load_skill(name, file)`，以普通工具结果返回
-- 注入消息首行带 `[PAICLI_SKILL_INJECTION]`：压缩不计轮次、不交给摘要，被切到摘要范围的注入消息直接删除，摘要末尾列出其中的 Skill 名，模型需要时重新 `load_skill`（不要恢复“原样挂回”或提示词禁止重复加载）；某个 Skill 的注入消息还在历史里时，重复加载不再追加；去重与 16KB 预算（历史里注入消息的总字符数）都从消息历史推导，不另存状态。`references/` 下合并用户级补充 `~/.paicli/skills/<name>/references/`；经验写回只走 `save_skill_reference`（只写补充目录的 `references/**.md`）。不放宽 PathGuard，不让 SKILL.md 指示模型用 `read_file` / `execute_command` 访问 `~/.paicli/`；未 `/skill trust` 的项目级 Skill 不生成注入消息，SKILL.md 正文只进 untrusted 工具结果
-- system prompt 按稳定度排序（静态段 → Skills → runtime → Project Context），新增段落按变化频率插入，别放到随查询变化的记忆之前
+- 共用的 `prompts/handoff.md` 要求模型遵守用户指定的严格输出格式（只要 JSON、CSV 或一个值时，不加代码块围栏、不加总结），但这只是提示词要求，模型不一定每次都照做
+- Skill 分三部分：
+  - 索引（SKILL.md 开头 frontmatter 里的 name 和 description）一直放在 system prompt 里，最多 20 个、4KB
+  - SKILL.md 正文（frontmatter 之后的内容）在 `load_skill(name)` 成功后，同一轮里紧跟在工具结果后面，作为一条单独的 user 消息加进对话（`LoadedSkillMessages`），不要改回等用户下一条消息再加
+  - 附属文件用 `load_skill(name, file)` 读取，像普通工具结果一样返回
+- Skill 正文消息第一行带 `[PAICLI_SKILL_INJECTION]` 标记：
+  - 压缩时不算对话轮次、不交给摘要；落在被摘要范围里的直接删掉，摘要末尾列出这些 Skill 的名字，模型需要时重新 `load_skill`（不要改回“原样放回去”，也不要在提示词里禁止重复加载）
+  - 某个 Skill 的正文还在对话里时，重复加载不再追加。去重和 16KB 上限（对话里所有 Skill 正文的总字符数）都直接从对话历史计算，不另外存状态
+  - `references/` 目录会合并用户自己的补充目录 `~/.paicli/skills/<name>/references/`；经验写回只能用 `save_skill_reference`（只写补充目录里的 `references/**.md`）
+  - 不放宽 PathGuard，不让 SKILL.md 指示模型用 `read_file` 或 `execute_command` 去读 `~/.paicli/`；项目自带的 Skill 没用 `/skill trust` 信任之前，不生成正文消息，SKILL.md 内容只作为不可信的工具结果返回
+- system prompt 按内容变化频率从低到高排列：固定内容 → Skills → 运行时信息 → 项目上下文。新增段落按它的变化频率插到对应位置，不要放到随每次提问变化的记忆前面
 
-## 修改联动
+## 修改时要一起改的地方
 
 | 改动 | 需要一起改 |
 |---|---|
-| 行为 | `AGENTS.md`（规则变化时）/ `README.md` / `ROADMAP.md`（仅状态变化）/ 受影响的 `docs/articles/` |
+| 行为 | `AGENTS.md`（规则变了时）、`README.md`、`ROADMAP.md`（只在完成状态变化时）、受影响的 `docs/articles/` |
 | 命令入口 | `Main.java` + `CliCommandParser.java` + 测试 + `README.md` |
 | Plan 审阅交互 | `Main.java` + `PlanReviewInputParser.java` + 测试 + 手工验证 |
-| 工具集 | `ToolRegistry.java` + 三条路径和 Planner 提示词 + 文档 |
-| 模型 / 接口 | 对应 Client + `LlmClientFactory.java` + `.env.example` + 文档 |
+| 工具集 | `ToolRegistry.java` + 三种执行方式和 Planner 的提示词 + 文档 |
+| 模型 / 接口 | 对应的 Client + `LlmClientFactory.java` + `.env.example` + 文档 |
 | Embedding | `EmbeddingClient` + `VectorStore` + `.env.example` + 文档 |
 | Web / 搜索 | `web/` + ToolRegistry + `.env.example` + 文档 + 测试 |
 | Memory | `MemoryManager` + `LongTermMemory` + `TokenBudget` + 测试 + 文档 |
-| HITL / 策略 | `policy/` + ToolRegistry + HitlToolRegistry + 提示词 + `.env.example` + 文档 + 测试 |
+| HITL / 安全策略 | `policy/` + ToolRegistry + HitlToolRegistry + 提示词 + `.env.example` + 文档 + 测试 |
 | MCP | `mcp/` + ToolRegistry + HITL + AuditLog + 提示词 + 文档 + 测试 |
 
-不提交 `.env`、真实 API Key 和 `target/` 产物；保持代码可读，不过度抽象。
+不提交 `.env`、真实 API Key 和 `target/` 里的构建产物；代码保持好读，不过度抽象。
 
-## 验证路径
+## 验证命令
 
-| 场景 | 命令（均需 `-DskipTests=false`） |
+| 场景 | 命令（都要带 `-DskipTests=false`） |
 |---|---|
 | 工具 / 代码搜索 | `mvn test -Dtest=ToolRegistryTest,CodeSearchGoldenSetTest,ApprovalPolicyTest` |
 | 命令解析 | `mvn test -Dtest=CliCommandParserTest,PlanReviewInputParserTest,MainInputNormalizationTest` |
@@ -147,16 +163,16 @@ src/main/java/com/paicli/
 | RAG | `mvn test -Dtest=CodeChunkerTest,CodeAnalyzerTest,VectorStoreTest,CodeIndexTest` |
 | TUI | `mvn test -Pphase16-smoke` |
 
-## 导航
+## 从哪里开始读
 
-先看本文件 → `README.md` → `Main.java`，再按任务进入模块：CLI 命令看 `Main` + `CliCommandParser`；规划看 `PlanExecuteAgent` + `Planner` + `ExecutionPlan`；工具看 `ToolRegistry` + `Agent`；模型看 `llm/*Client` + `LlmClientFactory`；Multi-Agent 看 `AgentOrchestrator` + `SubAgent`；MCP 看 `McpServerManager` + `McpClient`；渲染看 `render/Renderer` + `RendererFactory`；评测看 `eval/benchmark/BenchmarkCoordinatorMain` + `BenchmarkWorkerMain`。
+先看本文件 → `README.md` → `Main.java`，再按任务进入对应模块：命令行命令看 `Main` + `CliCommandParser`；规划看 `PlanExecuteAgent` + `Planner` + `ExecutionPlan`；工具看 `ToolRegistry` + `Agent`；模型看 `llm/*Client` + `LlmClientFactory`；Multi-Agent 看 `AgentOrchestrator` + `SubAgent`；MCP 看 `McpServerManager` + `McpClient`；界面输出看 `render/Renderer` + `RendererFactory`；评测看 `eval/benchmark/BenchmarkCoordinatorMain` + `BenchmarkWorkerMain`。
 
-## 已知边界
+## 还没做到的
 
-- 未交付：通用产品级容器/VM 沙箱、MCP OAuth + sampling + server 自动重启；benchmark 的 `DOCKER_RELAY` 只是评测隔离，不改变交互式 PaiCLI 的安全模型
-- 命令沙箱默认 off：沙箱无网络且看不到 `~/.m2`、`~/.gitconfig`，`mvn` / `npm install` / `git push` 会失败；Seatbelt 内 `java -version` 仍以 139 退出
-- 不要把 `ROADMAP.md` 里“将来要做”读成“现在已有”
+- 还没有：通用的容器或虚拟机沙箱；MCP 的 OAuth 登录、sampling 和 server 自动重启。评测用的 `DOCKER_RELAY` 只是让评测彼此隔离，不改变交互式 PaiCLI 的安全措施
+- 命令沙箱默认 off：沙箱里没有网络，也看不到 `~/.m2`、`~/.gitconfig`，所以 `mvn`、`npm install`、`git push` 会失败；在 Seatbelt 沙箱里 `java -version` 仍会以 139 退出
+- 不要把 `ROADMAP.md` 里“将来要做”的内容当成“现在已经有”
 
 ## 维护约定
 
-形成稳定协作规则时补进本文件，但保持精简；实现细节写 `docs/agents-reference.md`，评测进展写 benchmark 目录下的 RUNBOOK 或 ARCHIVE。
+形成稳定的协作规则时补进本文件，但保持精简；实现细节写进 `docs/agents-reference.md`，评测进展写进 benchmark 目录下的 RUNBOOK 或 ARCHIVE。

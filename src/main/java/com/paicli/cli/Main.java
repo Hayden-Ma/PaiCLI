@@ -343,7 +343,7 @@ public class Main {
                 conversationLedger = ConversationLedger.disabled();
                 startupNote = appendStartupNote(
                         startupNote,
-                        "原始会话账本初始化失败: " + e.getMessage());
+                        "会话记录文件初始化失败（本次会话不会被保存，/resume 也找不回）: " + e.getMessage());
             }
 
             // execute_command 沙箱：默认 OFF 与旧行为一致；auto/required 时探测 Seatbelt / bubblewrap 并提示结果。
@@ -356,6 +356,8 @@ public class Main {
             reactAgent.getMemoryManager().setAutoFactExtractionEnabled(
                     com.paicli.memory.AutoFactExtractor.enabledByConfiguration());
             reactAgent.setConversationLedger(conversationLedger);
+            com.paicli.history.SessionResume.recordSessionStart(
+                    conversationLedger, reactAgent.getToolRegistry().getProjectPath());
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
             reactAgent.setSkillRegistry(skillRegistry);
             DurableTaskManager taskManager = openTaskManager(llmClientRef);
@@ -877,6 +879,16 @@ public class Main {
                     }
                     case EXPORT -> {
                         handleExportCommand(ui, reactAgent);
+                        continue;
+                    }
+                    case RESUME -> {
+                        ResumeCommandHandler.Result result =
+                                ResumeCommandHandler.handle(reactAgent, command.payload());
+                        ui.println(result.output());
+                        if (result.restored()) {
+                            hitlHandler.clearApprovedAll();
+                        }
+                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
                     case INDEX_CODE -> {
@@ -1859,6 +1871,8 @@ public class Main {
                 new SlashCommandHint("/better-harness normal", "/better-harness normal", "完整生成 Better Harness 报告"),
                 new SlashCommandHint("/better-harness --inline", "/better-harness --inline", "只在终端输出，不写报告文件"),
                 new SlashCommandHint("/export", "/export", "导出当前会话对话记录为 Markdown"),
+                new SlashCommandHint("/resume", "/resume", "列出当前项目可以恢复的历史会话"),
+                new SlashCommandHint("/resume ", "/resume <序号>", "恢复一次历史会话，接着之前的对话继续"),
                 new SlashCommandHint("/exit", "/exit", "退出 PaiCLI"),
                 new SlashCommandHint("/quit", "/quit", "退出 PaiCLI")
         );

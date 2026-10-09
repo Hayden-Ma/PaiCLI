@@ -200,7 +200,7 @@ scripts 继续走 `execute_command` 和既有 HITL，不注册成虚拟工具，
 
 按代码复核后，实现与上文方案有四处偏差，以这里为准：
 
-1. **S2 已激活集合从历史推导**：不在 Agent 上另存 `Set<String> activeSkills`，而是由 `LoadedSkillMessages.prepare(results, registry, history)` 扫描调用方自己的消息历史得出。ReAct 会话、每个 Plan 任务、每个 Team worker 天然隔离；压缩把注入原样挂回、`/clear` 清空历史，集合自动正确，不存在“影子状态”与历史不一致的问题。会话预算（S7）同样按历史里注入消息的长度计算。
+1. **S2 已激活集合从历史推导**：不在 Agent 上另存 `Set<String> activeSkills`，而是由 `LoadedSkillMessages.prepare(results, registry, history)` 扫描调用方自己的消息历史得出。ReAct 会话、每个 Plan 任务、每个 Team worker 天然隔离；压缩把注入原样挂回、`/clear` 清空历史，集合自动正确，不存在另存一份状态、与历史不一致的问题。会话预算（S7）同样按历史里注入消息的长度计算。
 2. **S1 挂回放在压缩器里**：`ConversationHistoryCompactor.rebuildWithSummary` 把分割点之前的 Skill 注入原样挂回摘要之后，完整摘要和 Session Memory 两条路径共用，三条执行路径不需要各自在压缩成功分支里补挂载。注入标记 `[PAICLI_SKILL_INJECTION]` 与 `[runaway guard]` 的识别放在 `memory/InternalUserMessages`（`tool` 依赖 `memory`，反向依赖会成环）。副作用：Plan 任务只有一条真实 user 消息（task_input），之后不再能借 Skill 注入 / runaway 提醒当分割点做摘要，只剩工具结果清理。
 3. **S3/S4 不用 `read_file`**：PathGuard 强制所有文件工具在项目根内，`read_file` 读不到 `~/.paicli/skills-cache/` 和 `~/.paicli/skills/`。改为给 `load_skill` 增加 `file`（+ offset/limit）参数，只读当前 Skill 自己的目录（realpath 校验），传目录则列出文件；截断提示给出 `load_skill(name, file="SKILL.md", offset=N)`。内置 web-access 的 SKILL.md 同步改用这个调用，`SkillBuiltinExtractor.CURRENT_VERSION` 升到 `1.1.2`。
 4. **S6 不弹审批框**：auto 模式约定不弹框、微信通道没有审批面板，load_skill 中途插入交互会让无人值守通道卡住。改为未信任时正文由执行器放进工具结果（经 `ToolResultBoundary` 包成 untrusted-data），用户 `/skill show` 确认后 `/skill trust <name>` 显式信任；信任按 SKILL.md 绝对路径 + 正文 SHA-256 记在 `skills.json` 的 `trustedProjectSkills`，正文改动需重新信任。

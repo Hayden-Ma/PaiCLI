@@ -1,6 +1,7 @@
 package com.paicli.history;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -43,6 +44,11 @@ public final class ConversationLedger {
             .disable(MapperFeature.AUTO_DETECT_IS_GETTERS)
             .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     private static final int SCHEMA_VERSION = 1;
+    /** CLI 启动时写入，记录项目路径，/resume 据此只列出当前项目的会话。 */
+    public static final String SESSION_START_EVENT = "session_start";
+    /** 压缩、清理或恢复改写了发给模型的对话后写入，metadata.messages 是改写后的完整对话（不含 system）。 */
+    public static final String VIEW_CHECKPOINT_EVENT = "view_checkpoint";
+    public static final String HISTORY_CLEAR_EVENT = "history_clear";
     private static final Set<PosixFilePermission> DIRECTORY_PERMISSIONS =
             PosixFilePermissions.fromString("rwx------");
     private static final Set<PosixFilePermission> FILE_PERMISSIONS =
@@ -144,7 +150,43 @@ public final class ConversationLedger {
     }
 
     public List<Entry> readAll() throws IOException {
-        if (!enabled || file == null || !Files.exists(file)) {
+        if (!enabled || file == null) {
+            return List.of();
+        }
+        return readEntries(file);
+    }
+
+    /**
+     * 读取任意一个会话记录文件，跳过无法解析的行（例如进程在写入中途退出留下的半行），
+     * 供 /resume 读取以前的会话。
+     */
+    public static List<Entry> readEntriesSkippingBrokenLines(Path file) throws IOException {
+        if (file == null || !Files.exists(file)) {
+            return List.of();
+        }
+        List<Entry> entries = new java.util.ArrayList<>();
+        int skipped = 0;
+        try (var reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                try {
+                    entries.add(MAPPER.readValue(line, Entry.class));
+                } catch (IOException e) {
+                    skipped++;
+                }
+            }
+        }
+        if (skipped > 0) {
+            log.warn("Skipped {} unreadable line(s) in conversation ledger {}", skipped, file);
+        }
+        return entries;
+    }
+
+    private static List<Entry> readEntries(Path file) throws IOException {
+        if (!Files.exists(file)) {
             return List.of();
         }
         try (var lines = Files.lines(file, StandardCharsets.UTF_8)) {
@@ -160,6 +202,15 @@ public final class ConversationLedger {
         } catch (LedgerReadException e) {
             throw e.ioException;
         }
+    }
+
+    /** 把 metadata 里序列化后的消息列表还原成 {@link LlmClient.Message}。 */
+    public static List<LlmClient.Message> messagesFromMetadata(Object value) {
+        if (value == null) {
+            return List.of();
+        }
+        return MAPPER.convertValue(value, new TypeReference<List<LlmClient.Message>>() {
+        });
     }
 
     private synchronized void append(String event, String mode, String actor, String source,

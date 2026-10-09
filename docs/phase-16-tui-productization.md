@@ -1009,7 +1009,7 @@ PAICLI_TUI=true NO_TUI=true java -jar target/paicli-1.0-SNAPSHOT.jar
 - [x] 日常验证入口：`mvn test -Pphase16-smoke`（只跑第 16 期终端 / TUI / inline renderer 冒烟）
 - [x] `AGENTS.md` / `README.md` / `ROADMAP.md` 联动完成
 
-当前取舍：第 16 期先交付可运行 TUI 主链路与安全审批闭环；主题市场、完整历史恢复 UI、代码块折叠状态机、安装包 Release workflow 等保留为后续产品化增强，不作为本期阻塞项。
+当前取舍：第 16 期先交付可运行的 TUI 主流程，以及完整走通的安全审批；主题市场、完整历史恢复 UI、代码块折叠状态机、安装包 Release workflow 等保留为后续产品化增强，不作为本期阻塞项。
 
 ---
 

@@ -87,7 +87,7 @@ src/main/java/com/paicli/mcp/
 - 协议格式：每行一条 JSON-RPC 消息，UTF-8
 - stderr 输出存环形 buffer（最近 200 行），`/mcp logs` 命令查看
 - 关闭顺序：发 `shutdown` 通知 → 等 1s → `destroy()` → 等 2s → `destroyForcibly()`
-- `Runtime.addShutdownHook` 兜底，避免僵尸进程
+- 再用 `Runtime.addShutdownHook` 做最后一道保护，避免僵尸进程
 
 ### 3.4 Streamable HTTP transport（2025 年 3 月新规范）
 
@@ -232,7 +232,7 @@ audit 写入前对 args 做脱敏，避免 token / 凭证泄漏：
 
 ## 5. CLI 命令规约
 
-| 命令 | 行为 | payload |
+| 命令 | 行为 | 参数 |
 |---|---|---|
 | `/mcp` | 列出所有 server：name / status / transport / tools / uptime / pid | 无 |
 | `/mcp restart <name>` | 重启单个 server | name |

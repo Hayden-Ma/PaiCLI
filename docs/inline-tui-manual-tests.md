@@ -241,7 +241,7 @@ PAICLI_TUI=true java -jar target/paicli-1.0-SNAPSHOT.jar
 
 ---
 
-## 12. 形态切换 — Plain 兜底（用例 11）
+## 12. 形态切换 — 退回 Plain 形态（用例 11）
 
 ```bash
 PAICLI_RENDERER=plain java -jar target/paicli-1.0-SNAPSHOT.jar
@@ -392,7 +392,7 @@ HITL 通过后**预期**：
 
 **改测**：让 Agent 覆盖一个二进制文件（不太可能由 LLM 自然触发）。
 
-**预期**：如果 before 内容读不出（二进制 / 编码错），diff 会按"新建文件"形态展示——这是 ToolRegistry.write_file lambda 里 `before == null` 的兜底分支。
+**预期**：如果 before 内容读不出（二进制 / 编码错），diff 会按"新建文件"形态展示——这是 ToolRegistry.write_file lambda 里 `before == null` 的备用分支。
 
 ---
 

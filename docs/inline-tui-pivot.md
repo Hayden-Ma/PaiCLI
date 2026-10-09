@@ -73,7 +73,7 @@ Lanterna 形态保持 phase-16 现有设计：三栏布局、文件树、配置�
 
 ### 4.1 `Renderer` 接口（核心抽象层）
 
-新建 `com.paicli.render` 包，把 Agent / HITL / Main 对终端的全部输出收口到一个接口：
+新建 `com.paicli.render` 包，把 Agent / HITL / Main 对终端的全部输出统一交给一个接口处理：
 
 ```java
 package com.paicli.render;
@@ -396,7 +396,7 @@ public final class LanternaRenderer implements Renderer {
 | 风险 | 缓解 |
 |---|---|
 | `Renderer` 接口稳定性 | 接口先收紧（≤16 方法），新功能优先扩展 `ToolBlock` / `StatusInfo` 等 record，不轻易加方法 |
-| 双实现行为漂移 | 端到端手测必须在 inline / lanterna 双形态各跑一遍；接口契约写在 Javadoc，每个方法明确"哪些副作用、阻塞还是异步" |
+| 两套实现行为不一致 | 端到端手测必须在 inline / lanterna 双形态各跑一遍；接口约定写在 Javadoc，每个方法明确"哪些副作用、阻塞还是异步" |
 | `promptApproval` 阻塞模型 | 两个实现都同步阻塞调用线程；Lanterna 内部用 `CountDownLatch` 让 GUI 线程回写主线程 |
 | 部分终端不支持 DECSTBM | `TerminalCapabilities` 探测，不支持时 `InlineRenderer` 内部禁用状态栏，其他特性照常 |
 | JLine `LineReader` 输入期间状态栏重绘把光标推走 | 重绘前后 `7` / `8` 严格配对；200ms 节流；`LineReader.readLine` 期间允许跳过一帧重绘 |

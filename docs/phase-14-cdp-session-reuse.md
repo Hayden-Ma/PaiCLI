@@ -78,7 +78,7 @@ google-chrome --remote-debugging-port=9222
 **不**注册两个 server（不要 `chrome-devtools-isolated` + `chrome-devtools-shared` 并存），原因：
 - 工具数翻倍（28 → 56），system prompt token 暴涨
 - 提示词、HITL 全放行的 server 维度都得重写
-- 用户心智复杂
+- 用户理解起来复杂
 
 **采用**：`chrome-devtools` server 名不变，args 在 `[--isolated=true]`、`[--autoConnect]` 与旧式 `[--browser-url=<url>]` 间切换，切换时重启该 server。LLM 看到的工具集（`mcp__chrome-devtools__*`）始终一致。
 
@@ -352,7 +352,7 @@ if (BrowserGuard.requiresPerCallApproval(toolName, argsJson)) {
 | `src/main/java/com/paicli/mcp/McpServerManager.java` | 新增 `restartWithArgs(name, newArgs)` 方法 |
 | `src/main/java/com/paicli/mcp/config/McpServerConfig.java` | `args` 增加 setter（包可见或 public，文档注释「运行时切换专用」） |
 | `src/main/java/com/paicli/policy/AuditLog.java` | `AuditEntry` 加可选 `metadata` 字段，新增带 metadata 的静态工厂；反序列化老格式容错 |
-| `src/main/java/com/paicli/tool/ToolRegistry.java` | `executeTool` 入口对 `mcp__chrome-devtools__*` 工具加一道 `BrowserGuard.check`；`blocked=true` 抛 `PolicyException`；非 blocked 把 metadata 透传给 audit |
+| `src/main/java/com/paicli/tool/ToolRegistry.java` | `executeTool` 入口对 `mcp__chrome-devtools__*` 工具加一道 `BrowserGuard.check`；`blocked=true` 抛 `PolicyException`；未拦截时把 `metadata` 原样传给审计日志 |
 | `src/main/java/com/paicli/hitl/HitlToolRegistry.java` | 进入审批前先查 `BrowserGuard.requiresPerCallApproval`，命中则强制单步审批 |
 | `src/main/java/com/paicli/hitl/TerminalHitlHandler.java` | 审批弹窗在敏感页面命中时多打印一行 `⚠️ 敏感页面，需单独确认` + matched pattern + URL；不展示「[a] 全部放行」 |
 | `src/main/java/com/paicli/hitl/ApprovalRequest.java` | 新增可选字段 `String sensitiveNotice`（敏感命中时由调用方填，弹窗显示）；保持兼容老构造 |
@@ -670,7 +670,7 @@ if (BrowserGuard.requiresPerCallApproval(toolName, argsJson)) {
   - 解析 args 拿 pageId（new_page 成功后），更新 `agentOpenedTabs`
   - close_page：shared 模式 + 不在 agentOpenedTabs → blocked=true
   - 改写型工具 + 当前 URL 敏感 → requiresPerCallApproval=true
-- `ToolRegistry.executeTool` 对 `mcp__chrome-devtools__*` 调 `BrowserGuard.check`；`blocked=true` 抛 `PolicyException`；`metadata` 透传给 audit
+- `ToolRegistry.executeTool` 对 `mcp__chrome-devtools__*` 调 `BrowserGuard.check`；`blocked=true` 抛 `PolicyException`；`metadata` 原样传给审计日志
 
 **测试**：
 - `SensitivePagePolicyTest`（10+ 用例：默认规则匹配、自定义规则、空文件、缺失文件、glob 元字符）
@@ -752,7 +752,7 @@ if (BrowserGuard.requiresPerCallApproval(toolName, argsJson)) {
 - Cookie 持久化到 PaiCLI
 - 多 Chrome profile 并行
 - TLS 客户端证书 / mTLS
-- DOM snapshot 内的敏感数据自动脱敏（接受边界，由敏感页面强制审批兜底）
+- DOM snapshot 内的敏感数据自动脱敏（接受这个限制，由敏感页面强制审批来保护）
 - 真 图片复制粘贴输入（第 21 期）
 - Playwright / Firefox / WebKit 跨浏览器
 - 远程 host 连接（仅 127.0.0.1，避免 SSRF 风险）
@@ -821,7 +821,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 | host 范围 | 只允许 `127.0.0.1` |
 | 端口范围 | `1024..65535` |
 | evaluate_script 跳转的敏感判定 | **不拦**，文档明示边界 |
-| DOM snapshot 是否脱敏 | **不脱敏**，由敏感页面单步审批兜底 |
+| DOM snapshot 是否脱敏 | **不脱敏**，由敏感页面单步审批来保护 |
 | 跨平台 Chrome 启动命令 | macOS / Linux / Windows 三平台都给 |
 | `/browser connect` 探活与 setArgs 顺序 | 默认 `--autoConnect` 不探活，失败回滚；旧式 `/browser connect <port>` **先探活，再 setArgs**，失败不动 args |
 | 切换模式时 `approvedAllByServer` | **清空**，新模式新一轮信任 |
