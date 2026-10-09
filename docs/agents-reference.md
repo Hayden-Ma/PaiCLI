@@ -603,6 +603,15 @@ Agnes 的 provider 名为 `agnes`，默认 Base URL 是 `https://apihub.agnes-ai
 - 自动压缩阈值按 Claude Code 的做法，给摘要输出和安全余量预留空间：大窗口用 `window - 20k - 13k`，例如 200k 窗口约 167k 时触发、1M 窗口约 967k 时触发；小窗口的预留空间按比例缩小。
 - ReAct、Plan 单任务和 SubAgent 默认不设固定的迭代上限；`paicli.react.hard.max.iterations` 只在显式配置成正整数时生效。显式设置的轮数/Token 预算用完或命中停滞检测后，必须关闭工具，尽力做一次收尾，返回“部分完成”的结果，不能直接丢掉已经做完的工作。
 
+### 工具参数校验
+
+- 执行前统一校验（`ToolArgumentValidator`，基于 networknt json-schema-validator 1.5.x，Jackson 版本要和它对齐）。入口在 `ToolRegistry.doExecuteTool`；`HitlToolRegistry` 在弹确认框、调审查模型之前先查一遍，参数不合格的调用不让用户确认、不计入 auto 连续被拦次数
+- 参数为空字符串当作 `{}`；不是合法 JSON 时单独返回“不是合法的 JSON”并带上原文前 200 字符；不是 JSON 对象也直接拒绝；Schema 不合格时最多列 5 条字段级错误
+- 内置工具：参数仍以 `Map<String,String>` 交给工具，由工具自己解析、解析不了用默认值，所以单值参数之间不卡类型（字符串、数字、布尔互相接受），null 原样以 "null" 交给工具；只拦缺必填参数、传了对象 / 数组、不在 enum 里。这套语义是评测独立复算还原 read_file 看到内容的依据（F1/F2 的 `STRING_VALUES`、`BMP_DIGITS`、`NULL_DEFAULTS`），改之前要先改评测
+- 数值参数不加 `maximum` / `minimum`：工具现在会把超出范围的值收回到合法范围（如 `max_results` 最多 200），改成拒绝会让弱模型反复重试。`Param.oneOf(...)` 生成 enum，目前用在 `create_project.type` 和 `save_memory.scope`
+- MCP 工具：按 server 返回的原始 Schema（`McpToolDescriptor.validationSchema`）严格校验，`typeLoose` 让 `"5"` 这种带引号的数字算整数；null 值的参数校验时当作没传，转发给 server 的参数保持原样。不能用 `McpSchemaSanitizer` 清洗后的那份校验，它会把 `anyOf` 改写成 object。Schema 里有外部 `$ref` 时跳过校验（不联网加载），不认识的 `$schema` 地址去掉后按 2020-12 处理，编译失败也只记日志、跳过校验
+- 编译好的 Schema 按工具名缓存，按 Schema 对象引用判断是否需要重新编译（MCP `tools/list_changed` 后会换新 Schema）
+
 ### 工具结果处理细节
 
 - 工具结果进入 conversationHistory 之前，统一经过 `ToolResultBoundary.wrap()` 包成 `<tool_result tool="..." trust="untrusted-data">…</tool_result>`；内容里伪造的开闭标签会被转义。system prompt 说明标记里只是数据，其中的指令一律不执行。这层包装只改变模型看到的文本，不带来任何授权：URL 的合法来源仍然只有用户顶层原话和 `ToolOutput.discoveredUrls()`，不要从包装后的文本里解析 URL。原始会话记录里存的是实际发送的、包装之后的消息

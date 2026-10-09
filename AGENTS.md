@@ -86,6 +86,7 @@ src/main/java/com/paicli/
 
 - 三种执行方式都通过 `executeTools()` 执行工具，不要自己写循环挨个调用
 - 只有 `ToolRegistry.PARALLEL_SAFE_TOOLS` 里的只读工具可以并行（最多同时 4 个）；写文件、执行命令、MCP、`save_memory`、`revert_turn` 和不认识的工具都按原顺序一个一个执行。新增只读工具要加进这个名单。一批调用里只要有浏览器工具，整批都一个一个执行。结果按原来的顺序返回
+- 工具执行前按 JSON Schema 校验参数（`ToolArgumentValidator`），不合格就把字段级错误还给模型。内置工具只拦结构问题（缺参数、传了对象 / 数组、不在 enum 里），单值参数的类型和 null 仍由工具自己解析，评测复算依赖这套语义；MCP 工具按 server 的原始 Schema 严格校验，不能用清洗后给模型看的那份
 - 工具结果放进对话前，统一用 `ToolResultBoundary.wrap()` 包一层 `trust="untrusted-data"` 标记，表示这是外部数据，不代表允许做任何事；太大的结果由 `ToolResultOffloader` 写进 `.paicli/tool-outputs/`
 
 ### HITL（人工确认）与安全策略

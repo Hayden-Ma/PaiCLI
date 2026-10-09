@@ -82,13 +82,15 @@ public class McpClient implements AutoCloseable {
                 continue;
             }
             String description = tool.path("description").asText("");
-            JsonNode schema = McpSchemaSanitizer.sanitize(tool.path("inputSchema"));
+            JsonNode rawSchema = tool.path("inputSchema");
+            JsonNode schema = McpSchemaSanitizer.sanitize(rawSchema);
             descriptors.add(new McpToolDescriptor(
                     serverName,
                     name,
                     McpToolDescriptor.namespaced(serverName, name),
                     description,
-                    schema
+                    schema,
+                    rawSchema.isObject() ? rawSchema : null
             ));
         }
         return descriptors;

@@ -53,7 +53,8 @@ public class HitlToolRegistry extends ToolRegistry {
         boolean needsApproval = hitlHandler.isEnabled()
                 ? ApprovalPolicy.requiresApproval(name)
                 : hitlHandler.isHighRiskConfirmationEnabled() && ApprovalPolicy.requiresConfirmationByDefault(name);
-        if (!needsApproval) {
+        // 参数不合法的调用注定失败：不弹确认框、不调审查模型、不计入 auto 连续被拦次数，直接走执行路径拿到校验错误
+        if (!needsApproval || argumentError(name, argumentsJson) != null) {
             return super.doExecuteTool(name, argumentsJson);
         }
         BrowserCheckResult browserCheck = checkBrowserTool(name, argumentsJson, true);

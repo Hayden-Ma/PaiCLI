@@ -16,9 +16,10 @@
 
 ## P1：工具参数校验
 
-- [ ] **执行前按 JSON Schema 统一校验参数**（文章 01 题）
+- [x] **执行前按 JSON Schema 统一校验参数**（文章 01 题）
   - 现状：`tool/ToolRegistry.java:1463-1466` 用 `readTree` 解析后把所有值 `asText()` 成字符串，没有通用的必填、类型、枚举校验，各工具自己临时检查；`Param` 记录（`:1933`）只有 name/type/description/required，生成的 Schema 没有 enum、范围；JSON 解析失败只返回 `"工具执行失败: " + 异常信息`；MCP 工具参数不做校验，原样发给 server（`mcp/McpClient.java:101-108`）
   - 目标：引入 networknt json-schema-validator，内置工具和 MCP 工具都在执行前按注册时的 Schema 校验；校验失败返回字段级错误（“参数 path 缺失”“max_results 必须是整数”）；JSON 解析失败单独返回“参数不是合法 JSON”并附上原文片段；`Param` 支持 enum 和数值范围
+  - 做法：内置工具只拦结构问题（缺参数、传了对象 / 数组、不在 enum 里），单值类型和 null 仍交给工具自己解析——评测 F1/F2 的独立复算按这套语义还原 read_file 看到的内容（`"  +1 "`、阿拉伯-印度数字、null 都有用例），严格卡类型会让复算和实际对不上；MCP 按原始 Schema 严格校验（`McpSchemaSanitizer` 会把 anyOf 改写成 object，不能用清洗后的那份）；数值参数不加范围，工具现在会把超范围的值收回到合法范围，改成拒绝反而让弱模型重试；enum 用在 `create_project.type`、`save_memory.scope`；Jackson 从 2.16 升到 2.18.3 与校验库对齐，`-Pquick` 失败名单和升级前完全一致
   - 注意：MCP server 的 Schema 可能写得不规范或用了较新的 draft，加载失败时跳过校验并记日志，不能让工具整个不可用；内置工具现在靠 `parseInt` 能接受 `"top_k": "5"` 这种字符串数字，严格校验会让弱模型反复重试，开启 `typeLoose`
 
 ## P1：MCP 生命周期
