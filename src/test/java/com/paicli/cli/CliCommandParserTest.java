@@ -465,6 +465,14 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesResumeCommands() {
+        assertEquals(CliCommandParser.CommandType.RESUME, CliCommandParser.parse("/resume").type());
+        assertEquals("list", CliCommandParser.parse("/resume").payload());
+        assertEquals(CliCommandParser.CommandType.RESUME, CliCommandParser.parse("/resume session-123").type());
+        assertEquals("session-123", CliCommandParser.parse("/resume session-123").payload());
+    }
+
+    @Test
     void parsesMcpCommands() {
         assertEquals(CliCommandParser.CommandType.MCP_LIST, CliCommandParser.parse("/mcp").type());
         assertEquals(CliCommandParser.CommandType.MCP_RESTART, CliCommandParser.parse("/mcp restart filesystem").type());

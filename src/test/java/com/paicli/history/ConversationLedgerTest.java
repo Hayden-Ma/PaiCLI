@@ -4,6 +4,7 @@ import com.paicli.llm.LlmClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -15,7 +16,9 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConversationLedgerTest {
@@ -158,5 +161,49 @@ class ConversationLedgerTest {
         assertArrayEquals(original, java.util.Arrays.copyOf(after, original.length));
         assertEquals(List.of(0L, 1L),
                 resumed.readAll().stream().map(ConversationLedger.Entry::sequence).toList());
+    }
+
+    @Test
+    void sessionStartEventIsRecordedAsFirstLine(@TempDir Path tempDir) throws Exception {
+        ConversationLedger ledger = ConversationLedger.open(tempDir.resolve("history"), "started");
+        ledger.appendEvent(SessionCatalog.START_EVENT, "react", "cli", "startup",
+                Map.of("cwd", "/tmp/proj", "createdAt", 7L));
+        ledger.appendMessage("react", "agent", "user_input", LlmClient.Message.user("hi"));
+
+        List<ConversationLedger.Entry> entries = ledger.readAll();
+
+        assertEquals(SessionCatalog.START_EVENT, entries.get(0).event());
+        assertEquals("/tmp/proj", entries.get(0).metadata().get("cwd"));
+        assertEquals("hi", entries.get(1).message().content());
+    }
+
+    @Test
+    void existsReportsWhetherSessionFileIsPresent(@TempDir Path tempDir) throws Exception {
+        Path history = tempDir.resolve("history");
+        ConversationLedger.open(history, "present");
+
+        assertTrue(ConversationLedger.exists(history, "present"));
+        assertFalse(ConversationLedger.exists(history, "absent"));
+    }
+
+    @Test
+    void openExistingContinuesExistingSession(@TempDir Path tempDir) throws Exception {
+        Path history = tempDir.resolve("history");
+        ConversationLedger.open(history, "resume-me")
+                .appendMessage("react", "agent", "user_input", LlmClient.Message.user("first"));
+
+        ConversationLedger resumed = ConversationLedger.openExisting(history, "resume-me");
+        resumed.appendMessage("react", "agent", "user_input", LlmClient.Message.user("second"));
+
+        assertEquals("resume-me", resumed.sessionId());
+        assertEquals(2, resumed.readAll().size());
+    }
+
+    @Test
+    void openExistingFailsInsteadOfCreatingMissingSession(@TempDir Path tempDir) {
+        Path history = tempDir.resolve("history");
+
+        assertThrows(IOException.class, () -> ConversationLedger.openExisting(history, "nope"));
+        assertFalse(ConversationLedger.exists(history, "nope"));
     }
 }

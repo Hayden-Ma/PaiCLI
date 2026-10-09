@@ -19,6 +19,7 @@ import com.paicli.hitl.SwitchableHitlHandler;
 import com.paicli.hitl.RendererHitlHandler;
 import com.paicli.hitl.TerminalHitlHandler;
 import com.paicli.history.ConversationLedger;
+import com.paicli.history.SessionCatalog;
 import com.paicli.harness.BetterHarnessOptions;
 import com.paicli.harness.BetterHarnessRunner;
 import com.paicli.llm.LlmClient;
@@ -99,6 +100,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CountDownLatch;
@@ -232,6 +235,8 @@ public class Main {
             System.exit(runBench(args));
         }
 
+        InteractiveCliArgs cliArgs = parseInteractiveArgs(args);
+
         configureLogging();
 
         PaiCliConfig config = PaiCliConfig.load();
@@ -339,14 +344,50 @@ public class Main {
             skillRegistryRef.set(skillRegistry);
             hitlToolRegistry.setSkillRegistry(skillRegistry);
 
-            ConversationLedger conversationLedger;
-            try {
-                conversationLedger = ConversationLedger.openDefault(home);
-            } catch (IOException e) {
-                conversationLedger = ConversationLedger.disabled();
-                startupNote = appendStartupNote(
-                        startupNote,
-                        "原始会话账本初始化失败: " + e.getMessage());
+            Path historyDir = home.resolve(".paicli").resolve("history");
+            String projectCwd = Path.of("").toAbsolutePath().normalize().toString();
+            // 恢复只在 --continue / --session 显式请求时发生：评测、无头任务和微信通道都不经过这里。
+            boolean resuming = cliArgs.continueLatest() || cliArgs.sessionId() != null;
+            ConversationLedger conversationLedger = null;
+            if (cliArgs.sessionId() != null) {
+                try {
+                    conversationLedger = ConversationLedger.openExisting(historyDir, cliArgs.sessionId());
+                } catch (IOException e) {
+                    startupNote = appendStartupNote(startupNote,
+                            "恢复会话失败: " + e.getMessage() + "；已开始新会话。");
+                }
+            } else if (cliArgs.continueLatest()) {
+                try {
+                    Optional<SessionCatalog.SessionSummary> latest =
+                            SessionCatalog.latestForCwd(historyDir, projectCwd);
+                    if (latest.isPresent()) {
+                        conversationLedger = ConversationLedger.openExisting(
+                                historyDir, latest.get().sessionId());
+                    } else {
+                        startupNote = appendStartupNote(startupNote,
+                                "当前目录没有可恢复的历史会话，已开始新会话。");
+                    }
+                } catch (IOException e) {
+                    startupNote = appendStartupNote(startupNote,
+                            "查找历史会话失败: " + e.getMessage() + "；已开始新会话。");
+                }
+            }
+            if (conversationLedger == null) {
+                resuming = false;
+                try {
+                    conversationLedger = ConversationLedger.openDefault(home);
+                    conversationLedger.appendEvent(
+                            SessionCatalog.START_EVENT, "react", "cli", "startup",
+                            Map.of("cwd", projectCwd,
+                                    "createdAt", System.currentTimeMillis(),
+                                    "provider", llmClient.getProviderName(),
+                                    "model", llmClient.getModelName()));
+                } catch (IOException e) {
+                    conversationLedger = ConversationLedger.disabled();
+                    startupNote = appendStartupNote(
+                            startupNote,
+                            "原始会话账本初始化失败: " + e.getMessage());
+                }
             }
 
             // execute_command 沙箱：默认 OFF 与旧行为一致；auto/required 时探测 Seatbelt / bubblewrap 并提示结果。
@@ -359,6 +400,15 @@ public class Main {
             reactAgent.getMemoryManager().setAutoFactExtractionEnabled(
                     com.paicli.memory.AutoFactExtractor.enabledByConfiguration());
             reactAgent.setConversationLedger(conversationLedger);
+            if (resuming) {
+                int restored = reactAgent.restoreFromLedger();
+                conversationLedger.appendEvent(
+                        SessionCatalog.RESUME_EVENT, "react", "agent", "startup",
+                        Map.of("restoredMessages", restored,
+                                "sourceSessionId", conversationLedger.sessionId()));
+                startupNote = appendStartupNote(startupNote,
+                        "已恢复会话 " + conversationLedger.sessionId() + "（" + restored + " 条消息）。");
+            }
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
             reactAgent.setSkillRegistry(skillRegistry);
             DurableTaskManager taskManager = openTaskManager(llmClientRef);
@@ -721,6 +771,10 @@ public class Main {
                     }
                     case RESTORE_SNAPSHOT -> {
                         printRestoreCommand(ui, reactAgent.getToolRegistry().getSnapshotService(), command.payload());
+                        continue;
+                    }
+                    case RESUME -> {
+                        printResumeCommand(ui, historyDir, command.payload());
                         continue;
                     }
                     case MCP_LIST -> {
@@ -1087,6 +1141,37 @@ public class Main {
         return new BenchCliArgs(suitePath, outputRoot, runs, judgeModel, new CaseRunner.Options(
                 caseTimeoutSeconds, verifierTimeoutSeconds, hardMaxIterations, tokenBudget,
                 keepWorkspaces, commandAllowlist));
+    }
+
+    /** 交互式 CLI 参数；{@code --session} 优先于 {@code --continue}。 */
+    record InteractiveCliArgs(boolean continueLatest, String sessionId) {
+    }
+
+    /**
+     * 解析交互式启动参数。只认 {@code --continue}/{@code -c} 与 {@code --session <id>}；
+     * wechat / serve / bench 三个子命令在此之前已判定，未知参数忽略以保持旧行为。
+     */
+    static InteractiveCliArgs parseInteractiveArgs(String[] args) {
+        boolean continueLatest = false;
+        String sessionId = null;
+        for (int i = 0; i < args.length; i++) {
+            String flag = args[i];
+            String lower = flag.toLowerCase(Locale.ROOT);
+            if ("--continue".equals(lower) || "-c".equals(lower)) {
+                continueLatest = true;
+            } else if ("--session".equals(lower) && i + 1 < args.length) {
+                String value = args[++i].trim();
+                if (!value.isEmpty()) {
+                    sessionId = value;
+                }
+            } else if (lower.startsWith("--session=")) {
+                String value = flag.substring("--session=".length()).trim();
+                if (!value.isEmpty()) {
+                    sessionId = value;
+                }
+            }
+        }
+        return new InteractiveCliArgs(continueLatest, sessionId);
     }
 
     private static int runBench(String[] args) {
@@ -1996,6 +2081,8 @@ public class Main {
                 new SlashCommandHint("/snapshot status", "/snapshot status", "查看 Side-Git 快照状态"),
                 new SlashCommandHint("/snapshot clean", "/snapshot clean", "清理当前项目 Side-Git 快照"),
                 new SlashCommandHint("/restore ", "/restore <N>", "恢复到最近第 N 个 pre-turn 快照"),
+                new SlashCommandHint("/resume", "/resume", "列出可恢复的历史会话"),
+                new SlashCommandHint("/resume ", "/resume <session-id>", "恢复指定会话（需重启生效）"),
                 new SlashCommandHint("/index", "/index", "增量索引当前代码库（跳过未变更文件）"),
                 new SlashCommandHint("/index ", "/index [--full] [路径]", "索引指定路径；--full 清空全量重建"),
                 new SlashCommandHint("/search ", "/search <查询>", "语义检索代码（RAG 辅助）"),
@@ -2834,6 +2921,43 @@ public class Main {
                         + (metadata.targetUrl() == null ? "" : ", url=" + metadata.targetUrl()));
             }
         }
+        out.println();
+    }
+
+    /**
+     * /resume：列出可恢复的历史会话；带 id 时提示用启动参数恢复（进程内热切换尚未支持）。
+     */
+    private static void printResumeCommand(PrintStream out, Path historyDir, String payload) {
+        if (payload != null && !payload.isBlank() && !"list".equalsIgnoreCase(payload)) {
+            out.println("会话 " + payload + "：请用 `paicli --session " + payload
+                    + "` 重启恢复（当前进程内热切换尚未支持）。");
+            out.println();
+            return;
+        }
+        List<SessionCatalog.SessionSummary> sessions;
+        try {
+            sessions = SessionCatalog.discover(historyDir);
+        } catch (IOException e) {
+            out.println("读取历史会话失败: " + e.getMessage());
+            out.println();
+            return;
+        }
+        if (sessions.isEmpty()) {
+            out.println("没有可恢复的历史会话。");
+            out.println();
+            return;
+        }
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+        out.println("可恢复的历史会话（最近活动在前）：");
+        for (SessionCatalog.SessionSummary session : sessions) {
+            String when = formatter.format(LocalDateTime.ofInstant(
+                    java.time.Instant.ofEpochMilli(session.lastActiveAt()),
+                    java.time.ZoneId.systemDefault()));
+            out.println("  " + session.sessionId() + "  " + when + "  "
+                    + session.messageCount() + " 条消息  "
+                    + (session.cwd() == null ? "?" : session.cwd()));
+        }
+        out.println("用 `paicli --continue` 恢复当前目录最近一次，或 `paicli --session <id>` 恢复指定会话。");
         out.println();
     }
 

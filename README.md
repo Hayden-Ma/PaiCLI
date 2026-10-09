@@ -287,6 +287,7 @@ v16.1 抽出 `Renderer` 接口 + 三个实现：
 - 通用命令：`/mode`（或 Shift+Tab）、`/clear`、`/context`、`/memory`、`/memory clear`、`/save <事实>`、`/export`、`/better-harness`、`/eval`、`/hitl`、`/hitl on`、`/hitl default`、`/config`、`/exit`
 - Lanterna 的展示快照保存到 `~/.paicli/history/session_*.jsonl`
 - 原始会话账本独立保存到 `~/.paicli/history/raw/session-*.jsonl`：默认 CLI 的 ReAct / Plan / Team 共享同一个 append-only 文件，system、user、assistant、tool_call、tool_result 都保留完整 `LlmClient.Message`（含 reasoning、工具参数/结果和图片 payload）。`/clear` 和上下文压缩只改模型发送视图，不改写旧账本；POSIX 下目录为 0700、文件为 0600。账本可能包含敏感内容，请勿提交或随意分享
+- 会话可恢复：新会话首行写 `session_start` 事件记录 `cwd` / 创建时间，`paicli --continue` 按目录取最近一次、`paicli --session <id>` 取指定会话、`/resume` 列出全部。恢复只重放 `react` 模式、最后一次 `/clear` 之后的消息，账本里的 `system` 条目跳过、index 0 用本次新建的系统提示；压缩边界（摘要 + 保留条数）随 `compaction` 事件落盘，长会话恢复后上下文与当时一致。恢复仅在这些显式入口触发，评测、无头任务与微信通道不受影响；恢复的会话按“已读外部内容”处理，暂停自动写长期记忆
 - 兼容旧设置：`PAICLI_TUI=true` 自动映射为 `PAICLI_RENDERER=lanterna`（已 deprecated）
 - `PAICLI_NO_STATUSBAR=true` 在 inline 模式下禁用 JLine 底部 dock（不适合 ANSI 光标控制的终端）
 - `NO_COLOR=1` 禁用所有 ANSI 颜色，保留布局
@@ -809,6 +810,8 @@ I
 - `paicli wechat status` - 查看绑定状态和 daemon pid
 - `paicli wechat daemon start|stop|restart|status|logs` - 管理本机微信通道后台进程
 - `paicli bench --suite <suite.json> [--runs k] [--out dir]` - 无头评测：跑 suite 里的全部 case 并输出 pass@1 / pass@k 与加权得分（详见 [benchmarks/paicli-smoke-v0.1/README.md](benchmarks/paicli-smoke-v0.1/README.md)）
+- `paicli --continue`（或 `-c`）- 恢复当前目录最近一次历史会话，接着上次的对话继续
+- `paicli --session <session-id>` - 恢复指定会话；id 不存在时报错并回退到新会话
 
 交互式斜杠命令：
 
@@ -839,6 +842,8 @@ I
 - `/snapshot status` - 查看 Side-Git 快照状态
 - `/snapshot clean` - 清理当前项目 Side-Git 快照目录
 - `/restore <N>` - 恢复到最近第 N 个 pre-turn 快照
+- `/resume` - 列出可恢复的历史会话（按项目目录归属，最近活动在前）
+- `/resume <session-id>` - 恢复指定会话（需用 `paicli --session <id>` 重启生效）
 - `/memory` / `/mem` - 查看记忆系统状态
 - `/memory list` - 查看长期记忆列表
 - `/memory search <关键词>` - 搜索当前项目可见长期记忆
@@ -944,7 +949,8 @@ src/main/java/com/paicli
 │   ├── ContextProfile.java     # 模型窗口与上下文策略
 │   └── TokenUsageFormatter.java # Token / cache / 成本展示
 ├── history/
-│   └── ConversationLedger.java # 原始会话 append-only JSONL 账本
+│   ├── ConversationLedger.java # 原始会话 append-only JSONL 账本
+│   └── SessionCatalog.java     # 按 cwd 发现可恢复的历史会话
 ├── memory/
 │   ├── MemoryEntry.java        # 记忆条目
 │   ├── LongTermMemory.java     # 长期记忆

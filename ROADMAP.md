@@ -689,7 +689,7 @@ E2 原生观察接口已接线：默认关闭的 13 类角色/输入/工具/审�
 
 ### 第二批：体验与能力
 
-- ⬜ 会话恢复：`--continue` / `--session <id>`，`/sessions` 管理面板，`/fork`、`/rewind`、`/retry`。PaiCLI 已有原始会话账本，缺恢复入口。参考 `packages/tui/src/features/session/manager.ts`
+- 🔄 会话恢复：`--continue` / `--session <id>` / `/resume`（列表）已交付（2026-10-09）——重放 `react` 账本重建 `conversationHistory`，压缩边界（`summary` + `retainedMessages`）随 `compaction` 事件落盘，恢复仅在显式入口触发、且按“已读外部内容”处理。待做：`/sessions` 管理面板、`/fork`、`/rewind`、`/retry`、进程内热切换 `/resume <id>`；`tui/history/ConversationSnapshot` 这份 TUI 专用历史可考虑合并。参考 `packages/tui/src/features/session/manager.ts`
 - ⬜ 按轮次回滚：可选“只回退对话 / 对话连同文件”，还原前比对哈希，文件已被别处改过则跳过并说明。参考 `packages/local-runtime/src/turns/file-changes.ts`
 - ✅ `edit_file` 容错：精确匹配失败后做 Unicode、行尾空白、引号归一化再匹配；剥掉从 read 输出带来的行号前缀；支持 `replace_all`（2026-09-25）
 - ⬜ 运行中插话：Enter 插话改变当前方向，Alt+Enter 排到下一轮，`/btw` 只读旁路会话；同时修掉 ESC 取消的线程竞态。参考 `packages/tui/src/tui/shell/keybindings.ts`

@@ -5,8 +5,10 @@ import com.paicli.llm.LlmTraceLogger;
 import com.paicli.context.ContextProfile;
 import com.paicli.context.TokenUsageFormatter;
 import com.paicli.history.ConversationLedger;
+import com.paicli.history.SessionCatalog;
 import com.paicli.lsp.LspDiagnosticReport;
 import com.paicli.memory.AutoCompactionManager;
+import com.paicli.memory.ConversationHistoryCompactor;
 import com.paicli.memory.ExplicitMemoryHints;
 import com.paicli.memory.MemoryManager;
 import com.paicli.prompt.PromptAssembler;
@@ -441,7 +443,8 @@ public class Agent {
         try {
             AutoCompactionManager.Result result = autoCompactionManager.compactNow(conversationHistory);
             if (result.compacted()) {
-                recordCompaction("manual", beforeMessages, beforeTokens);
+                recordCompaction("manual", beforeMessages, beforeTokens,
+                        result.summaryMessage(), result.retainedMessages());
             }
             return new CompactionResult(result.compacted(), beforeTokens, estimateCurrentContextTokens(), null);
         } catch (Exception e) {
@@ -494,12 +497,13 @@ public class Agent {
         try {
             AutoCompactionManager.Result result = autoCompactionManager.compactIfNeeded(conversationHistory, trigger);
             if (result.clearedToolResults() > 0) {
-                recordCompaction("automatic:tool_result_clearing", beforeMessages, beforeTokens);
+                recordCompaction("automatic:tool_result_clearing", beforeMessages, beforeTokens, null, 0);
                 renderer().stream().println("🧹 上下文增长，已清理 " + result.clearedToolResults()
                         + " 条较早的工具结果（保留最近几条；需要时可重新调用工具或读回卸载文件）。");
             }
             if (result.compacted()) {
-                recordCompaction("automatic:" + result.strategy().name().toLowerCase(), beforeMessages, beforeTokens);
+                recordCompaction("automatic:" + result.strategy().name().toLowerCase(), beforeMessages,
+                        beforeTokens, result.summaryMessage(), result.retainedMessages());
                 String strategy = result.strategy() == AutoCompactionManager.Strategy.SESSION_MEMORY
                         ? "会话记忆摘要"
                         : "完整对话摘要";
@@ -604,6 +608,102 @@ public class Agent {
 
     public ConversationLedger getConversationLedger() {
         return conversationLedger;
+    }
+
+    /**
+     * 从已附加的会话账本重建 {@code conversationHistory}，返回恢复的消息条数。
+     *
+     * <p>只重放 {@code react} 模式、且位于最后一次 {@code history_clear} 之后的消息；账本里的
+     * {@code system} 条目一律跳过，index 0 始终是本次新建的系统提示。恢复出的历史按“已读外部
+     * 内容”处理，暂停自动写长期记忆，避免旧会话里的网页 / MCP 文本被重新抽成事实。</p>
+     */
+    public int restoreFromLedger() {
+        if (!conversationLedger.isEnabled()) {
+            return 0;
+        }
+        List<ConversationLedger.Entry> entries;
+        try {
+            entries = conversationLedger.readAll();
+        } catch (IOException e) {
+            log.warn("恢复会话失败：读取账本出错", e);
+            return 0;
+        }
+        return restoreFromEntries(entries, "react");
+    }
+
+    /**
+     * 重放一批账本条目。包级可见以便测试直接喂数据；不回写账本。
+     *
+     * @param modeFilter 只重放该 mode 的消息；null 表示不过滤
+     */
+    int restoreFromEntries(List<ConversationLedger.Entry> entries, String modeFilter) {
+        if (entries == null || entries.isEmpty()) {
+            return 0;
+        }
+        int restored = 0;
+        for (int i = lastHistoryClearIndex(entries); i < entries.size(); i++) {
+            ConversationLedger.Entry entry = entries.get(i);
+            LlmClient.Message message = entry.message();
+            if (message == null) {
+                applyCompactionBoundary(entry, modeFilter);
+                continue;
+            }
+            if ("system".equals(message.role())) {
+                continue;
+            }
+            if (modeFilter != null && !modeFilter.equals(entry.mode())) {
+                continue;
+            }
+            conversationHistory.add(message);
+            restored++;
+        }
+        if (restored == 0) {
+            return 0;
+        }
+        pruneHistoricalImagePayloads();
+        memoryManager.getExternalContextTracker().record(SessionCatalog.RESUME_EVENT);
+        return restored;
+    }
+
+    /**
+     * 压缩边界：账本里被保留的尾部消息排在 compaction 事件之前，所以按事件记录的
+     * {@code retainedMessages} 取已累积消息的最后 N 条，前面换成摘要 + 确认语，
+     * 与 {@code ConversationHistoryCompactor.rebuildWithSummary} 的结构逐字一致。
+     */
+    private void applyCompactionBoundary(ConversationLedger.Entry entry, String modeFilter) {
+        if (!"compaction".equals(entry.event())) {
+            return;
+        }
+        if (modeFilter != null && !modeFilter.equals(entry.mode())) {
+            return;
+        }
+        Object summaryValue = entry.metadata() == null ? null : entry.metadata().get("summary");
+        if (!(summaryValue instanceof String summary) || summary.isBlank()) {
+            return;
+        }
+        List<LlmClient.Message> accumulated = conversationHistory.subList(1, conversationHistory.size());
+        int retained = retainedMessages(entry.metadata());
+        List<LlmClient.Message> kept = new ArrayList<>(
+                accumulated.subList(Math.max(0, accumulated.size() - retained), accumulated.size()));
+        accumulated.clear();
+        conversationHistory.add(LlmClient.Message.user(summary));
+        conversationHistory.add(LlmClient.Message.assistant(ConversationHistoryCompactor.SUMMARY_ACK));
+        conversationHistory.addAll(kept);
+    }
+
+    private static int retainedMessages(java.util.Map<String, Object> metadata) {
+        Object value = metadata == null ? null : metadata.get("retainedMessages");
+        return value instanceof Number number ? Math.max(0, number.intValue()) : 0;
+    }
+
+    private static int lastHistoryClearIndex(List<ConversationLedger.Entry> entries) {
+        int start = 0;
+        for (int i = 0; i < entries.size(); i++) {
+            if ("history_clear".equals(entries.get(i).event())) {
+                start = i + 1;
+            }
+        }
+        return start;
     }
 
     /**
@@ -1019,17 +1119,18 @@ public class Agent {
         conversationLedger.appendMessage("react", "agent", source, message);
     }
 
-    private void recordCompaction(String source, int beforeMessages, long beforeTokens) {
-        conversationLedger.appendEvent(
-                "compaction",
-                "react",
-                "agent",
-                source,
-                java.util.Map.of(
-                        "beforeMessages", beforeMessages,
-                        "afterMessages", conversationHistory.size(),
-                        "beforeTokens", beforeTokens,
-                        "afterTokens", estimateCurrentContextTokens()));
+    private void recordCompaction(String source, int beforeMessages, long beforeTokens,
+                                  String summary, int retainedMessages) {
+        java.util.Map<String, Object> metadata = new java.util.LinkedHashMap<>();
+        metadata.put("beforeMessages", beforeMessages);
+        metadata.put("afterMessages", conversationHistory.size());
+        metadata.put("beforeTokens", beforeTokens);
+        metadata.put("afterTokens", estimateCurrentContextTokens());
+        metadata.put("retainedMessages", retainedMessages);
+        if (summary != null && !summary.isBlank()) {
+            metadata.put("summary", summary);
+        }
+        conversationLedger.appendEvent("compaction", "react", "agent", source, metadata);
     }
 
     private String formatUserFacingResponse(String reasoningContent, String answer) {

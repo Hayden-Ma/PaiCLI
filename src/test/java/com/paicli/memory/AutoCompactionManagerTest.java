@@ -121,15 +121,23 @@ class AutoCompactionManagerTest {
         }
 
         @Override
-        public boolean compactIfNeeded(List<LlmClient.Message> history, int triggerTokens) {
+        public ConversationHistoryCompactor.CompactionOutcome compactIfNeeded(
+                List<LlmClient.Message> history, int triggerTokens) {
             calls.incrementAndGet();
-            return result;
+            return outcome();
         }
 
         @Override
-        public boolean compactNow(List<LlmClient.Message> history) {
+        public ConversationHistoryCompactor.CompactionOutcome compactNow(List<LlmClient.Message> history) {
             manualCalls.incrementAndGet();
-            return result;
+            return outcome();
+        }
+
+        private ConversationHistoryCompactor.CompactionOutcome outcome() {
+            return result
+                    ? new ConversationHistoryCompactor.CompactionOutcome(
+                            true, ConversationHistoryCompactor.SUMMARY_PREFIX + "stub summary", 0)
+                    : ConversationHistoryCompactor.CompactionOutcome.none();
         }
     }
 

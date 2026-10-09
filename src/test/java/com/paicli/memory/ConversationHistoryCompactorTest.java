@@ -19,7 +19,7 @@ class ConversationHistoryCompactorTest {
         history.add(LlmClient.Message.system("system"));
         history.add(LlmClient.Message.user("hi"));
 
-        boolean compacted = c.compactIfNeeded(history, 100_000);
+        boolean compacted = c.compactIfNeeded(history, 100_000).compacted();
 
         assertFalse(compacted);
         assertEquals(2, history.size());
@@ -36,7 +36,7 @@ class ConversationHistoryCompactorTest {
             history.add(LlmClient.Message.assistant("A" + i + longText(100)));
         }
 
-        boolean compacted = c.compactNow(history);
+        boolean compacted = c.compactNow(history).compacted();
 
         assertTrue(compacted);
         assertEquals(1, c.summarizeCalls.get());
@@ -56,7 +56,7 @@ class ConversationHistoryCompactorTest {
         history.add(LlmClient.Message.user(longText(20_000)));
         history.add(LlmClient.Message.assistant(longText(20_000)));
 
-        boolean compacted = c.compactIfNeeded(history, 100);
+        boolean compacted = c.compactIfNeeded(history, 100).compacted();
 
         assertFalse(compacted, "user turns 不够 retainRecent 时应跳过");
         assertEquals(5, history.size());
@@ -74,7 +74,7 @@ class ConversationHistoryCompactorTest {
             history.add(LlmClient.Message.assistant("A" + i + ": " + longText(5_000)));
         }
 
-        boolean compacted = c.compactIfNeeded(history, 100);
+        boolean compacted = c.compactIfNeeded(history, 100).compacted();
 
         assertTrue(compacted);
         assertEquals(1, c.summarizeCalls.get());
@@ -91,6 +91,40 @@ class ConversationHistoryCompactorTest {
         // 保留的最后两个 user message 仍是 Q4 / Q5（不是 Q3）
         assertTrue(history.get(3).content().startsWith("Q4"));
         assertTrue(history.get(5).content().startsWith("Q5"));
+    }
+
+    @Test
+    void compactionOutcomeCarriesSummaryAndRetainedTail() {
+        StubCompactor c = new StubCompactor("MOCK SUMMARY OF OLD CONTENT", 2);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("SYSTEM_PROMPT"));
+        for (int i = 0; i < 6; i++) {
+            history.add(LlmClient.Message.user("Q" + i + ": " + longText(5_000)));
+            history.add(LlmClient.Message.assistant("A" + i + ": " + longText(5_000)));
+        }
+
+        ConversationHistoryCompactor.CompactionOutcome outcome = c.compactIfNeeded(history, 100);
+
+        assertTrue(outcome.compacted());
+        assertEquals(ConversationHistoryCompactor.SUMMARY_PREFIX + "MOCK SUMMARY OF OLD CONTENT",
+                outcome.summaryMessage());
+        assertEquals(outcome.summaryMessage(), history.get(1).content());
+        // retainRecent=2，保留 Q4/A4/Q5/A5 共 4 条尾部消息
+        assertEquals(4, outcome.retainedMessages());
+    }
+
+    @Test
+    void notCompactedOutcomeIsEmpty() {
+        StubCompactor c = new StubCompactor("MOCK", 3);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("S"));
+        history.add(LlmClient.Message.user("hi"));
+
+        ConversationHistoryCompactor.CompactionOutcome outcome = c.compactIfNeeded(history, 100_000);
+
+        assertFalse(outcome.compacted());
+        assertNull(outcome.summaryMessage());
+        assertEquals(0, outcome.retainedMessages());
     }
 
     @Test
@@ -114,7 +148,7 @@ class ConversationHistoryCompactorTest {
         history.add(LlmClient.Message.user("RecentQ2"));
         history.add(LlmClient.Message.assistant("RecentA2"));
 
-        boolean compacted = c.compactIfNeeded(history, 100);
+        boolean compacted = c.compactIfNeeded(history, 100).compacted();
 
         assertTrue(compacted);
         // 找到摘要后的第一个 user
@@ -145,7 +179,7 @@ class ConversationHistoryCompactorTest {
         }
         int before = history.size();
 
-        boolean compacted = c.compactIfNeeded(history, 100);
+        boolean compacted = c.compactIfNeeded(history, 100).compacted();
 
         assertFalse(compacted);
         assertEquals(before, history.size());
@@ -162,7 +196,7 @@ class ConversationHistoryCompactorTest {
         }
         List<LlmClient.Message> before = List.copyOf(history);
 
-        assertFalse(c.compactNow(history));
+        assertFalse(c.compactNow(history).compacted());
         assertEquals(before, history);
     }
 
@@ -183,7 +217,7 @@ class ConversationHistoryCompactorTest {
         }
         int before = history.size();
 
-        boolean compacted = c.compactIfNeeded(history, 100);
+        boolean compacted = c.compactIfNeeded(history, 100).compacted();
 
         assertFalse(compacted);
         assertEquals(before, history.size());
@@ -249,7 +283,7 @@ class ConversationHistoryCompactorTest {
         }
         List<LlmClient.Message> before = List.copyOf(history);
 
-        assertFalse(compactor.compactIfNeeded(history, 100));
+        assertFalse(compactor.compactIfNeeded(history, 100).compacted());
         assertEquals(before, history);
         assertEquals(2, client.prompts.size());
     }

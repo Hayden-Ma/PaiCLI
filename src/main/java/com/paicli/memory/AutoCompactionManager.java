@@ -71,10 +71,12 @@ public class AutoCompactionManager {
         if (sessionMemoryCompactor.compactIfReady(history, triggerTokens)) {
             return new Result(true, Strategy.SESSION_MEMORY, cleared);
         }
-        boolean compacted = fullCompactor.compactIfNeeded(history, triggerTokens);
-        if (compacted) {
+        ConversationHistoryCompactor.CompactionOutcome outcome =
+                fullCompactor.compactIfNeeded(history, triggerTokens);
+        if (outcome.compacted()) {
             sessionMemoryCompactor.clear(history);
-            return new Result(true, Strategy.FULL_SUMMARY, cleared);
+            return new Result(true, Strategy.FULL_SUMMARY, cleared,
+                    outcome.summaryMessage(), outcome.retainedMessages());
         }
         return cleared > 0 ? new Result(false, Strategy.TOOL_RESULT_CLEARING, cleared) : Result.none();
     }
@@ -93,9 +95,9 @@ public class AutoCompactionManager {
     /** 手动 /compact 始终使用稳定的完整摘要路径。 */
     public Result compactNow(List<LlmClient.Message> history) {
         sessionMemoryCompactor.clear(history);
-        boolean compacted = fullCompactor.compactNow(history);
-        return compacted
-                ? new Result(true, Strategy.FULL_SUMMARY)
+        ConversationHistoryCompactor.CompactionOutcome outcome = fullCompactor.compactNow(history);
+        return outcome.compacted()
+                ? new Result(true, Strategy.FULL_SUMMARY, 0, outcome.summaryMessage(), outcome.retainedMessages())
                 : Result.none();
     }
 
@@ -118,14 +120,21 @@ public class AutoCompactionManager {
     /**
      * @param compacted          是否做了摘要压缩（会话记忆或完整摘要）
      * @param clearedToolResults 本次在摘要之前清理的旧工具结果条数
+     * @param summaryMessage     完整摘要路径写入重建历史的摘要消息；其他策略为 null
+     * @param retainedMessages   完整摘要路径保留的尾部消息条数；其他策略为 0
      */
-    public record Result(boolean compacted, Strategy strategy, int clearedToolResults) {
+    public record Result(boolean compacted, Strategy strategy, int clearedToolResults,
+                         String summaryMessage, int retainedMessages) {
         public Result(boolean compacted, Strategy strategy) {
-            this(compacted, strategy, 0);
+            this(compacted, strategy, 0, null, 0);
+        }
+
+        Result(boolean compacted, Strategy strategy, int clearedToolResults) {
+            this(compacted, strategy, clearedToolResults, null, 0);
         }
 
         static Result none() {
-            return new Result(false, Strategy.NONE, 0);
+            return new Result(false, Strategy.NONE, 0, null, 0);
         }
     }
 

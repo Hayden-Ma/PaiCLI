@@ -96,7 +96,7 @@ public final class ConversationLedger {
     public static ConversationLedger open(Path historyDirectory, String sessionId) throws IOException {
         Objects.requireNonNull(historyDirectory, "historyDirectory");
         String safeSessionId = requireSafeSessionId(sessionId);
-        Path directory = historyDirectory.toAbsolutePath().normalize().resolve("raw");
+        Path directory = rawDirectory(historyDirectory);
         createSecureDirectory(directory);
         Path file = directory.resolve(safeSessionId + ".jsonl");
         createSecureFile(file);
@@ -109,10 +109,38 @@ public final class ConversationLedger {
     }
 
     /**
+     * Whether a session ledger file already exists below {@code historyDirectory/raw/}.
+     */
+    public static boolean exists(Path historyDirectory, String sessionId) {
+        Objects.requireNonNull(historyDirectory, "historyDirectory");
+        String safeSessionId = requireSafeSessionId(sessionId);
+        return Files.isRegularFile(rawDirectory(historyDirectory).resolve(safeSessionId + ".jsonl"));
+    }
+
+    /**
+     * Opens an existing session ledger and continues its sequence counter. Unlike
+     * {@link #open(Path, String)} this never creates a file: resuming a mistyped session
+     * id must fail loudly instead of silently starting a new session.
+     */
+    public static ConversationLedger openExisting(Path historyDirectory, String sessionId) throws IOException {
+        Objects.requireNonNull(historyDirectory, "historyDirectory");
+        String safeSessionId = requireSafeSessionId(sessionId);
+        Path file = rawDirectory(historyDirectory).resolve(safeSessionId + ".jsonl");
+        if (!Files.isRegularFile(file)) {
+            throw new IOException("会话账本不存在: " + safeSessionId);
+        }
+        return new ConversationLedger(file, safeSessionId, Clock.systemUTC(), true, nextSequence(file));
+    }
+
+    /**
      * No-op ledger used by unit tests and entry points that have not attached persistence.
      */
     public static ConversationLedger disabled() {
         return DISABLED;
+    }
+
+    private static Path rawDirectory(Path historyDirectory) {
+        return historyDirectory.toAbsolutePath().normalize().resolve("raw");
     }
 
     public void appendMessage(String mode, String actor, String source, LlmClient.Message message) {

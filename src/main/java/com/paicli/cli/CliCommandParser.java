@@ -33,6 +33,7 @@ final class CliCommandParser {
         AUDIT_TAIL,
         SNAPSHOT,
         RESTORE_SNAPSHOT,
+        RESUME,
         MCP_LIST,
         MCP_RESTART,
         MCP_LOGS,
@@ -253,6 +254,14 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/snapshot ", 0, 10)) {
             return new ParsedCommand(CommandType.SNAPSHOT, trimmed.substring(10).trim());
+        }
+
+        if (trimmed.equalsIgnoreCase("/resume")) {
+            return new ParsedCommand(CommandType.RESUME, "list");
+        }
+
+        if (trimmed.regionMatches(true, 0, "/resume ", 0, 8)) {
+            return new ParsedCommand(CommandType.RESUME, trimmed.substring(8).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/restore")) {

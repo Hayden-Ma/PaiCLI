@@ -44,7 +44,7 @@ scripts/nightly-bench.sh                    # 每夜回归评测（打包 + benc
 /eval                       # 交互式 CLI 内评测，默认跑 benchmarks/paicli-smoke-v0.1/suite.json，可带 bench 同款参数
 ```
 
-交互命令：`/plan`、`/team`、`/mode auto|plan|ask`（Shift+Tab 循环）、`/hitl on|default`、`/save`、`/memory`、`/compact`、`/context`、`/init`、`/export`、`/better-harness`、`/wechat`。未识别的 `/xxx` 在 CLI 层报“未知命令”，不回退给 Agent。
+交互命令：`/plan`、`/team`、`/mode auto|plan|ask`（Shift+Tab 循环）、`/hitl on|default`、`/save`、`/memory`、`/compact`、`/context`、`/init`、`/export`、`/better-harness`、`/resume`、`/wechat`。未识别的 `/xxx` 在 CLI 层报“未知命令”，不回退给 Agent。
 
 `mvn test -Pquick` 当前有一批评测包（`eval.benchmark.*`）和 `TerminalMarkdownRendererTest` 的既有失败，`ToolRegistryTest.macSandboxAllowsDevelopmentRuntimesAndDevNull` 在较新 macOS 上 Seatbelt 内 JVM 以 139 退出。判断回归要对比改动前后的失败集合，不要只看总数。
 
@@ -82,6 +82,7 @@ src/main/java/com/paicli/
 ### Memory 与上下文
 
 - 短期上下文只有各 Agent 实际发给 LLM 的 `conversationHistory`，不要再维护影子消息副本
+- 会话恢复只在 `--continue` / `--session <id>` / `/resume` 显式触发，评测、无头任务和微信通道永不自动恢复；重放账本时跳过 `system` 条目（index 0 用本次新建的系统提示）与非 `react` 模式，恢复出的历史按“已读外部内容”处理、暂停自动写长期记忆。压缩边界随 `compaction` 事件记录 `summary` 与 `retainedMessages`——被保留的尾部消息排在事件之前，恢复时必须按条数取回，不能只重置成摘要
 - 压缩按代价从小到大：超大工具结果落盘（默认 32000 字符）→ 旧工具结果清理（`min(100k, 摘要阈值×0.6)`，只换正文、保留 `tool_call_id`）→ 摘要（Session Memory 实验路径默认关，失败回退四栏目完整摘要）。摘要阈值 `window - min(20k, window/4) - min(13k, window/8)`；栏目不全或 Token 不降时保留原历史
 - 长期记忆默认 project 作用域，跨项目偏好才用 global；只存稳定事实。显式写入走去重 → 冲突检测（数字/版本差异或 Dice ≥ 0.8 不写入，由用户选 replace / force），模型不得替用户选择；超过 30 天未核实标“可能已过时”
 - 长期记忆文件被多个实例和进程共享：变更必须走 `withStorageLock`（锁内重读 → 修改 → 原子写回），不要绕开直接写盘

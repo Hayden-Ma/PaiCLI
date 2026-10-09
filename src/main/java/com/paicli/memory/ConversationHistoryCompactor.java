@@ -18,15 +18,31 @@ import java.util.Locale;
  * 重建同一份 conversationHistory，不再维护一份与真实输入脱节的影子短期记忆。
  *
  * 算法：
- * 1. 估算 conversationHistory 当前 token，未达 trigger 直接返回 false
+ * 1. 估算 conversationHistory 当前 token，未达 trigger 直接返回 {@link CompactionOutcome#none()}
  * 2. 找出所有 user message 的索引；保留最近 retainRecentRounds 个 user 起算的尾部
  * 3. 把 system 之后、splitIdx 之前的全部消息喂给 LLM 摘要
- * 4. 重建：[system] + [user("[已压缩的历史对话摘要]\n" + summary)] +
- *         [assistant("好的，已了解上下文。请继续。")] + [尾部保留消息]
+ * 4. 重建：[system] + [user(SUMMARY_PREFIX + summary)] +
+ *         [assistant(SUMMARY_ACK)] + [尾部保留消息]
  *
  * 关键约束：分割点必然落在 user message 边界，避免切断 tool_call / tool_result 的成对协议。
  */
 public class ConversationHistoryCompactor {
+
+    /** 摘要消息前缀；恢复时按账本里存的整条摘要原样写回，不重新拼接。 */
+    public static final String SUMMARY_PREFIX = "[已压缩的历史对话摘要]\n";
+    /** 压缩后紧跟摘要的确认语，恢复时必须逐字还原。 */
+    public static final String SUMMARY_ACK = "好的，我已了解之前的上下文，请继续。";
+
+    /**
+     * @param compacted        是否真的压缩了
+     * @param summaryMessage   写入重建历史的摘要消息（含 {@link #SUMMARY_PREFIX}）；未压缩为 null
+     * @param retainedMessages 重建时保留的尾部消息条数；未压缩为 0
+     */
+    public record CompactionOutcome(boolean compacted, String summaryMessage, int retainedMessages) {
+        static CompactionOutcome none() {
+            return new CompactionOutcome(false, null, 0);
+        }
+    }
 
     private static final Logger log = LoggerFactory.getLogger(ConversationHistoryCompactor.class);
 
@@ -111,9 +127,9 @@ public class ConversationHistoryCompactor {
      *
      * @param history       Agent 主循环的 conversationHistory，调用结束后可能被替换为更短列表
      * @param triggerTokens 触发压缩的 token 阈值（通常是 ContextProfile.compressionTriggerTokens()）
-     * @return 是否真的压缩了
+     * @return 压缩结果；未压缩时为 {@link CompactionOutcome#none()}
      */
-    public boolean compactIfNeeded(List<LlmClient.Message> history, int triggerTokens) {
+    public CompactionOutcome compactIfNeeded(List<LlmClient.Message> history, int triggerTokens) {
         return compact(history, triggerTokens, false, retainRecentRounds);
     }
 
@@ -121,16 +137,16 @@ public class ConversationHistoryCompactor {
      * 手动压缩 history，跳过 token 阈值判断，但仍保留最近轮次和 user 边界切割保护。
      *
      * @param history Agent 主循环的 conversationHistory，调用结束后可能被替换为更短列表
-     * @return 是否真的压缩了
+     * @return 压缩结果；未压缩时为 {@link CompactionOutcome#none()}
      */
-    public boolean compactNow(List<LlmClient.Message> history) {
+    public CompactionOutcome compactNow(List<LlmClient.Message> history) {
         return compact(history, 0, true, 1);
     }
 
-    private boolean compact(List<LlmClient.Message> history, int triggerTokens, boolean force, int retainRounds) {
-        if (history == null || history.isEmpty()) return false;
+    private CompactionOutcome compact(List<LlmClient.Message> history, int triggerTokens, boolean force, int retainRounds) {
+        if (history == null || history.isEmpty()) return CompactionOutcome.none();
         int currentTokens = TokenBudget.estimateMessagesTokens(history);
-        if (!force && currentTokens < triggerTokens) return false;
+        if (!force && currentTokens < triggerTokens) return CompactionOutcome.none();
 
         int systemEnd = systemEnd(history);
         List<Integer> userIndices = userIndices(history, systemEnd);
@@ -138,45 +154,44 @@ public class ConversationHistoryCompactor {
         if (userIndices.size() <= effectiveRetainRounds) {
             log.info("compactIfNeeded skip: only {} user turns, < retain {}",
                     userIndices.size(), effectiveRetainRounds);
-            return false;
+            return CompactionOutcome.none();
         }
 
         int splitIdx = userIndices.get(userIndices.size() - effectiveRetainRounds);
-        if (splitIdx <= systemEnd) return false;
+        if (splitIdx <= systemEnd) return CompactionOutcome.none();
 
         List<LlmClient.Message> oldMsgs = new ArrayList<>(history.subList(systemEnd, splitIdx));
-        if (oldMsgs.isEmpty()) return false;
+        if (oldMsgs.isEmpty()) return CompactionOutcome.none();
 
         String summary;
         try {
             summary = summarize(oldMsgs);
         } catch (IOException e) {
             log.warn("conversation summary LLM call failed; skip compaction", e);
-            return false;
+            return CompactionOutcome.none();
         }
         if (summary == null || summary.isBlank()) {
             log.warn("conversation summary returned empty; skip compaction");
-            return false;
+            return CompactionOutcome.none();
         }
 
-        List<LlmClient.Message> rebuilt = rebuildWithSummary(
-                history,
-                splitIdx,
-                "[已压缩的历史对话摘要]\n" + summary.trim());
+        String summaryMessage = SUMMARY_PREFIX + summary.trim();
+        List<LlmClient.Message> rebuilt = rebuildWithSummary(history, splitIdx, summaryMessage);
 
         int afterTokens = TokenBudget.estimateMessagesTokens(rebuilt);
         if (afterTokens >= currentTokens) {
             log.warn("conversation summary did not reduce token usage: {} -> {}; skip compaction",
                     currentTokens, afterTokens);
-            return false;
+            return CompactionOutcome.none();
         }
+        int retainedMessages = history.size() - splitIdx;
         history.clear();
         history.addAll(rebuilt);
         log.info(String.format(Locale.ROOT,
                 "compacted conversationHistory: tokens %d -> %d, messages %d -> %d, summary chars %d",
                 currentTokens, afterTokens, userIndices.size() + systemEnd /* 估值 */, rebuilt.size(),
                 summary.length()));
-        return true;
+        return new CompactionOutcome(true, summaryMessage, retainedMessages);
     }
 
     /**
@@ -334,7 +349,7 @@ public class ConversationHistoryCompactor {
             rebuilt.add(history.get(i));
         }
         rebuilt.add(LlmClient.Message.user(summaryMessage));
-        rebuilt.add(LlmClient.Message.assistant("好的，我已了解之前的上下文，请继续。"));
+        rebuilt.add(LlmClient.Message.assistant(SUMMARY_ACK));
         rebuilt.addAll(history.subList(splitIdx, history.size()));
         return rebuilt;
     }
