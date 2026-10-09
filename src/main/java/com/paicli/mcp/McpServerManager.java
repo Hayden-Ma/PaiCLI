@@ -10,6 +10,7 @@ import com.paicli.mcp.resources.McpResourceContent;
 import com.paicli.mcp.resources.McpResourceDescriptor;
 import com.paicli.mcp.resources.McpResourceTool;
 import com.paicli.policy.AuditLog;
+import com.paicli.mcp.transport.McpPidFile;
 import com.paicli.mcp.transport.McpTransport;
 import com.paicli.util.AnsiStyle;
 import com.paicli.util.TerminalTable;
@@ -31,19 +32,40 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class McpServerManager implements AutoCloseable {
     private static final Duration STARTUP_PROGRESS_INTERVAL = Duration.ofSeconds(5);
+    static final int MAX_AUTO_RESTARTS = 3;
+    /** 上次启动后稳定运行超过这么久再退出，按一次新的意外处理，重启计数从头算 */
+    private static final Duration STABLE_UPTIME = Duration.ofSeconds(60);
+    private static final int PING_FAILURES_BEFORE_RESTART = 2;
+    private static final long DEFAULT_PING_INTERVAL_SECONDS = 30;
 
     private final ToolRegistry toolRegistry;
     private final Path projectDir;
     private final McpConfigLoader configLoader;
     private final McpTrustStore trustStore;
+    private final McpPidFile pidFile;
+    private final ScheduledExecutorService supervisor = Executors.newScheduledThreadPool(2, r -> {
+        Thread t = new Thread(r, "paicli-mcp-supervisor");
+        t.setDaemon(true);
+        return t;
+    });
+    // 后台发生的崩溃 / 自动重启，等下一次显示输入框前再打印，避免打断正在输入的那一行
+    private final Queue<String> notices = new ConcurrentLinkedQueue<>();
+    private volatile Duration restartBaseDelay = Duration.ofSeconds(1);
+    private volatile Duration pingTimeout = Duration.ofSeconds(10);
+    private boolean orphansCleaned;
+    private boolean heartbeatStarted;
     private final Map<String, McpServer> servers = new ConcurrentHashMap<>();
     private final McpResourceCache resourceCache = new McpResourceCache();
 
@@ -57,10 +79,16 @@ public class McpServerManager implements AutoCloseable {
 
     public McpServerManager(ToolRegistry toolRegistry, Path projectDir, McpConfigLoader configLoader,
                             McpTrustStore trustStore) {
+        this(toolRegistry, projectDir, configLoader, trustStore, McpPidFile.defaultFile());
+    }
+
+    public McpServerManager(ToolRegistry toolRegistry, Path projectDir, McpConfigLoader configLoader,
+                            McpTrustStore trustStore, McpPidFile pidFile) {
         this.toolRegistry = toolRegistry;
         this.projectDir = projectDir.toAbsolutePath().normalize();
         this.configLoader = configLoader;
         this.trustStore = trustStore;
+        this.pidFile = pidFile;
     }
 
     public void loadConfiguredServers() throws IOException {
@@ -87,6 +115,8 @@ public class McpServerManager implements AutoCloseable {
      * by a slow stdio/http server.
      */
     public void startAll(PrintStream progressOut, Duration maxWait) {
+        cleanupOrphansOnce();
+        startHeartbeatOnce();
         List<McpServer> targets = servers.values().stream()
                 .filter(server -> !server.config().isDisabled())
                 .toList();
@@ -190,6 +220,7 @@ public class McpServerManager implements AutoCloseable {
         if (server == null) {
             return "未找到 MCP server: " + name;
         }
+        server.cancelAutoRestart();
         unregisterTools(server);
         server.close();
         server.config().setDisabled(false);
@@ -220,6 +251,7 @@ public class McpServerManager implements AutoCloseable {
         if (server == null) {
             return "未找到 MCP server: " + name;
         }
+        server.cancelAutoRestart();
         unregisterTools(server);
         server.close();
         server.config().setDisabled(true);
@@ -233,6 +265,7 @@ public class McpServerManager implements AutoCloseable {
         if (server == null) {
             return "未找到 MCP server: " + name;
         }
+        server.cancelAutoRestart();
         server.config().setDisabled(false);
         start(server);
         if (server.status() == McpServerStatus.UNTRUSTED) {
@@ -266,6 +299,7 @@ public class McpServerManager implements AutoCloseable {
         } catch (IOException e) {
             return "❌ 保存确认记录失败: " + e.getMessage();
         }
+        server.cancelAutoRestart();
         start(server);
         String prefix = "🔓 已确认项目级 MCP server: " + name + "（配置改动后需要重新确认）\n";
         if (server.status() == McpServerStatus.READY) {
@@ -538,6 +572,8 @@ public class McpServerManager implements AutoCloseable {
             server.tools(tools);
             server.markStarted();
             server.status(McpServerStatus.READY);
+            // 放在 READY 之后注册：启动过程中进程退出由 initialize 失败处理，不触发自动重启
+            client.onUnexpectedClose(reason -> onServerDied(server, client, reason));
         } catch (Exception e) {
             server.close();
             server.errorMessage(e.getMessage());
@@ -587,6 +623,7 @@ public class McpServerManager implements AutoCloseable {
             }
         });
         client.onNotification(router);
+        server.notificationRouter(router);
     }
 
     private List<McpResourceDescriptor> refreshResources(McpServer server) throws IOException {
@@ -615,7 +652,145 @@ public class McpServerManager implements AutoCloseable {
         if (config.isHttp()) {
             return new StreamableHttpTransport(config.getUrl(), config.getHeaders());
         }
-        return new StdioTransport(config.getCommand(), config.getArgs(), config.getEnv(), projectDir);
+        return new StdioTransport(config.getCommand(), config.getArgs(), config.getEnv(), projectDir, pidFile);
+    }
+
+    /**
+     * 进程意外退出或判定卡死：移除工具、结束进程树，然后按 1s、2s、4s 退避自动重启；
+     * 连续 3 次没救回来就停下，提示用户手动 /mcp restart。
+     */
+    private synchronized void onServerDied(McpServer server, McpClient client, String reason) {
+        if (server.client() != client) {
+            return; // 已经被主动关闭或换成新进程，旧进程的退出不用管
+        }
+        boolean wasStable = server.uptime().compareTo(STABLE_UPTIME) >= 0;
+        unregisterTools(server);
+        server.close();
+        server.status(McpServerStatus.ERROR);
+        server.errorMessage(reason);
+        notices.add("⚠️ MCP server " + server.name() + " 断开：" + reason);
+        scheduleRestartOrGiveUp(server, reason, wasStable);
+    }
+
+    private void scheduleRestartOrGiveUp(McpServer server, String reason, boolean resetStreak) {
+        int attempt = server.nextCrashAttempt(resetStreak);
+        if (attempt > MAX_AUTO_RESTARTS) {
+            server.errorMessage(reason + "；自动重启 " + MAX_AUTO_RESTARTS + " 次都没成功，已停止");
+            notices.add("❌ MCP server " + server.name() + " 自动重启 " + MAX_AUTO_RESTARTS
+                    + " 次都没成功，已停止。查看日志：/mcp logs " + server.name()
+                    + "，手动重启：/mcp restart " + server.name());
+            return;
+        }
+        long delayMillis = restartBaseDelay.toMillis() << (attempt - 1);
+        server.errorMessage(reason + "；" + formatMillis(delayMillis) + "后第 " + attempt + " 次自动重启");
+        try {
+            server.pendingRestart(supervisor.schedule(() -> autoRestart(server),
+                    delayMillis, TimeUnit.MILLISECONDS));
+        } catch (RejectedExecutionException ignored) {
+            // PaiCLI 正在退出
+        }
+    }
+
+    private synchronized void autoRestart(McpServer server) {
+        server.pendingRestart(null);
+        if (server.status() != McpServerStatus.ERROR || server.config().isDisabled()) {
+            return; // 等待期间用户已经手动处理过
+        }
+        start(server);
+        if (server.status() == McpServerStatus.READY) {
+            notices.add("✅ MCP server " + server.name() + " 已自动重启");
+        } else if (server.status() == McpServerStatus.ERROR) {
+            scheduleRestartOrGiveUp(server, server.errorMessage(), false);
+        }
+    }
+
+    /**
+     * 定期 ping stdio server，进程还在但不读不写（卡死）时也能发现。server 正在处理请求时跳过，
+     * 单线程 server 忙着跑一个长工具调用时回不了 ping，不能因此被误杀；那次调用有自己的超时。
+     */
+    void pingAll() {
+        for (McpServer server : servers.values()) {
+            McpClient client = server.client();
+            if (server.status() != McpServerStatus.READY || client == null
+                    || !"stdio".equals(client.transportName()) || client.hasPendingRequests()) {
+                continue;
+            }
+            try {
+                client.ping(pingTimeout.toMillis());
+                server.resetPingFailures();
+            } catch (IOException e) {
+                if (server.recordPingFailure() >= PING_FAILURES_BEFORE_RESTART) {
+                    onServerDied(server, client, "连续 " + PING_FAILURES_BEFORE_RESTART + " 次 ping 没有回应，判定卡死");
+                }
+            }
+        }
+    }
+
+    private synchronized void startHeartbeatOnce() {
+        if (heartbeatStarted) {
+            return;
+        }
+        heartbeatStarted = true;
+        long interval = pingIntervalSeconds();
+        if (interval <= 0) {
+            return;
+        }
+        supervisor.scheduleWithFixedDelay(() -> {
+            try {
+                pingAll();
+            } catch (RuntimeException e) {
+                // 心跳失败不能让定时任务停掉
+            }
+        }, interval, interval, TimeUnit.SECONDS);
+    }
+
+    static long pingIntervalSeconds() {
+        String configured = System.getProperty("paicli.mcp.ping.interval.seconds");
+        if (configured == null || configured.isBlank()) {
+            configured = System.getenv("PAICLI_MCP_PING_INTERVAL_SECONDS");
+        }
+        if (configured == null || configured.isBlank()) {
+            return DEFAULT_PING_INTERVAL_SECONDS;
+        }
+        try {
+            return Long.parseLong(configured.trim());
+        } catch (NumberFormatException e) {
+            return DEFAULT_PING_INTERVAL_SECONDS;
+        }
+    }
+
+    /** 上次 PaiCLI 被 kill -9 时留下的 MCP 子进程，启动时清理一次。 */
+    private synchronized void cleanupOrphansOnce() {
+        if (orphansCleaned || pidFile == null) {
+            return;
+        }
+        orphansCleaned = true;
+        int cleaned = pidFile.cleanupOrphans();
+        if (cleaned > 0) {
+            notices.add("🧹 已结束 " + cleaned + " 个上次 PaiCLI 异常退出时遗留的 MCP 子进程");
+        }
+    }
+
+    /** 取出后台积累的提示，由 CLI 在显示下一个输入框前打印。 */
+    public List<String> drainNotices() {
+        List<String> drained = new ArrayList<>();
+        String notice;
+        while ((notice = notices.poll()) != null) {
+            drained.add(notice);
+        }
+        return drained;
+    }
+
+    void restartBaseDelay(Duration delay) {
+        this.restartBaseDelay = delay;
+    }
+
+    void pingTimeout(Duration timeout) {
+        this.pingTimeout = timeout;
+    }
+
+    private static String formatMillis(long millis) {
+        return millis % 1000 == 0 ? (millis / 1000) + " 秒" : millis + " 毫秒";
     }
 
     private void validateNoDuplicateTools(String serverName, List<McpToolDescriptor> tools) {
@@ -677,7 +852,9 @@ public class McpServerManager implements AutoCloseable {
 
     @Override
     public void close() {
+        supervisor.shutdownNow();
         for (McpServer server : servers.values()) {
+            server.cancelAutoRestart();
             unregisterTools(server);
             server.close();
         }

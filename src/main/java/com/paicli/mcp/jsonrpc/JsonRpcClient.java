@@ -31,10 +31,28 @@ public class JsonRpcClient implements AutoCloseable {
         return thread;
     });
     private final List<Consumer<JsonNode>> notificationListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private volatile String disconnectReason;
 
     public JsonRpcClient(McpTransport transport) {
         this.transport = transport;
         this.transport.onReceive(this::handleMessage);
+        this.transport.onUnexpectedClose(this::failPending);
+    }
+
+    /** server 进程退出后，正在等回复的请求立即失败，不再干等超时。 */
+    private void failPending(String reason) {
+        disconnectReason = reason;
+        IOException error = new IOException(reason);
+        pending.keySet().forEach(id -> {
+            CompletableFuture<JsonNode> future = pending.remove(id);
+            if (future != null) {
+                future.completeExceptionally(error);
+            }
+        });
+    }
+
+    public boolean hasPendingRequests() {
+        return !pending.isEmpty();
     }
 
     public JsonNode request(String method, JsonNode params) throws IOException {
@@ -42,6 +60,14 @@ public class JsonRpcClient implements AutoCloseable {
     }
 
     public JsonNode request(String method, JsonNode params, long timeoutSeconds) throws IOException {
+        return request(method, params, TimeUnit.SECONDS.toMillis(timeoutSeconds), TimeUnit.MILLISECONDS);
+    }
+
+    public JsonNode request(String method, JsonNode params, long timeout, TimeUnit unit) throws IOException {
+        if (disconnectReason != null) {
+            throw new IOException(disconnectReason);
+        }
+        long timeoutMillis = unit.toMillis(timeout);
         long id = ids.getAndIncrement();
         ObjectNode request = MAPPER.createObjectNode();
         request.put("jsonrpc", "2.0");
@@ -58,17 +84,25 @@ public class JsonRpcClient implements AutoCloseable {
             if (removed != null) {
                 removed.completeExceptionally(new TimeoutException("JSON-RPC request timed out: " + method));
             }
-        }, timeoutSeconds, TimeUnit.SECONDS);
+        }, timeoutMillis, TimeUnit.MILLISECONDS);
+        // 注册 pending 和进程退出之间有竞争窗口，放进去之后再检查一次
+        if (disconnectReason != null) {
+            pending.remove(id);
+            throw new IOException(disconnectReason);
+        }
 
         try {
             transport.send(request);
-            return future.get(timeoutSeconds + 1, TimeUnit.SECONDS);
+            return future.get(timeoutMillis + 1000, TimeUnit.MILLISECONDS);
         } catch (JsonRpcException e) {
             throw e;
         } catch (Exception e) {
             pending.remove(id);
             if (e.getCause() instanceof JsonRpcException jsonRpcException) {
                 throw jsonRpcException;
+            }
+            if (e.getCause() instanceof IOException ioException) {
+                throw ioException;
             }
             throw new IOException(e.getMessage(), e);
         }

@@ -30,14 +30,15 @@
   - 现状：`mcp/jsonrpc/JsonRpcClient.java:99-103` 把同时带 id 和 method 的消息当成响应处理，`pending` 里找不到就丢弃，不回复
   - 目标：识别 server 发来的请求，`ping` 回空结果，不支持的方法回 `-32601`
   - 注意：问题比“丢弃不回复”更严重。`handleMessage` 先按 id 去 `pending` 里找，不看 `method`；server 的请求 id 也从 1 开始，会和我们自己的请求撞号，把 server 的 ping 当成我们某个请求的回复（结果为空）。`asLong()` 还会把字符串 id 变成 0。要先看有没有 `method`，有就按请求处理，没有才去 `pending` 匹配
-- [ ] **进程退出检测与退避重启**（文章 03 题）
+- [x] **进程退出检测与退避重启**（文章 03 题）
   - 现状：没有检测子进程退出，也没有健康检查，只能 `/mcp restart` 手动重启（`mcp/McpServerManager.java:180-192`）；`docs/phase-11-mcp-advanced.md:29,32` 把 crash 自动重启和 heartbeat 列为不做，`:146` 把指数退避重启列为后续项
   - 目标：用 `Process.onExit()` 注册回调，子进程退出后标记 ERROR、移除工具、让 pending 请求立即失败；按 1s、2s、4s 指数退避自动重启，连续失败 3 次停止并提示用户；定期发 ping 检测卡死。同步更新 phase-11 文档
-- [ ] **结束整棵进程树、清理孤儿进程**（文章 03 题）
+  - 做法：ping 每 30 秒一次、只发给本地 stdio server，server 有请求在处理时跳过，连续 2 次不回才判定卡死；稳定运行 60 秒以上再崩溃，重启计数从头算；后台提示等下一个输入框前打印
+- [x] **结束整棵进程树、清理孤儿进程**（文章 03 题）
   - 现状：`StdioTransport.close()`（`:85-113`）只对直接子进程 destroy/destroyForcibly，npx 拉起的 node 进程会残留；JVM 被 kill -9 时 shutdown hook（`cli/Main.java:315`）不执行，没有其他清理手段。`eval/benchmark/BenchmarkSubprocess.java:54-156` 已有 `ProcessHandle.descendants()` 的写法可以复用
   - 目标：关闭时先取 `descendants()`，从叶子进程开始依次结束；启动时把子进程 PID 写入 `~/.paicli/mcp-pids`，下次启动先清理仍存活的旧进程
   - 注意：PID 会被复用，记录时一起存启动时间（`ProcessHandle.info().startInstant()`）和命令，清理前核对，对不上不杀；可能同时开着多个 PaiCLI，要记下所属 PaiCLI 的 PID，只在它已退出时清理；`BenchmarkSubprocess` 按 PID 倒序结束并不是真正的“从叶子开始”（PID 会回绕），能复用的是“先记下整棵进程树、再结束根进程”
-- 顺带：`McpServerManager.java:459` 创建的 `NotificationRouter` 没有保存引用，`close()` 从未被调用；`docs/phase-10-mcp-core.md:154` 写 initialize 超时 30 秒（代码是 60 秒），`:89` 写关闭前先发 shutdown 通知（代码已去掉），文档需要同步
+- [x] 顺带：`McpServerManager.java:459` 创建的 `NotificationRouter` 没有保存引用，`close()` 从未被调用；`docs/phase-10-mcp-core.md:154` 写 initialize 超时 30 秒（代码是 60 秒），`:89` 写关闭前先发 shutdown 通知（代码已去掉），文档需要同步
 
 ## P2：代码索引性能
 
@@ -60,7 +61,7 @@
 
 ## 同步修改
 
-- 进程生命周期做完后更新 `AGENTS.md` 的“下一步”和“还没做到的”（都写着 server 断线恢复 / 自动重启没做）
+- [x] 进程生命周期做完后更新 `AGENTS.md` 的“下一步”和“还没做到的”（都写着 server 断线恢复 / 自动重启没做）
 - MCP 改动按 `AGENTS.md` 的同步表一起改 HITL、AuditLog、提示词、文档、测试，以及 `docs/articles/paicli-interview-mcp.md`
 
 ## 执行顺序

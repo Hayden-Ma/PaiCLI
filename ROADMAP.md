@@ -268,6 +268,8 @@
 - resources 自动注入 system prompt（第 12 期长上下文模式已接入 URI / 描述索引）
 - server health ping / heartbeat
 - progress / logging notification 的 UI 展示
+
+（后续已补：stdio server 的崩溃自动重启、本地 ping 探活、进程树清理，HTTP server 仍不 ping）
 - OAuth Device Flow / Client Credentials
 
 **核心知识点**：

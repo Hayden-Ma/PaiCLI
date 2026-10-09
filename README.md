@@ -140,6 +140,8 @@ DeepSeek 的当前内置列表按[官方文档](https://api-docs.deepseek.com/zh
 - 新增 `com.paicli.mcp` 模块，支持 stdio 子进程 server 与 Streamable HTTP 远程 server
 - 启动时读取 `~/.paicli/mcp.json` 与 `.paicli/mcp.json`，项目级配置按 server 名覆盖用户级配置；项目级 server 要先 `/mcp trust <name>` 确认才会启动，配置内容变了要重新确认
 - stdio server 子进程只继承运行必需的环境变量（PATH、HOME、代理、证书等），API Key 需要在配置的 `env` 里显式写
+- stdio server 进程自己退出，或者连续两次 ping 都不回（卡死）时，PaiCLI 会移除它的工具，按 1 秒、2 秒、4 秒的间隔自动重启，连续 3 次失败就停下并提示用 `/mcp restart` 手动处理；正在等它回复的请求立即失败，不用干等 60 秒超时
+- 关闭 server 时会连同 npx / uvx 拉起的子进程一起结束；PaiCLI 被强制杀掉（kill -9）后，下次启动会清理上次遗留的 MCP 子进程
 - MCP `${VAR}` 支持系统环境变量、系统属性、项目 `.env`、用户 `~/.env`；检测到 `STEP_API_KEY` 时自动内置 `step_search` 远程 MCP，显式同名配置优先
 - MCP 工具自动注册为 `mcp__{server}__{tool}`，参数 schema 会清洗 `$ref` / `anyOf` / 超长 description，降低模型调用失败率
 - 所有 MCP 工具默认走 HITL 审批和审计，审计参数会脱敏 token / key / password / Authorization / Bearer 凭证

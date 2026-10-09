@@ -19,6 +19,7 @@ import com.paicli.tool.ToolOutput;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 public class McpClient implements AutoCloseable {
@@ -246,6 +247,23 @@ public class McpClient implements AutoCloseable {
                 .replace("\"", "&quot;")
                 .replace("<", "&lt;")
                 .replace(">", "&gt;");
+    }
+
+    /** 探活：server 回了结果或回了“不支持 ping”的错误都算活着，超时或断开才抛 IOException。 */
+    public void ping(long timeoutMillis) throws IOException {
+        try {
+            rpc.request("ping", JsonNodeFactory.instance.objectNode(), timeoutMillis, TimeUnit.MILLISECONDS);
+        } catch (JsonRpcException ignored) {
+            // 回了 JSON-RPC 错误说明进程还在正常读写
+        }
+    }
+
+    public boolean hasPendingRequests() {
+        return rpc.hasPendingRequests();
+    }
+
+    public void onUnexpectedClose(Consumer<String> listener) {
+        transport.onUnexpectedClose(listener);
     }
 
     public List<String> stderrLines() {

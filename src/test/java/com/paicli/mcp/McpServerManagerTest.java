@@ -3,6 +3,7 @@ package com.paicli.mcp;
 import com.paicli.mcp.config.McpConfigLoader;
 import com.paicli.mcp.config.McpServerConfig;
 import com.paicli.mcp.config.McpTrustStore;
+import com.paicli.mcp.transport.McpPidFile;
 import com.paicli.tool.ToolRegistry;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -43,7 +44,9 @@ class McpServerManagerTest {
         registry = new ToolRegistry();
         // 用空 config loader 占位，单独把 server 直接放进 manager（避开真实文件读取）
         manager = new McpServerManager(registry, tempDir,
-                new McpConfigLoader(tempDir.resolve("user.json"), tempDir.resolve("project.json"), tempDir));
+                new McpConfigLoader(tempDir.resolve("user.json"), tempDir.resolve("project.json"), tempDir),
+                new McpTrustStore(tempDir.resolve("mcp-trust.json")),
+                new McpPidFile(tempDir.resolve("mcp-pids.json")));
     }
 
     @AfterEach
@@ -90,7 +93,7 @@ class McpServerManagerTest {
         McpTrustStore trustStore = new McpTrustStore(trustDir.resolve("mcp-trust.json"));
         manager = new McpServerManager(registry, trustDir,
                 new McpConfigLoader(trustDir.resolve("user.json"), trustDir.resolve("project.json"), trustDir),
-                trustStore);
+                trustStore, new McpPidFile(trustDir.resolve("mcp-pids.json")));
         Path projectConfig = trustDir.resolve("project.json");
         McpServerConfig config = httpConfig(webServer);
         config.markProjectScoped(projectConfig, McpConfigLoader.fingerprint(config));
@@ -124,7 +127,7 @@ class McpServerManagerTest {
         McpTrustStore trustStore = new McpTrustStore(trustDir.resolve("mcp-trust.json"));
         manager = new McpServerManager(registry, trustDir,
                 new McpConfigLoader(trustDir.resolve("user.json"), trustDir.resolve("project.json"), trustDir),
-                trustStore);
+                trustStore, new McpPidFile(trustDir.resolve("mcp-pids.json")));
         Path projectConfig = trustDir.resolve("project.json");
         trustStore.trust(projectConfig, "repo", "old-fingerprint");
         McpServerConfig config = httpConfig(webServer);

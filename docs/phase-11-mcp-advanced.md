@@ -32,6 +32,8 @@
 - health ping / heartbeat
 - progress notification UI 展示
 
+> 后续补充：stdio server 的崩溃自动重启（1s/2s/4s 退避，连续 3 次失败停止）和本地 ping 探活已经实现，见 `docs/agents-reference.md` 的“MCP 配置”一节；HTTP server 仍然不 ping、不自动重连。
+
 ## 3. 模块拆分
 
 ```text

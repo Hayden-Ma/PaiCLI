@@ -92,6 +92,14 @@ DeepSeek Flash / V4 Pro、GLM-5.3 和混元 Hy4 preview 在思考模式下调用
 
 stdio server 的子进程不继承 PaiCLI 的全部环境变量，只带过去运行必需的变量（`PATH`、`HOME`、`LANG`、`LC_*`、`TMPDIR`、代理 `HTTP(S)_PROXY`/`NO_PROXY`（大小写都认）、证书 `NODE_EXTRA_CA_CERTS`、`npm_config_registry`、Windows 的 `SystemRoot`/`APPDATA`/`USERPROFILE` 等，完整名单见 `McpChildEnvironment`），再加上配置里 `env` 写的变量。server 需要 API Key 时要在配置里显式写，例如 `"env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}"}`。
 
+stdio server 的进程管理：
+
+- 子进程意外退出时（`Process.onExit()`），正在等回复的请求立即失败，之后的新请求也直接失败；server 标成 ERROR、工具移除，然后按 1s、2s、4s 退避自动重启。重启后稳定运行超过 60 秒再出问题，计数从头算；连续 3 次没救回来就停下，提示用户 `/mcp logs` 和 `/mcp restart`。用户手动 restart / enable / disable / trust 会取消排期中的自动重启
+- 每 30 秒 ping 一次本地 stdio server（`PAICLI_MCP_PING_INTERVAL_SECONDS`，设成 0 关闭），超时 10 秒；连续 2 次不回判定卡死，按上面的流程结束并重启。server 正在处理请求时跳过这一轮，免得把忙着跑长工具调用的单线程 server 误杀；回 `-32601` 也算活着。HTTP server 不 ping，避免给远程服务增加负担
+- 崩溃、重启、放弃的提示放进队列，主循环在显示下一个输入框前打印，不从后台线程直接写终端
+- 关闭时先记下整棵进程树再关 stdin，等 1 秒后从深到浅给还活着的进程发 SIGTERM，2 秒后还在的强制结束。不能只结束根进程：npx 拉起的 node 进程会被留下
+- 拉起的进程（包括后来发现的子进程）记在 `~/.paicli/mcp-pids.json`，带所属 PaiCLI 的 PID 和启动时间、进程自己的启动时间和命令；正常关闭时删掉。下次启动时只清理“所属 PaiCLI 已经退出”且启动时间、命令都对得上的进程（PID 会被复用），读写这个文件要先拿 `.lock` 文件锁
+
 stdio 的 stdout 按行处理：不是 JSON 的行（server 往 stdout 打的日志）记进 `/mcp logs` 并跳过，读线程继续。server 主动发来的请求（带 `id` 和 `method`）和我们请求的回复分开处理：`ping` 回空结果，其他方法回 `-32601`（Method not found），回复原样带回 server 的 id。
 
 检测到 `STEP_API_KEY` 时，会自动内置一个 `step_search` 远程 MCP（如果显式配置了同名 server，以显式配置为准），Step 3.7 Flash 的 `web_search` / `web_fetch` 会优先转给它处理。

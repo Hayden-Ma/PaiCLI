@@ -415,6 +415,12 @@ public class Main {
 
             while (true) {
                 refreshTerminalColumns(terminal);
+                List<String> mcpNotices = mcpServerManager.drainNotices();
+                if (!mcpNotices.isEmpty()) {
+                    mcpNotices.forEach(ui::println);
+                    ui.println();
+                    renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistryRef.get(), "idle"));
+                }
                 PromptInput promptInput;
                 try {
                     promptInput = readPromptInput(terminal, lineReader, renderer,

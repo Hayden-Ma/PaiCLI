@@ -86,7 +86,7 @@ src/main/java/com/paicli/mcp/
   - **stderr**：必须单独 drain！不 drain 会让子进程 OS 缓冲填满后**阻塞死锁**
 - 协议格式：每行一条 JSON-RPC 消息，UTF-8
 - stderr 输出存环形 buffer（最近 200 行），`/mcp logs` 命令查看
-- 关闭顺序：发 `shutdown` 通知 → 等 1s → `destroy()` → 等 2s → `destroyForcibly()`
+- 关闭顺序：先记下整棵进程树 → 关 stdin → 等 1s → 从深到浅 `destroy()` 还活着的进程 → 等 2s → `destroyForcibly()`（早期版本会先发 `shutdown` 通知，server 卡住时会让关闭阻塞，已去掉）
 - 再用 `Runtime.addShutdownHook` 做最后一道保护，避免僵尸进程
 
 ### 3.4 Streamable HTTP transport（2025 年 3 月新规范）
@@ -151,9 +151,9 @@ MCP server 返回的 `inputSchema` 是 JSON Schema draft-07 子集，但 GLM-5.1
 
 - 启动：`McpConfigLoader.load()` → `McpServerManager.startAll()` 用 `CompletableFuture.allOf` 并行 start
 - 单 server 启动失败不阻塞其他 server，只标 `status: ERROR`
-- initialize 握手超时 30s
+- initialize 握手超时 60s（`PAICLI_MCP_INITIALIZE_TIMEOUT_SECONDS` 可调）
 - 工具注册：每个 server initialize OK → 调 `tools/list` → 转 `LlmClient.Tool` → 注入 `ToolRegistry`
-- server 崩溃（stdout 流断开）：第一版**不自动重启**，标 `status: ERROR`，工具从 ToolRegistry 移除；用户 `/mcp restart <name>` 手动恢复
+- server 崩溃：第一版不自动重启。现在 stdio server 退出后会标 ERROR、移除工具，并按 1s/2s/4s 自动重启，连续 3 次失败才停下等用户 `/mcp restart <name>`
 - HTTP server 连续 3 次请求失败：标 ERROR
 
 ### 3.9 HITL 默认审批

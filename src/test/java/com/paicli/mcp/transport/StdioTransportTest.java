@@ -9,6 +9,7 @@ import org.junit.jupiter.api.condition.OS;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -185,5 +186,75 @@ class StdioTransportTest {
         } finally {
             transport.close();
         }
+    }
+
+    @Test
+    void closeAlsoKillsChildThatOutlivesTheRootProcess() throws Exception {
+        // 模拟 npx：根进程拉起一个子进程，自己在 stdin EOF 后退出，子进程不管 EOF 继续跑
+        String script = "read x; sleep 60 & echo \"{\\\"pid\\\":$!}\"; cat";
+        StdioTransport transport = new StdioTransport("sh", List.of("-c", script), Map.of(), null);
+        CountDownLatch received = new CountDownLatch(1);
+        AtomicReference<Long> childPid = new AtomicReference<>();
+        transport.onReceive(node -> {
+            childPid.set(node.path("pid").asLong());
+            received.countDown();
+        });
+        transport.send(MAPPER.readTree("{}"));
+        assertTrue(received.await(3, TimeUnit.SECONDS));
+        ProcessHandle child = ProcessHandle.of(childPid.get()).orElseThrow();
+        assertTrue(child.isAlive());
+
+        transport.close();
+
+        child.onExit().get(3, TimeUnit.SECONDS);
+        assertFalse(child.isAlive(), "根进程退出后，它拉起的子进程也要被结束");
+    }
+
+    @Test
+    void unexpectedExitNotifiesListenersButCloseDoesNot() throws Exception {
+        StdioTransport crashing = new StdioTransport("sh", List.of("-c", "read x; exit 3"), Map.of(), null);
+        CompletableFuture<String> reason = new CompletableFuture<>();
+        crashing.onUnexpectedClose(reason::complete);
+        crashing.send(MAPPER.readTree("{}"));
+        assertTrue(reason.get(3, TimeUnit.SECONDS).contains("exit code 3"));
+        // 已经退出后再注册，立即回调
+        CompletableFuture<String> late = new CompletableFuture<>();
+        crashing.onUnexpectedClose(late::complete);
+        assertTrue(late.isDone());
+        crashing.close();
+
+        StdioTransport normal = new StdioTransport("sh", List.of("-c", "cat"), Map.of(), null);
+        CompletableFuture<String> closed = new CompletableFuture<>();
+        normal.onUnexpectedClose(closed::complete);
+        normal.close();
+        Thread.sleep(200);
+        assertFalse(closed.isDone(), "主动关闭不算意外断开");
+    }
+
+    @Test
+    void pendingRequestFailsAsSoonAsProcessExits() throws Exception {
+        StdioTransport transport = new StdioTransport("sh", List.of("-c", "read x; exit 3"), Map.of(), null);
+        com.paicli.mcp.jsonrpc.JsonRpcClient client = new com.paicli.mcp.jsonrpc.JsonRpcClient(transport);
+        long start = System.currentTimeMillis();
+
+        IOException error = assertThrows(IOException.class,
+                () -> client.request("tools/list", MAPPER.createObjectNode(), 30));
+
+        assertTrue(System.currentTimeMillis() - start < 5000, "不能等到 30 秒超时");
+        assertTrue(error.getMessage().contains("exit code 3"), error.getMessage());
+        assertThrows(IOException.class, () -> client.request("ping", MAPPER.createObjectNode(), 30),
+                "断开后的新请求直接失败");
+        client.close();
+    }
+
+    @Test
+    void processTreeIsRecordedInPidFileAndRemovedOnClose(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
+        java.nio.file.Path file = dir.resolve("mcp-pids.json");
+        StdioTransport transport = new StdioTransport("sh", List.of("-c", "cat"), Map.of(), null, new McpPidFile(file));
+        assertTrue(java.nio.file.Files.readString(file).contains(String.valueOf(transport.processId())));
+
+        transport.close();
+
+        assertFalse(java.nio.file.Files.readString(file).contains(String.valueOf(transport.processId())));
     }
 }
