@@ -2,6 +2,7 @@ package com.paicli.mcp;
 
 import com.paicli.mcp.config.McpConfigLoader;
 import com.paicli.mcp.config.McpServerConfig;
+import com.paicli.mcp.config.McpTrustStore;
 import com.paicli.mcp.notifications.NotificationRouter;
 import com.paicli.mcp.protocol.McpToolDescriptor;
 import com.paicli.mcp.resources.McpResourceCache;
@@ -42,6 +43,7 @@ public class McpServerManager implements AutoCloseable {
     private final ToolRegistry toolRegistry;
     private final Path projectDir;
     private final McpConfigLoader configLoader;
+    private final McpTrustStore trustStore;
     private final Map<String, McpServer> servers = new ConcurrentHashMap<>();
     private final McpResourceCache resourceCache = new McpResourceCache();
 
@@ -50,9 +52,15 @@ public class McpServerManager implements AutoCloseable {
     }
 
     public McpServerManager(ToolRegistry toolRegistry, Path projectDir, McpConfigLoader configLoader) {
+        this(toolRegistry, projectDir, configLoader, McpTrustStore.defaultStore());
+    }
+
+    public McpServerManager(ToolRegistry toolRegistry, Path projectDir, McpConfigLoader configLoader,
+                            McpTrustStore trustStore) {
         this.toolRegistry = toolRegistry;
         this.projectDir = projectDir.toAbsolutePath().normalize();
         this.configLoader = configLoader;
+        this.trustStore = trustStore;
     }
 
     public void loadConfiguredServers() throws IOException {
@@ -186,6 +194,9 @@ public class McpServerManager implements AutoCloseable {
         server.close();
         server.config().setDisabled(false);
         start(server);
+        if (server.status() == McpServerStatus.UNTRUSTED) {
+            return untrustedMessage(server);
+        }
         return server.status() == McpServerStatus.READY
                 ? "✅ MCP server 已重启: " + name
                 : "❌ MCP server 重启失败: " + name + " - " + server.errorMessage();
@@ -224,9 +235,94 @@ public class McpServerManager implements AutoCloseable {
         }
         server.config().setDisabled(false);
         start(server);
+        if (server.status() == McpServerStatus.UNTRUSTED) {
+            return untrustedMessage(server);
+        }
         return server.status() == McpServerStatus.READY
                 ? "▶️ MCP server 已启用: " + name
                 : "❌ MCP server 启用失败: " + name + " - " + server.errorMessage();
+    }
+
+    /**
+     * 确认项目级 server 并启动。确认绑定当前配置内容的指纹，仓库更新改了配置后要重新确认。
+     */
+    public synchronized String trust(String name) {
+        if (name == null || name.isBlank()) {
+            return "❌ 请提供 MCP server 名称，例如 /mcp trust filesystem（用 /mcp 查看待确认的 server）";
+        }
+        McpServer server = servers.get(name);
+        if (server == null) {
+            return "未找到 MCP server: " + name;
+        }
+        McpServerConfig config = server.config();
+        if (!config.projectScoped()) {
+            return "ℹ️ " + name + " 来自你自己的 ~/.paicli/mcp.json，无需确认";
+        }
+        if (isTrusted(server) && server.status() != McpServerStatus.UNTRUSTED) {
+            return "ℹ️ 项目级 MCP server " + name + " 的当前配置已确认";
+        }
+        try {
+            trustStore.trust(config.projectConfigFile(), name, config.projectFingerprint());
+        } catch (IOException e) {
+            return "❌ 保存确认记录失败: " + e.getMessage();
+        }
+        start(server);
+        String prefix = "🔓 已确认项目级 MCP server: " + name + "（配置改动后需要重新确认）\n";
+        if (server.status() == McpServerStatus.READY) {
+            return prefix + "✅ 已启动，" + server.tools().size() + " 个工具";
+        }
+        if (server.status() == McpServerStatus.DISABLED) {
+            return prefix + "⏸️ 配置里是 disabled，未启动";
+        }
+        return prefix + "❌ 启动失败: " + server.errorMessage();
+    }
+
+    /** 启动时提示：项目配置里有哪些 server 因为没确认而没有启动。 */
+    public String untrustedStartupNote() {
+        List<String> names = servers().stream()
+                .filter(server -> server.status() == McpServerStatus.UNTRUSTED)
+                .map(McpServer::name)
+                .toList();
+        if (names.isEmpty()) {
+            return "";
+        }
+        return "项目 .paicli/mcp.json 里有 " + names.size() + " 个 MCP server 还没确认，没有启动："
+                + String.join("、", names) + "。用 /mcp 查看要执行的命令，确认后输入 /mcp trust <name>";
+    }
+
+    private boolean isTrusted(McpServer server) {
+        McpServerConfig config = server.config();
+        if (!config.projectScoped()) {
+            return true;
+        }
+        return trustStore != null
+                && trustStore.isTrusted(config.projectConfigFile(), server.name(), config.projectFingerprint());
+    }
+
+    private static String untrustedMessage(McpServer server) {
+        return "🔒 " + server.name() + " 来自项目 .paicli/mcp.json，还没确认，未启动。\n"
+                + "   要执行的内容：" + describeLaunch(server.config()) + "\n"
+                + "   确认后输入 /mcp trust " + server.name();
+    }
+
+    /** 展示原始配置（未展开 ${VAR}），env / headers 只列名字不列值。 */
+    static String describeLaunch(McpServerConfig config) {
+        StringBuilder sb = new StringBuilder();
+        if (config.isHttp()) {
+            sb.append("连接 ").append(config.getUrl());
+            if (!config.getHeaders().isEmpty()) {
+                sb.append("，headers: ").append(String.join(", ", config.getHeaders().keySet()));
+            }
+        } else {
+            sb.append(config.getCommand());
+            for (String arg : config.getArgs()) {
+                sb.append(' ').append(arg);
+            }
+        }
+        if (!config.getEnv().isEmpty()) {
+            sb.append("，env: ").append(String.join(", ", config.getEnv().keySet()));
+        }
+        return sb.toString();
     }
 
     public String logs(String name) {
@@ -253,6 +349,7 @@ public class McpServerManager implements AutoCloseable {
         }
         List<List<String>> rows = new java.util.ArrayList<>();
         List<String> errors = new java.util.ArrayList<>();
+        List<String> untrusted = new java.util.ArrayList<>();
         long ready = 0;
         for (McpServer server : servers()) {
             String status = switch (server.status()) {
@@ -260,6 +357,7 @@ public class McpServerManager implements AutoCloseable {
                 case STARTING -> "… 启动中";
                 case DISABLED -> AnsiStyle.subtle("○ 停用");
                 case ERROR -> AnsiStyle.error("✗ 失败");
+                case UNTRUSTED -> AnsiStyle.emphasis("🔒 待确认");
             };
             boolean isReady = server.status() == McpServerStatus.READY;
             if (isReady) ready++;
@@ -269,10 +367,16 @@ public class McpServerManager implements AutoCloseable {
                     isReady ? Integer.toString(server.tools().size()) : "—", runtime));
             if (server.status() == McpServerStatus.ERROR && server.errorMessage() != null)
                 errors.add(server.name() + "：" + server.errorMessage());
+            if (server.status() == McpServerStatus.UNTRUSTED)
+                untrusted.add(server.name() + "：" + describeLaunch(server.config()));
         }
         String out = AnsiStyle.emphasis("MCP · " + ready + "/" + servers.size() + " 就绪") + "\n\n"
                 + TerminalTable.render(List.of("服务", "状态", "连接", "工具数", "运行"), rows, TerminalTable.columns());
         if (!errors.isEmpty()) out += "\n\n" + TerminalTable.wrap(String.join("\n", errors), TerminalTable.columns());
+        if (!untrusted.isEmpty()) {
+            out += "\n\n" + TerminalTable.wrap("待确认（来自项目 .paicli/mcp.json，确认前不会执行）：\n"
+                    + String.join("\n", untrusted) + "\n确认后启动：/mcp trust <name>", TerminalTable.columns());
+        }
         return out + "\n\n" + TerminalTable.wrap("日志：/mcp logs <name>", TerminalTable.columns());
     }
 
@@ -289,6 +393,9 @@ public class McpServerManager implements AutoCloseable {
                         server.name(), server.transportName(), server.tools().size()));
             } else if (server.status() == McpServerStatus.DISABLED) {
                 sb.append(String.format("   ○ %-14s %-6s disabled%n", server.name(), server.transportName()));
+            } else if (server.status() == McpServerStatus.UNTRUSTED) {
+                sb.append(String.format("   🔒 %-14s %-6s 待确认（/mcp trust %s）%n",
+                        server.name(), server.transportName(), server.name()));
             } else if (server.status() == McpServerStatus.STARTING) {
                 sb.append(String.format("   … %-14s %-6s starting%n", server.name(), server.transportName()));
             } else {
@@ -407,6 +514,12 @@ public class McpServerManager implements AutoCloseable {
         server.close();
         if (server.config().isDisabled()) {
             server.status(McpServerStatus.DISABLED);
+            return;
+        }
+        // 项目级配置随仓库分发，没确认前不展开 ${VAR}、不起进程、不连 url
+        if (!isTrusted(server)) {
+            server.errorMessage(null);
+            server.status(McpServerStatus.UNTRUSTED);
             return;
         }
         server.status(McpServerStatus.STARTING);

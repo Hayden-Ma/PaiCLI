@@ -138,7 +138,8 @@ DeepSeek 的当前内置列表按[官方文档](https://api-docs.deepseek.com/zh
 ### 第十期：MCP 协议核心
 
 - 新增 `com.paicli.mcp` 模块，支持 stdio 子进程 server 与 Streamable HTTP 远程 server
-- 启动时读取 `~/.paicli/mcp.json` 与 `.paicli/mcp.json`，项目级配置按 server 名覆盖用户级配置
+- 启动时读取 `~/.paicli/mcp.json` 与 `.paicli/mcp.json`，项目级配置按 server 名覆盖用户级配置；项目级 server 要先 `/mcp trust <name>` 确认才会启动，配置内容变了要重新确认
+- stdio server 子进程只继承运行必需的环境变量（PATH、HOME、代理、证书等），API Key 需要在配置的 `env` 里显式写
 - MCP `${VAR}` 支持系统环境变量、系统属性、项目 `.env`、用户 `~/.env`；检测到 `STEP_API_KEY` 时自动内置 `step_search` 远程 MCP，显式同名配置优先
 - MCP 工具自动注册为 `mcp__{server}__{tool}`，参数 schema 会清洗 `$ref` / `anyOf` / 超长 description，降低模型调用失败率
 - 所有 MCP 工具默认走 HITL 审批和审计，审计参数会脱敏 token / key / password / Authorization / Bearer 凭证
@@ -146,7 +147,7 @@ DeepSeek 的当前内置列表按[官方文档](https://api-docs.deepseek.com/zh
 - 普通输入支持 `@server:protocol://path` 显式引用 resource，提交给 Agent 前展开为 `<resource>` 内联块
 - 被动处理 `notifications/tools/list_changed`、`notifications/resources/list_changed`、`notifications/resources/updated`
 - 运行中输入 `/cancel` 并回车可请求取消当前 Agent run
-- CLI 命令：`/mcp`、`/mcp restart <name>`、`/mcp logs <name>`、`/mcp disable <name>`、`/mcp enable <name>`、`/mcp resources <name>`、`/mcp prompts <name>`
+- CLI 命令：`/mcp`、`/mcp restart <name>`、`/mcp logs <name>`、`/mcp disable <name>`、`/mcp enable <name>`、`/mcp trust <name>`、`/mcp resources <name>`、`/mcp prompts <name>`
 - `~/.paicli/mcp.json` 不存在时会自动创建默认 chrome-devtools 配置；项目级 `.paicli/mcp.json` 仍可按 server 名覆盖
 
 ### 第十二期：长上下文工程
@@ -620,6 +621,18 @@ MCP 子系统默认开启。`~/.paicli/mcp.json` 不存在时，PaiCLI 会自动
 
 `command` 表示 stdio server，`url` 表示 Streamable HTTP server。`${PROJECT_DIR}` / `${HOME}` 是内置变量，其他 `${VAR}` 从环境变量读取；缺失会在启动时直接提示。
 
+stdio server 不会继承 PaiCLI 进程里的全部环境变量，只带过去 PATH、HOME、语言、临时目录、代理和证书这类运行必需的变量，免得你机器上的各家 API Key 被交给第三方 MCP 服务。server 需要某个 Key 时，在配置里显式写：
+
+```json
+"github": {
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-github"],
+  "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"}
+}
+```
+
+项目内的 `.paicli/mcp.json` 会跟着仓库走，克隆别人的仓库时里面的命令不该直接执行。所以项目级 server 第一次启动前需要确认：启动时会提示哪些 server 还没确认，`/mcp` 会列出每个 server 要执行的命令（env 和 headers 只列名字），确认后输入 `/mcp trust <name>` 启动。确认记录保存在 `~/.paicli/mcp-trust.json`，仓库更新改了这个 server 的命令、参数、env、url 或 headers，就需要重新确认。
+
 `step_search` 是约定名称：如果项目 `.env`、用户 `~/.env` 或系统环境变量里存在 `STEP_API_KEY`，PaiCLI 会自动内置这个远程 MCP；上面的手写配置只用于覆盖默认地址或自定义鉴权。当前模型为 `step-3.7-flash*` 时，内置 `web_search` / `web_fetch` 会优先代理到该 MCP server。
 
 需要复用当前登录态时，Chrome 144+ 推荐打开 `chrome://inspect/#remote-debugging` 并勾选 `Allow remote debugging for this browser instance`。旧版本或需要显式 CDP 端口时，可以启动带远程调试端口和独立 user-data-dir 的 Chrome，并在这个调试 Chrome 中完成登录：
@@ -819,6 +832,7 @@ I
 - `/mcp logs <name>` - 查看 MCP server 最近 200 行 stderr 日志
 - `/mcp disable <name>` - 运行时禁用 MCP server 并移除其工具
 - `/mcp enable <name>` - 运行时启用 MCP server
+- `/mcp trust <name>` - 确认并启动项目级 `.paicli/mcp.json` 里的 server（配置改动后需要重新确认）
 - `/mcp resources <name>` - 查看 MCP server 暴露的 resources
 - `/mcp prompts <name>` - 查看 MCP server 暴露的 prompts（只查看，不注入对话）
 - `/policy` - 查看安全策略状态（路径围栏 / 命令黑名单 / 资源上限 / 审计目录）

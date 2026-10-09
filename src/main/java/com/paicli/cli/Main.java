@@ -312,6 +312,7 @@ public class Main {
                 }
                 mcpServerManager.loadConfiguredServers();
                 mcpServerManager.startAll(ui, mcpStartupWait());
+                startupNote = appendStartupNote(startupNote, mcpServerManager.untrustedStartupNote());
                 Runtime.getRuntime().addShutdownHook(new Thread(mcpServerManager::close, "paicli-mcp-shutdown"));
             } catch (Exception e) {
                 startupNote = "MCP 初始化失败: " + e.getMessage();
@@ -743,6 +744,11 @@ public class Main {
                     }
                     case MCP_ENABLE -> {
                         printMcpCommandResult(ui, mcpServerManager.enable(command.payload()));
+                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        continue;
+                    }
+                    case MCP_TRUST -> {
+                        printMcpCommandResult(ui, mcpServerManager.trust(command.payload()));
                         renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
@@ -1831,6 +1837,7 @@ public class Main {
                 new SlashCommandHint("/mcp logs ", "/mcp logs <name>", "查看 MCP server 日志"),
                 new SlashCommandHint("/mcp disable ", "/mcp disable <name>", "禁用 MCP server"),
                 new SlashCommandHint("/mcp enable ", "/mcp enable <name>", "启用 MCP server"),
+                new SlashCommandHint("/mcp trust ", "/mcp trust <name>", "确认并启动项目级 MCP server"),
                 new SlashCommandHint("/mcp resources ", "/mcp resources <name>", "查看 MCP resources"),
                 new SlashCommandHint("/mcp prompts ", "/mcp prompts <name>", "查看 MCP prompts"),
                 new SlashCommandHint("/policy", "/policy", "查看安全策略状态"),

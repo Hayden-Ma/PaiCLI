@@ -122,9 +122,10 @@ class StdioTransportTest {
     }
 
     @Test
-    void invalidJsonOnStdoutDoesNotCrashTransport() throws Exception {
-        // 子进程先输出一行非 JSON，再输出一行合法 JSON，验证非法行被 swallow
-        String script = "echo 'not-json'; echo '{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ok\"}'";
+    void nonJsonStdoutLineIsSkippedAndReaderKeepsWorking() throws Exception {
+        // 先等一行 stdin 再输出，保证 listener 已注册；日志行和非对象 JSON 都要跳过，后面的消息照常收到
+        String script = "read x; echo 'Server started on stdio'; echo '42'; "
+                + "echo '{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ok\"}'; sleep 1";
         StdioTransport transport = new StdioTransport(
                 "sh", List.of("-c", script), Map.of(), null);
         try {
@@ -134,11 +135,55 @@ class StdioTransportTest {
                     received.countDown();
                 }
             });
-            // 当前实现：解析失败会让 stdout reader 退出，所以可能拿不到第二条。
-            // 这里只断言 transport 仍可被 close 不抛异常即可，确认坏 JSON 不会让进程级 crash。
-            assertDoesNotThrow(() -> Thread.sleep(300));
+            transport.send(MAPPER.readTree("{}"));
+
+            assertTrue(received.await(3, TimeUnit.SECONDS), "非 JSON 行之后的消息应照常收到");
+            String logs = String.join("\n", transport.stderrLines());
+            assertTrue(logs.contains("Server started on stdio"), logs);
+            assertFalse(logs.contains("stdout reader stopped"), logs);
         } finally {
-            assertDoesNotThrow(transport::close);
+            transport.close();
+        }
+    }
+
+    @Test
+    void listenerExceptionDoesNotStopReader() throws Exception {
+        String script = "read x; echo '{\"id\":1,\"method\":\"boom\"}'; echo '{\"id\":2,\"method\":\"ok\"}'; sleep 1";
+        StdioTransport transport = new StdioTransport(
+                "sh", List.of("-c", script), Map.of(), null);
+        try {
+            CountDownLatch received = new CountDownLatch(1);
+            transport.onReceive(node -> {
+                if ("boom".equals(node.path("method").asText())) {
+                    throw new IllegalStateException("handler failed");
+                }
+                received.countDown();
+            });
+            transport.send(MAPPER.readTree("{}"));
+            assertTrue(received.await(3, TimeUnit.SECONDS));
+        } finally {
+            transport.close();
+        }
+    }
+
+    @Test
+    void childGetsWhitelistedAndConfiguredEnvOnly() throws Exception {
+        String script = "read x; printf '{\"path\":\"%s\",\"token\":\"%s\"}\\n' \"$PATH\" \"$MY_TOKEN\"; sleep 1";
+        StdioTransport transport = new StdioTransport(
+                "sh", List.of("-c", script), Map.of("MY_TOKEN", "abc"), null);
+        try {
+            CountDownLatch received = new CountDownLatch(1);
+            AtomicReference<JsonNode> holder = new AtomicReference<>();
+            transport.onReceive(node -> {
+                holder.set(node);
+                received.countDown();
+            });
+            transport.send(MAPPER.readTree("{}"));
+            assertTrue(received.await(3, TimeUnit.SECONDS));
+            assertFalse(holder.get().path("path").asText().isBlank(), "PATH 应保留");
+            assertEquals("abc", holder.get().path("token").asText(), "配置里的 env 应传给子进程");
+        } finally {
+            transport.close();
         }
     }
 }

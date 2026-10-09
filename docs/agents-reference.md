@@ -88,6 +88,12 @@ DeepSeek Flash / V4 Pro、GLM-5.3 和混元 Hy4 preview 在思考模式下调用
 
 格式和 Claude Code 一致：`command` + `args` 表示 stdio，`url` + `headers` 表示 Streamable HTTP。内置变量有 `${PROJECT_DIR}`、`${HOME}`；其他 `${VAR}` 依次从系统环境变量、系统属性、项目 `.env`、用户 `~/.env` 读取。
 
+项目级 `.paicli/mcp.json` 随仓库分发：里面的 server（包括和用户级同名、把用户级覆盖掉的）第一次启动前要用户执行 `/mcp trust <name>` 确认，确认前不展开 `${VAR}`、不起进程、不连 url。确认记录在 `~/.paicli/mcp-trust.json`，按“项目配置文件路径 + server 名 + 配置内容的 SHA-256 指纹”保存，指纹覆盖 command、args、env、url、headers，改了任何一项都要重新确认。在主目录下启动时，项目配置和用户配置是同一个文件，按用户级处理。
+
+stdio server 的子进程不继承 PaiCLI 的全部环境变量，只带过去运行必需的变量（`PATH`、`HOME`、`LANG`、`LC_*`、`TMPDIR`、代理 `HTTP(S)_PROXY`/`NO_PROXY`（大小写都认）、证书 `NODE_EXTRA_CA_CERTS`、`npm_config_registry`、Windows 的 `SystemRoot`/`APPDATA`/`USERPROFILE` 等，完整名单见 `McpChildEnvironment`），再加上配置里 `env` 写的变量。server 需要 API Key 时要在配置里显式写，例如 `"env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}"}`。
+
+stdio 的 stdout 按行处理：不是 JSON 的行（server 往 stdout 打的日志）记进 `/mcp logs` 并跳过，读线程继续。server 主动发来的请求（带 `id` 和 `method`）和我们请求的回复分开处理：`ping` 回空结果，其他方法回 `-32601`（Method not found），回复原样带回 server 的 id。
+
 检测到 `STEP_API_KEY` 时，会自动内置一个 `step_search` 远程 MCP（如果显式配置了同名 server，以显式配置为准），Step 3.7 Flash 的 `web_search` / `web_fetch` 会优先转给它处理。
 
 ---
@@ -170,7 +176,7 @@ DeepSeek Flash / V4 Pro、GLM-5.3 和混元 Hy4 preview 在思考模式下调用
   - 20 秒超时、异常、无法解析、参数超过 32000 字符（不截断，截断会漏掉危险部分）都判为不放行；只缓存 allow 结论，换了用户请求就清空。
   - 放行时写 `AuditEntry.allowByAutoClassifier`（approver=`auto-classifier`），并由 `HitlHandler.onAutoApproved` 在终端打一行说明；不放行时写 `denyByAutoClassifier`，由 `onAutoDenied` 打一行说明，再把 `[AUTO] 自动审查未放行：…` 作为失败结果交给模型（提示它换只读的做法，或请用户切到 ask），不弹框。
   - 同一轮连续被拦 3 次就转人工审批，审批框的“自动审查”栏写明连续次数和原因；`RunawayGuard` 把 `[AUTO]` 当作没执行的调用，不计入重复
-- `revert_turn`、所有 `mcp__*` 和敏感页面改写在 auto 下不经过分类器，直接交回模型（计入连续被拦次数）。原因是：MCP 实际做什么由第三方 server 决定，分类器只看得到名字和参数；而且项目级 `.paicli/mcp.json` 还没有首次使用前的确认机制。转人工后，用户选“全部放行”仍然只对该工具或该 server 生效
+- `revert_turn`、所有 `mcp__*` 和敏感页面改写在 auto 下不经过分类器，直接交回模型（计入连续被拦次数）。原因是：MCP 实际做什么由第三方 server 决定，分类器只看得到名字和参数；项目级 server 虽然要 `/mcp trust` 才启动，但确认的只是“可以运行这个 server”，不代表它的每个工具调用都安全。转人工后，用户选“全部放行”仍然只对该工具或该 server 生效
 - 状态栏在有会话模式时显示 `AUTO/PLAN/ASK shift+tab to cycle`；没有模式（非交互）时退回 HITL/YOLO 文案
 - 审批选项：y(批准) / a(全部放行) / n(拒绝) / s(跳过) / m(修改参数)
 - 保护措施：连续 5 次无效输入按 REJECTED 处理

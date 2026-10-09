@@ -38,6 +38,7 @@ final class CliCommandParser {
         MCP_LOGS,
         MCP_DISABLE,
         MCP_ENABLE,
+        MCP_TRUST,
         MCP_RESOURCES,
         MCP_PROMPTS,
         BROWSER,
@@ -360,6 +361,10 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/mcp enable ", 0, 12)) {
             return new ParsedCommand(CommandType.MCP_ENABLE, trimmed.substring(12).trim());
+        }
+
+        if (trimmed.equalsIgnoreCase("/mcp trust") || trimmed.regionMatches(true, 0, "/mcp trust ", 0, 11)) {
+            return new ParsedCommand(CommandType.MCP_TRUST, trimmed.substring(10).trim());
         }
 
         if (trimmed.startsWith("/")) {

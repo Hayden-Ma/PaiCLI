@@ -60,7 +60,7 @@ src/main/java/com/paicli/
 - 内置工具 18 个：`read_file`、`write_file`、`edit_file`、`list_dir`、`glob_files`、`grep_code`、`execute_command`、`create_project`、`search_code`、`web_search`、`web_fetch`、`browser_connect`、`browser_disconnect`、`browser_status`、`save_memory`、`load_skill`、`save_skill_reference`、`revert_turn`。MCP 工具运行时注册，名字是 `mcp__{server}__{tool}`
 - `edit_file` 默认只替换唯一一处匹配的 `old_text`，`replace_all=true` 时全部替换。精确匹配失败后，逐行统一写法再匹配（NFKC、行尾空白、引号、横线、特殊空格）；还失败、并且片段每行都带着 read_file 输出的行号前缀时，去掉行号前缀再试一次。CRLF 文件保留原来的换行符。新建文件用 `write_file`
 - 读代码默认顺序：`glob_files` → `grep_code` → `read_file`；`search_code`（RAG）只用来做模糊的语义查找
-- MCP 配置合并 `~/.paicli/mcp.json` 和项目里的 `.paicli/mcp.json`；检测到 `STEP_API_KEY` 时自动加上 `step_search`
+- MCP 配置合并 `~/.paicli/mcp.json` 和项目里的 `.paicli/mcp.json`；检测到 `STEP_API_KEY` 时自动加上 `step_search`。项目级 server（包括覆盖用户级的同名 server）要 `/mcp trust` 确认后才启动，确认绑定配置内容指纹；stdio 子进程只继承 `McpChildEnvironment` 白名单里的环境变量，不要改回继承全部
 - 思考模型（DeepSeek Flash / V4 Pro、GLM-5.3、混元 Hy4、Kimi thinking）返回的思考内容 `reasoning_content` 必须在下一轮请求里带回去；各家接口差异和重试策略见 `docs/agents-reference.md`
 - 手动管理模型：`/model list [provider]`、`/model refresh <provider>`、`/model add <provider> <id> [--like <同供应商模型>]`；模型支持什么能力保存在 `providers.<provider>.models`。刷新只新增不删除，添加后不自动切换，不知道能力的模型按 128k 纯文本处理；用户主动切换后才生效，保存失败时保留原来的选择；不靠实际调用模型来探测它支持什么
 - DeepSeek 是默认供应商（`PaiCliConfig.defaultProvider`，多个 Key 都有时优先用 DeepSeek），默认模型 DeepSeek V4.1 Flash（模型 ID `deepseek-flash`），支持图片。官方旧名 `deepseek-v4-flash`、`deepseek-v4-flash-vision-exp` 现在也由 V4.1 Flash 提供服务，同样支持图片；它们只写成兼容说明，不作为单独的内置模型，刷新时也不新增，用户已有的选择和手动配置保留并注明对应关系。`deepseek-v4-pro` 仍然只支持文本。以前评测记录里写的模型标识不跟着改

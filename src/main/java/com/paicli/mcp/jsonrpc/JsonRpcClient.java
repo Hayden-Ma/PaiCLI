@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -19,12 +20,13 @@ import java.util.function.Consumer;
 public class JsonRpcClient implements AutoCloseable {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final long DEFAULT_TIMEOUT_SECONDS = 60;
+    private static final int METHOD_NOT_FOUND = -32601;
 
     private final McpTransport transport;
     private final AtomicLong ids = new AtomicLong(1);
     private final ConcurrentHashMap<Long, CompletableFuture<JsonNode>> pending = new ConcurrentHashMap<>();
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread thread = new Thread(r, "paicli-mcp-jsonrpc-timeout");
+        Thread thread = new Thread(r, "paicli-mcp-jsonrpc");
         thread.setDaemon(true);
         return thread;
     });
@@ -88,15 +90,31 @@ public class JsonRpcClient implements AutoCloseable {
         }
     }
 
+    /**
+     * 先按有没有 method 区分方向：带 method 的是 server 发来的请求或通知，不带的才是我们请求的回复。
+     * 不能先拿 id 去 pending 里找：server 的请求 id 也从 1 开始，会和我们自己的请求撞号。
+     */
     private void handleMessage(JsonNode message) {
-        JsonNode idNode = message.get("id");
-        if (idNode == null || idNode.isNull()) {
-            for (Consumer<JsonNode> listener : notificationListeners) {
-                listener.accept(message);
+        if (message.hasNonNull("method")) {
+            JsonNode idNode = message.get("id");
+            if (idNode == null || idNode.isNull()) {
+                for (Consumer<JsonNode> listener : notificationListeners) {
+                    listener.accept(message);
+                }
+            } else {
+                // 回复放到别的线程发，避免在 stdout 读线程里阻塞写 stdin
+                try {
+                    scheduler.execute(() -> replyToServerRequest(idNode, message.path("method").asText()));
+                } catch (RejectedExecutionException ignored) {
+                    // client 已关闭，不再回复
+                }
             }
             return;
         }
-        long id = idNode.asLong();
+        Long id = responseId(message.get("id"));
+        if (id == null) {
+            return;
+        }
         CompletableFuture<JsonNode> future = pending.remove(id);
         if (future == null) {
             return;
@@ -109,6 +127,38 @@ public class JsonRpcClient implements AutoCloseable {
             return;
         }
         future.complete(message.get("result"));
+    }
+
+    /** 我们发出的 id 都是数字；个别 server 会把它回成数字字符串，其他形式一律不认。 */
+    private static Long responseId(JsonNode idNode) {
+        if (idNode == null || idNode.isNull()) {
+            return null;
+        }
+        if (idNode.isIntegralNumber()) {
+            return idNode.asLong();
+        }
+        if (idNode.isTextual() && idNode.asText().matches("-?\\d{1,18}")) {
+            return Long.parseLong(idNode.asText());
+        }
+        return null;
+    }
+
+    private void replyToServerRequest(JsonNode idNode, String method) {
+        ObjectNode response = MAPPER.createObjectNode();
+        response.put("jsonrpc", "2.0");
+        response.set("id", idNode);
+        if ("ping".equals(method)) {
+            response.putObject("result");
+        } else {
+            ObjectNode error = response.putObject("error");
+            error.put("code", METHOD_NOT_FOUND);
+            error.put("message", "Method not found: " + method);
+        }
+        try {
+            transport.send(response);
+        } catch (IOException ignored) {
+            // transport 已关闭或断开，server 那边会自己超时
+        }
     }
 
     @Override
