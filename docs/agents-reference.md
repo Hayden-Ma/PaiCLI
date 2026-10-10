@@ -34,7 +34,7 @@
 
 ### Embedding 配置
 
-优先级：环境变量 > 系统属性 > 默认值。配置项：`EMBEDDING_PROVIDER`(ollama)、`EMBEDDING_MODEL`(nomic-embed-text:latest)、`EMBEDDING_BASE_URL`(http://localhost:11434)
+优先级：环境变量 > 系统属性 > 默认值。配置项：`EMBEDDING_PROVIDER`(ollama)、`EMBEDDING_MODEL`(nomic-embed-text:latest)、`EMBEDDING_BASE_URL`(http://localhost:11434)、`EMBEDDING_BATCH_SIZE`(32)；索引线程数 `PAICLI_INDEX_THREADS` / `-Dpaicli.index.threads`(4)
 
 ### 日志配置
 
@@ -298,6 +298,10 @@ stdio 的 stdout 按行处理：不是 JSON 的行（server 往 stdout 打的日
 - CLI 列表用 `util/TerminalTable`：读取 `paicli.render.columns` / `COLUMNS`，通过 JLine 计算中文和 ANSI 的显示宽度；整张表太宽时先把最后一列挪到下一行，还是太宽就改成纵向逐条显示。名称不省略，终端极窄时按列宽折行。样式沿用 `AnsiStyle` 的颜色开关。`/model info [模型ID]` 显示完整的手动配置；刷新、切换的结果和旧名映射分行输出。
 - 交互期间的输出优先走 `Renderer.stream()`；`Main`、`PlanExecuteAgent`、`Planner`、`AgentOrchestrator` 都能接收同一个 renderer 输出流，免得绕过 inline renderer 直接写 stdout
 - `CodeIndex` 通过 `ProgressListener` 报告索引开始、文件数量、进度、完成或失败，`/index` 绑定当前 renderer 的输出流；内部异常细节写进 logger
+- `/index` 是增量的：`indexed_files` 表按文件记内容 SHA-256 和当时的 Embedding 模型（`provider:model`），两者都没变的文件跳过；已删除或超过 1MB 的文件清掉代码块、关系和指纹；换 Embedding 模型时所有文件重新向量化。没有指纹记录的旧索引第一次运行时整体重建
+- 读文件、算指纹、解析在 `PAICLI_INDEX_THREADS`（默认 4）个线程里并行，主线程按文件顺序消费结果，解析最多领先 4 倍线程数的文件，免得结果堆在内存里。JavaParser 实例不是线程安全的，`JavaSourceParser` 给每个线程一份；Java 文件只解析一次，分块和关系分析共用同一棵语法树
+- Embedding 跨文件攒满 `EMBEDDING_BATCH_SIZE` 条再请求（Ollama `/api/embed`、OpenAI 兼容接口的数组 input，按返回的 index 放回原位），每批文件在一个事务里写库。整批失败时逐个文件重试，仍失败的文件保留旧索引、不记新指纹，下次 `/index` 再试；Embedding 服务整体不可用时不会把已有索引清空。老版本 Ollama 没有 `/api/embed`（返回 `404 page not found`）时改回逐条 `/api/embeddings`；模型不存在的 404 直接报错
+- 查询时的 `embed(text)` 仍是单条调用
 
 ### LSP 诊断（第 17 期）
 
@@ -607,6 +611,11 @@ Agnes 的 provider 名为 `agnes`，默认 Base URL 是 `https://apihub.agnes-ai
 - 摘要之前还有一档可恢复的“旧工具结果清理”（`ToolResultClearer`，参考 Anthropic context editing 的 `clear_tool_uses`）：`AutoCompactionManager.compactIfNeeded` 先看是否到了清理阈值，到了就把最近 `PAICLI_TOOL_RESULT_CLEARING_KEEP`（默认 3）条以外、长度 ≥ 400 字符的 tool 消息正文换成 `[已清理的旧工具结果] 工具 X 的这次输出……已从上下文清理……需要时重新调用该工具获取最新结果[；完整输出仍保存在 <卸载文件>]`。只替换正文，`tool_call_id` 和消息条数不变，tool_call/tool_result 的配对不受影响。阈值默认 `min(100k, 摘要阈值 × 0.6)`，并且总是低于摘要阈值（200k 和 1M 窗口都是 100k，128k 窗口约 57k）；`PAICLI_TOOL_RESULT_CLEARING_TRIGGER_TOKENS` 覆盖阈值，`PAICLI_TOOL_RESULT_CLEARING_EXCLUDE_TOOLS` 用逗号分隔要排除的工具，`PAICLI_TOOL_RESULT_CLEARING_ENABLED=false` 关闭。清理后如果已经低于摘要阈值，本轮就不再做摘要。system prompt 已经告诉模型：遇到占位文本时重新调用工具，或按路径读回卸载文件。清理会改变后续请求的前缀，prompt cache 会在清理点失效一次
 - 自动压缩阈值按 Claude Code 的做法，给摘要输出和安全余量预留空间：大窗口用 `window - 20k - 13k`，例如 200k 窗口约 167k 时触发、1M 窗口约 967k 时触发；小窗口的预留空间按比例缩小。
 - ReAct、Plan 单任务和 SubAgent 默认不设固定的迭代上限；`paicli.react.hard.max.iterations` 只在显式配置成正整数时生效。显式设置的轮数/Token 预算用完或命中停滞检测后，必须关闭工具，尽力做一次收尾，返回“部分完成”的结果，不能直接丢掉已经做完的工作。
+
+### LLM 请求体
+
+- `AbstractOpenAiCompatibleClient` 用 `JsonRequestBody` 把请求的 JSON 树直接写进 HTTP 输出流，不再 `toString()` 成一整个字符串再转字节。实测约 1M token 的对话加 3 张截图（请求体 7.9MB），每次请求的内存分配从 90.5MB 降到 4.7MB：原来的字符串扩容、整串因为含中文按 UTF-16 存，再加 UTF-8 字节数组，在 G1 里都是大对象
+- 先写一遍计数流拿到准确长度，照常带 Content-Length、不改成分块传输；打开 `JsonWriteFeature.COMBINE_UNICODE_SURROGATES_IN_UTF8`，emoji 原样写出不转义，请求体和原来逐字节一致。重试时 OkHttp 会再次调用 `writeTo`，每次都从树重新写出
 
 ### 工具参数校验
 

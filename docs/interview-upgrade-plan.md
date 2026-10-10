@@ -43,21 +43,25 @@
 
 ## P2：代码索引性能
 
-- [ ] **按文件哈希做增量索引**（文章 04 题）
+- [x] **按文件哈希做增量索引**（文章 04 题）
   - 现状：`rag/CodeIndex.java:104-108` 每次 `/index` 先 `clearProject()` 再全量重建，没有 hash/mtime 判断；所有 entry 先攒在内存里再统一落库（`:71-72`）；读取文件没有大小上限
   - 目标：`code_chunks` 记录文件内容哈希，只重建哈希变化的文件，删除文件对应的 chunk 和 relation；超过 1MB 的文件跳过；按文件分批落库
-- [ ] **Embedding 批量调用**（文章 04 题）
+- [x] **Embedding 批量调用**（文章 04 题）
   - 现状：`rag/EmbeddingClient.java:46-61` 每个 chunk 发一次 HTTP 请求
   - 目标：Ollama 用 `/api/embed` 的数组输入，OpenAI 兼容接口用数组 input，每批 10 条起
-- [ ] **并行解析**（文章 04 题）
+- [x] **并行解析**（文章 04 题）
   - 现状：`CodeIndex.java:77-102` 单线程顺序解析
   - 目标：每个线程用 ThreadLocal 持有自己的 JavaParser 实例（官方说明实例不是线程安全的），默认 4 个线程，可配置
+  - 做法：指纹单独存 `indexed_files` 表（文件路径 + SHA-256 + Embedding 模型），换模型全量重建，没有指纹的旧索引第一次整体重建；Java 文件只解析一次，分块和关系分析共用语法树；Embedding 跨文件攒批（默认 32 条），一批文件一个事务，某批失败时保留这些文件的旧索引、下次重试（原来 Ollama 没开时跑 /index 会把索引清空）
+  - 实测（本地 Ollama nomic-embed-text，pmhub 1892 个文件）：改动前全量 218.9 秒；改动后第一次全量 128.7 秒（4 个超 1MB 文件跳过），没改动再跑 0.8 秒。全量只快 1.7 倍，时间主要花在 Ollama 计算向量上
 
 ## P2：内存
 
-- [ ] **请求体流式写出**（文章 05 题）
+- [x] **请求体流式写出**（文章 05 题）
   - 现状：`llm/AbstractOpenAiCompatibleClient.java:112-113` 每轮把完整对话历史 `buildRequestBody(...).toString()` 成一个字符串，再交给 OkHttp 编码成字节数组，长上下文时在 G1 里是巨型对象
   - 目标：自定义 OkHttp `RequestBody`，在 `writeTo(BufferedSink)` 里用 Jackson `JsonGenerator` 直接写出
+  - 实测：PaiCLI 自己的源码当工具结果拼出约 1M token 的对话（350 万字符代码）加 3 张 1MB 截图，请求体 7.9MB；原做法每次请求分配 90.5MB（建树 4.7 + toString 54.5 + 转字节 31.3），`JsonRequestBody` 4.7MB，请求体逐字节一致
+  - 做法：先写一遍计数流拿长度，照常带 Content-Length，不用分块传输；emoji 用 `COMBINE_UNICODE_SURROGATES_IN_UTF8` 原样写出（默认会转义成代理对，内容等价但字节不同）
   - 注意：其他几项都有实测数据，这项还没有，先量 1M 上下文时请求体字符串多大再决定做不做；改完不再带 Content-Length、改走分块传输，个别代理网关可能不接受
 
 ## 同步修改
