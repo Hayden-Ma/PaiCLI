@@ -196,7 +196,7 @@ stdio 的 stdout 按行处理：不是 JSON 的行（server 往 stdout 打的日
 - `CommandGuard`：命中就立即拒绝的黑名单（sudo、rm -rf、mkfs、dd、fork bomb、curl|sh 等）
 - `ResourceLimit`：write_file 最大 5MB；execute_command 最长 60s，输出最多 8KB
 - `AuditLog`：JSONL 格式，字段有 timestamp、tool、args、outcome、reason、approver、durationMs
-- 拦截顺序：HitlToolRegistry → ToolRegistry → 策略层。策略层拒绝的请求，用户也没法批准
+- 拦截顺序：TurnToolPolicy（网址来源等本轮工具策略）→ HitlToolRegistry → ToolRegistry（参数校验）→ 策略层。策略层拒绝的请求，用户也没法批准
 
 ### 并行工具执行
 
@@ -300,7 +300,7 @@ stdio 的 stdout 按行处理：不是 JSON 的行（server 往 stdout 打的日
 - `CodeIndex` 通过 `ProgressListener` 报告索引开始、文件数量、进度、完成或失败，`/index` 绑定当前 renderer 的输出流；内部异常细节写进 logger
 - `/index` 是增量的：`indexed_files` 表按文件记内容 SHA-256 和当时的 Embedding 模型（`provider:model`），两者都没变的文件跳过；已删除或超过 1MB 的文件清掉代码块、关系和指纹；换 Embedding 模型时所有文件重新向量化。没有指纹记录的旧索引第一次运行时整体重建
 - 读文件、算指纹、解析在 `PAICLI_INDEX_THREADS`（默认 4）个线程里并行，主线程按文件顺序消费结果，解析最多领先 4 倍线程数的文件，免得结果堆在内存里。JavaParser 实例不是线程安全的，`JavaSourceParser` 给每个线程一份；Java 文件只解析一次，分块和关系分析共用同一棵语法树
-- Embedding 跨文件攒满 `EMBEDDING_BATCH_SIZE` 条再请求（Ollama `/api/embed`、OpenAI 兼容接口的数组 input，按返回的 index 放回原位），每批文件在一个事务里写库。整批失败时逐个文件重试，仍失败的文件保留旧索引、不记新指纹，下次 `/index` 再试；Embedding 服务整体不可用时不会把已有索引清空。老版本 Ollama 没有 `/api/embed`（返回 `404 page not found`）时改回逐条 `/api/embeddings`；模型不存在的 404 直接报错
+- Embedding 跨文件累积到 `EMBEDDING_BATCH_SIZE` 条再批量请求（Ollama `/api/embed`、OpenAI 兼容接口的数组 input，按返回的 index 放回原位），每批文件在一个事务里写库。整批失败时逐个文件重试，仍失败的文件保留旧索引、不记新指纹，下次 `/index` 再试；Embedding 服务整体不可用时不会把已有索引清空。老版本 Ollama 没有 `/api/embed`（返回 `404 page not found`）时改回逐条 `/api/embeddings`；模型不存在的 404 直接报错
 - 查询时的 `embed(text)` 仍是单条调用
 
 ### LSP 诊断（第 17 期）

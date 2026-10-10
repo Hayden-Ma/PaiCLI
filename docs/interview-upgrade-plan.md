@@ -6,7 +6,7 @@
 
 - [x] **项目级 MCP 配置首次启动前确认**（文章 03 题）
   - 现状：`mcp/config/McpConfigLoader.java:27-55` 会加载项目目录下的 `.paicli/mcp.json`，启动时直接执行里面的命令。克隆一个自带 MCP 配置的陌生仓库，PaiCLI 一启动就会执行仓库作者写的命令
-  - 目标：项目级配置里的 server 第一次启动前让用户确认，确认过的“命令 + 参数 + env + cwd”记录哈希，内容变化后重新确认；用户级配置不受影响
+  - 目标：项目级配置里的 server 第一次启动前让用户确认，确认过的“命令 + 参数 + env + url + headers”记录哈希（cwd 固定为项目目录，配置里改不了，不参与计算），内容变化后重新确认；用户级配置不受影响
   - 做法：确认用 `/mcp trust <name>`（和 `/skill trust` 一致），没确认的 server 状态是“待确认”，启动时提示；交互式 CLI 是唯一会启动 MCP 的入口，没人确认就一直不启动
   - 注意：`load()` 用 `putAll` 合并，项目配置可以用同名 server 覆盖用户配置，所以确认要按“项目级来源 + 配置内容”记，不能只按名字；env 必须算进哈希（`NODE_OPTIONS=--require ./evil.js` 一样能执行任意代码）；记录方式参考 `skill/SkillStateStore.java` 的 `trustedProjectSkills`；微信、Runtime API、评测这类没人确认的场景默认不启动
 - [x] **MCP 子进程环境变量白名单**（文章 03 题）
@@ -52,7 +52,7 @@
 - [x] **并行解析**（文章 04 题）
   - 现状：`CodeIndex.java:77-102` 单线程顺序解析
   - 目标：每个线程用 ThreadLocal 持有自己的 JavaParser 实例（官方说明实例不是线程安全的），默认 4 个线程，可配置
-  - 做法：指纹单独存 `indexed_files` 表（文件路径 + SHA-256 + Embedding 模型），换模型全量重建，没有指纹的旧索引第一次整体重建；Java 文件只解析一次，分块和关系分析共用语法树；Embedding 跨文件攒批（默认 32 条），一批文件一个事务，某批失败时保留这些文件的旧索引、下次重试（原来 Ollama 没开时跑 /index 会把索引清空）
+  - 做法：指纹单独存 `indexed_files` 表（文件路径 + SHA-256 + Embedding 模型），换模型全量重建，没有指纹的旧索引第一次整体重建；Java 文件只解析一次，分块和关系分析共用语法树；Embedding 跨文件批量调用（默认 32 条一批），一批文件一个事务，某批失败时保留这些文件的旧索引、下次重试（原来 Ollama 没开时跑 /index 会把索引清空）
   - 实测（本地 Ollama nomic-embed-text，pmhub 1892 个文件）：改动前全量 218.9 秒；改动后第一次全量 128.7 秒（4 个超 1MB 文件跳过），没改动再跑 0.8 秒。全量只快 1.7 倍，时间主要花在 Ollama 计算向量上
 
 ## P2：内存
@@ -62,7 +62,7 @@
   - 目标：自定义 OkHttp `RequestBody`，在 `writeTo(BufferedSink)` 里用 Jackson `JsonGenerator` 直接写出
   - 实测：PaiCLI 自己的源码当工具结果拼出约 1M token 的对话（350 万字符代码）加 3 张 1MB 截图，请求体 7.9MB；原做法每次请求分配 90.5MB（建树 4.7 + toString 54.5 + 转字节 31.3），`JsonRequestBody` 4.7MB，请求体逐字节一致
   - 做法：先写一遍计数流拿长度，照常带 Content-Length，不用分块传输；emoji 用 `COMBINE_UNICODE_SURROGATES_IN_UTF8` 原样写出（默认会转义成代理对，内容等价但字节不同）
-  - 注意：其他几项都有实测数据，这项还没有，先量 1M 上下文时请求体字符串多大再决定做不做；改完不再带 Content-Length、改走分块传输，个别代理网关可能不接受
+  - 注意（动手前的两个顾虑，都已解决）：一是这项原来没有实测数据，现在已补上，见上面的“实测”；二是担心改完只能走分块传输、个别代理网关不接受，现在先写计数流拿到长度，照常带 Content-Length
 
 ## 同步修改
 
@@ -78,7 +78,7 @@
 
 ## 实测记录（2026-10-09，文章 04、05 题的数据来源）
 
-- 环境：Apple M3 Max，JDK 21.0.9，`-Xmx2g`，javaparser-core 3.28.0，配置和 `rag/CodeChunker.java:25-26` 相同（Java 17 语言级别）
+- 环境：Apple M3 Max，JDK 21.0.9，`-Xmx2g`，javaparser-core 3.28.0，配置和 `rag/JavaSourceParser.java:16-17` 相同（Java 17 语言级别）
 - 样本：本地 flexmark-java、PaiFlow、pmhub、ruoyi-ai、paicoding 五个项目，按 `CodeIndex` 的目录过滤规则取 `.java` 文件，共 5874 个文件、2061 万字符、58 万行；解析出 6297 个类、30809 个方法、189455 处方法调用，1 个文件解析失败
 - 解析 + findAll 类/方法/方法调用：单线程首轮 5.5 秒，预热后约 4.6 秒；ThreadLocal 实例并行 2 线程 2.4–2.6 秒、4 线程 1.9–2.0 秒、8 线程 2.3–2.4 秒、16 线程约 3.0 秒（`-Xmx8g` 结果相同）
 - 单线程一轮分配约 4.8GB；整个测试 Young GC 70 次，累计约 0.1 秒，Old GC 0 次

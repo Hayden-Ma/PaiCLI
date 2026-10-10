@@ -210,7 +210,13 @@ MCP Server 返回的工具参数是标准 JSON Schema，但 LLM 不是 JSON Sche
 - **`anyOf`/`oneOf` 联合类型**，参数可以是 string 也可以是 number，LLM 选错类型的概率很高。
 - **超长 `description`**，有些 MCP Server 的工具描述写了几千字，把整个 API 文档塞进去了，LLM 被信息淹没反而搞不清核心参数。
 
-所以 PaiCLI 在注册工具时会自动做一轮清洗：`$ref` 直接展开或移除，`anyOf`/`oneOf` 转成自然语言描述放到 description 里，超长描述做截断。清洗后的 schema 对 LLM 更友好，参数生成的准确率也更高。
+所以 PaiCLI 在注册工具时会自动做一轮清洗：`$ref`、`$schema`、`$id` 直接删掉，超过 1000 字符的描述做截断。`anyOf` / `oneOf` 按真实类型尽量收起来，分三种情况：
+
+- 去掉 `{"type": "null"}` 选项后只剩一个选项（最常见的 `Optional[X]`），把这个选项的字段合并到当前节点；
+- 剩下的全是 `{"type": X}` 这种简单选项，写成一个 type 或者 type 数组，保留真实类型；
+- 其他复杂情况才不写 type，把各个选项列进 description 里。
+
+清洗后的 schema 对 LLM 更友好，参数生成的准确率也更高。但它把约束放宽或收紧了（去掉了 null 选项，复杂的 anyOf 也放开了），所以只给模型看；执行前校验参数时，用的是 server 返回的原始 Schema。
 
 ![](https://cdn.paicoding.com/stutymore/paicli-interview-mcp-20260525191537.png)
 

@@ -73,7 +73,7 @@ public class CodeIndex {
      *
      * <p>增量进行：按文件内容的 SHA-256 判断，内容和 Embedding 模型都没变的文件跳过，
      * 已删除（或超过 1MB）的文件清掉旧索引。读文件、算指纹、解析放在多个线程里并行，
-     * 每个线程用自己的 JavaParser；Embedding 跨文件攒成一批再请求，每批写一次库。
+     * 每个线程用自己的 JavaParser；Embedding 跨文件凑成一批再请求，每批写一次库。
      * 某一批 Embedding 失败时，这些文件保留原来的索引，下次 /index 再试。
      *
      * @param projectPath 项目根目录
@@ -133,7 +133,7 @@ public class CodeIndex {
                               List<CodeChunk> chunks, List<CodeRelation> relations, String error) {
     }
 
-    /** 一次 /index 的处理过程：按顺序消费并行解析的结果，攒批做 Embedding 和落库。 */
+    /** 一次 /index 的处理过程：按顺序消费并行解析的结果，按批做 Embedding 和落库。 */
     private final class IndexRun {
         private final VectorStore store;
         private final Map<String, VectorStore.IndexedFile> known;

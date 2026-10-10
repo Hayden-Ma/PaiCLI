@@ -174,10 +174,11 @@ revert_turn
 
 ```json
 {
-  "turn_offset": 1,
-  "reason": "刚才修改后测试失败，需要回到修改前"
+  "offset": 1
 }
 ```
+
+`offset` 可选，默认 1，表示最近一次任务开始前的快照。最初设计的参数是 `turn_offset` 和 `reason`，实现时只保留了 `offset` 一个。
 
 要求：
 

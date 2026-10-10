@@ -91,7 +91,7 @@ src/main/java/com/paicli/
 
 ### HITL（人工确认）与安全策略
 
-- 检查顺序：HitlToolRegistry → ToolRegistry → PathGuard / CommandGuard。被安全策略拒绝的操作，用户也无法批准
+- 检查顺序：TurnToolPolicy（网址来源等本轮工具策略）→ HitlToolRegistry → ToolRegistry（参数校验）→ PathGuard / CommandGuard。被安全策略拒绝的操作，用户也无法批准
 - 会话模式（`SessionMode`、`SessionModeController`）：Shift+Tab 按 auto → plan → ask 轮流切换，`/mode` 效果相同。交互式命令行没有“全部放行”，最宽松的就是 auto。模式只是“确认严格程度 + 是否走 plan”的组合，不另外保存权限状态。plan 模式下普通输入走 Plan-and-Execute，用户明确输入的 `/team` 优先；启动时默认 auto。目前只在 inline 命令行界面生效，Lanterna 全屏界面还没接
 - auto 模式（`/hitl default`，启动默认）：
   - 读写文件直接执行
