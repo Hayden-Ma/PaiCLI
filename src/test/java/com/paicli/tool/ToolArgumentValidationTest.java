@@ -117,7 +117,7 @@ class ToolArgumentValidationTest {
 
     @Test
     void mcpToolIsValidatedAgainstRawSchemaNotTheSanitizedOne() throws Exception {
-        // 清洗会把 anyOf [string, null] 改写成 object，拿清洗后的 Schema 校验会把正确的字符串判错
+        // 清洗后的 Schema 只给模型看（去掉 null 选项、放宽复杂的 anyOf），校验要按 server 的原始 Schema
         JsonNode raw = MAPPER.readTree("""
                 {"type":"object","properties":{
                   "query":{"type":"string"},
