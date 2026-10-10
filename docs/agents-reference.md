@@ -232,7 +232,12 @@ stdio 的 stdout 按行处理：不是 JSON 的行（server 往 stdout 打的日
 
 - 支持 stdio 和 Streamable HTTP 两种传输方式
 - 工具注册为 `mcp__{server}__{tool}`
-- McpSchemaSanitizer 清洗 inputSchema
+- McpSchemaSanitizer 清洗 inputSchema（工具的参数说明）再交给模型：删掉 `$schema` / `$id` / `$ref`，超长 description 截到 1000 字符；`anyOf` / `oneOf`（“几种写法任选其一”）按真实类型收起来，不再一律写成 `type: object`
+  - 去掉 `{"type":"null"}` 后只剩一个选项（Pydantic / FastMCP 生成的可选参数，比如 `anyOf [string, null]`）：把这个选项直接合并进来，结果就是 `type: string`
+  - 剩下的都是只写了 type 的简单选项（比如 `oneOf [integer, string]`）：写成 type 数组 `["integer","string"]`
+  - 选项是形状不同的对象这类复杂情况：不写 type（任何值都接受），在 description 里列出各选项，例如 `object(path), object(url)`
+  - 节点自己已经声明了 type 时保留原 type，选项只写进 description
+  - 清洗后的版本只给模型看；执行前校验参数用的是 server 原始 schema，不受清洗影响
 - 所有 mcp__ 工具默认都走 HITL + AuditLog
 - resources 有两种用法：作为虚拟工具调用，或在输入里用 @ 引用
 - CLI 首屏默认最多等 MCP 启动 8 秒，慢的 server 在后台继续初始化，状态保持 `starting`，可以用 `/mcp`、`/mcp logs <name>` 查看
@@ -609,7 +614,7 @@ Agnes 的 provider 名为 `agnes`，默认 Base URL 是 `https://apihub.agnes-ai
 - 参数为空字符串当作 `{}`；不是合法 JSON 时单独返回“不是合法的 JSON”并带上原文前 200 字符；不是 JSON 对象也直接拒绝；Schema 不合格时最多列 5 条字段级错误
 - 内置工具：参数仍以 `Map<String,String>` 交给工具，由工具自己解析、解析不了用默认值，所以单值参数之间不卡类型（字符串、数字、布尔互相接受），null 原样以 "null" 交给工具；只拦缺必填参数、传了对象 / 数组、不在 enum 里。这套语义是评测独立复算还原 read_file 看到内容的依据（F1/F2 的 `STRING_VALUES`、`BMP_DIGITS`、`NULL_DEFAULTS`），改之前要先改评测
 - 数值参数不加 `maximum` / `minimum`：工具现在会把超出范围的值收回到合法范围（如 `max_results` 最多 200），改成拒绝会让弱模型反复重试。`Param.oneOf(...)` 生成 enum，目前用在 `create_project.type` 和 `save_memory.scope`
-- MCP 工具：按 server 返回的原始 Schema（`McpToolDescriptor.validationSchema`）严格校验，`typeLoose` 让 `"5"` 这种带引号的数字算整数；null 值的参数校验时当作没传，转发给 server 的参数保持原样。不能用 `McpSchemaSanitizer` 清洗后的那份校验，它会把 `anyOf` 改写成 object。Schema 里有外部 `$ref` 时跳过校验（不联网加载），不认识的 `$schema` 地址去掉后按 2020-12 处理，编译失败也只记日志、跳过校验
+- MCP 工具：按 server 返回的原始 Schema（`McpToolDescriptor.validationSchema`）严格校验，`typeLoose` 让 `"5"` 这种带引号的数字算整数；null 值的参数校验时当作没传，转发给 server 的参数保持原样。不能用 `McpSchemaSanitizer` 清洗后的那份校验：它为了让模型看得懂，会去掉 `null` 选项、把复杂的 `anyOf` / `oneOf` 改成不限类型，校验会因此变松或变严。Schema 里有外部 `$ref` 时跳过校验（不联网加载），不认识的 `$schema` 地址去掉后按 2020-12 处理，编译失败也只记日志、跳过校验
 - 编译好的 Schema 按工具名缓存，按 Schema 对象引用判断是否需要重新编译（MCP `tools/list_changed` 后会换新 Schema）
 
 ### 工具结果处理细节

@@ -143,7 +143,7 @@ DeepSeek 的当前内置列表按[官方文档](https://api-docs.deepseek.com/zh
 - stdio server 进程自己退出，或者连续两次 ping 都不回（卡死）时，PaiCLI 会移除它的工具，按 1 秒、2 秒、4 秒的间隔自动重启，连续 3 次失败就停下并提示用 `/mcp restart` 手动处理；正在等它回复的请求立即失败，不用干等 60 秒超时
 - 关闭 server 时会连同 npx / uvx 拉起的子进程一起结束；PaiCLI 被强制杀掉（kill -9）后，下次启动会清理上次遗留的 MCP 子进程
 - MCP `${VAR}` 支持系统环境变量、系统属性、项目 `.env`、用户 `~/.env`；检测到 `STEP_API_KEY` 时自动内置 `step_search` 远程 MCP，显式同名配置优先
-- MCP 工具自动注册为 `mcp__{server}__{tool}`，参数 schema 会清洗 `$ref` / `anyOf` / 超长 description，降低模型调用失败率；执行前按 server 返回的原始 schema 校验参数，不合格的调用不发给 server，直接把哪个字段有什么问题告诉模型
+- MCP 工具自动注册为 `mcp__{server}__{tool}`，参数 schema 会删掉 `$ref` 和超长 description，`anyOf` / `oneOf` 按真实类型收起来（例如可选的字符串参数仍标成 `string`），降低模型调用失败率；执行前按 server 返回的原始 schema 校验参数，不合格的调用不发给 server，直接把哪个字段有什么问题告诉模型
 - 所有 MCP 工具默认走 HITL 审批和审计，审计参数会脱敏 token / key / password / Authorization / Bearer 凭证
 - 支持 MCP resources：server 声明 `resources` capability 后，自动注册 `mcp__{server}__list_resources` / `mcp__{server}__read_resource` 虚拟工具
 - 普通输入支持 `@server:protocol://path` 显式引用 resource，提交给 Agent 前展开为 `<resource>` 内联块
