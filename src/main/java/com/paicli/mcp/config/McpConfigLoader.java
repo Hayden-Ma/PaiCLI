@@ -1,16 +1,21 @@
 package com.paicli.mcp.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
 import java.io.BufferedReader;
 import java.io.FileReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -47,8 +52,11 @@ public class McpConfigLoader {
         if (Files.exists(userConfig)) {
             merged.putAll(read(userConfig));
         }
-        if (Files.exists(projectConfig)) {
-            merged.putAll(read(projectConfig));
+        if (Files.exists(projectConfig) && !isSameFile(projectConfig, userConfig)) {
+            Map<String, McpServerConfig> projectServers = read(projectConfig);
+            projectServers.values().forEach(config ->
+                    config.markProjectScoped(projectConfig.toAbsolutePath().normalize(), fingerprint(config)));
+            merged.putAll(projectServers);
         }
         addBuiltInStepSearchIfAvailable(merged);
         return merged;
@@ -61,6 +69,40 @@ public class McpConfigLoader {
     public void prepare(McpServerConfig config) {
         expand(config);
         validate(config);
+    }
+
+    /**
+     * 配置内容指纹：命令、参数、env、url、headers 都算进去（env 里的 NODE_OPTIONS 一样能执行代码，
+     * url / headers 里的 ${VAR} 展开后会把密钥发出去）。用展开前的原文计算，用户本机变量变化不影响确认结果。
+     */
+    public static String fingerprint(McpServerConfig config) {
+        ObjectNode node = MAPPER.createObjectNode();
+        node.put("command", config.getCommand());
+        ArrayNode args = node.putArray("args");
+        config.getArgs().forEach(args::add);
+        node.set("env", MAPPER.valueToTree(new TreeMap<>(config.getEnv())));
+        node.put("url", config.getUrl());
+        node.set("headers", MAPPER.valueToTree(new TreeMap<>(config.getHeaders())));
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(MAPPER.writeValueAsBytes(node));
+            return HexFormat.of().formatHex(digest);
+        } catch (Exception e) {
+            throw new IllegalStateException("计算 MCP 配置指纹失败", e);
+        }
+    }
+
+    /** 在用户主目录下启动时，项目配置和用户配置是同一个文件，按用户级处理。 */
+    private static boolean isSameFile(Path a, Path b) {
+        try {
+            return Files.exists(b) && Files.isSameFile(a, b);
+        } catch (IOException e) {
+            return a.toAbsolutePath().normalize().equals(b.toAbsolutePath().normalize());
+        }
+    }
+
+    public Path projectConfigPath() {
+        return projectConfig;
     }
 
     private Map<String, McpServerConfig> read(Path file) throws IOException {

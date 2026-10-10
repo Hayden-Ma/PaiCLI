@@ -218,7 +218,7 @@ class LoadSkillToolTest {
         ToolRegistry tools = toolsWith(new SkillRegistry(null, null, null, null));
 
         String result = tools.executeTool("load_skill", "{}");
-        assertTrue(result.contains("name 不能为空"), result);
+        assertTrue(result.contains("缺少必填参数 name"), result);
     }
 
     @Test

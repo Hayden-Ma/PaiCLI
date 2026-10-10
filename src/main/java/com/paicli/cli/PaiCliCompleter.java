@@ -179,12 +179,13 @@ final class PaiCliCompleter implements Completer {
                     option("logs ", "查看 MCP server stderr", "/mcp logs <name>"),
                     option("disable ", "禁用 MCP server", "/mcp disable <name>"),
                     option("enable ", "启用 MCP server", "/mcp enable <name>"),
+                    option("trust ", "确认并启动项目级 MCP server", "/mcp trust <name>"),
                     option("resources ", "查看 MCP resources", "/mcp resources <name>"),
                     option("prompts ", "查看 MCP prompts", "/mcp prompts <name>"));
             return true;
         }
         String sub = parts.length == 0 ? "" : parts[0].toLowerCase();
-        if (List.of("restart", "logs", "disable", "enable", "resources", "prompts").contains(sub)) {
+        if (List.of("restart", "logs", "disable", "enable", "trust", "resources", "prompts").contains(sub)) {
             String prefix = payload.endsWith(" ") ? "" : parts.length >= 2 ? parts[parts.length - 1] : "";
             addServerCandidates(candidates, prefix);
             return true;

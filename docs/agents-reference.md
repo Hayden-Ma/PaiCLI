@@ -88,6 +88,20 @@ DeepSeek Flash / V4 Pro、GLM-5.3 和混元 Hy4 preview 在思考模式下调用
 
 格式和 Claude Code 一致：`command` + `args` 表示 stdio，`url` + `headers` 表示 Streamable HTTP。内置变量有 `${PROJECT_DIR}`、`${HOME}`；其他 `${VAR}` 依次从系统环境变量、系统属性、项目 `.env`、用户 `~/.env` 读取。
 
+项目级 `.paicli/mcp.json` 随仓库分发：里面的 server（包括和用户级同名、把用户级覆盖掉的）第一次启动前要用户执行 `/mcp trust <name>` 确认，确认前不展开 `${VAR}`、不起进程、不连 url。确认记录在 `~/.paicli/mcp-trust.json`，按“项目配置文件路径 + server 名 + 配置内容的 SHA-256 指纹”保存，指纹覆盖 command、args、env、url、headers，改了任何一项都要重新确认。在主目录下启动时，项目配置和用户配置是同一个文件，按用户级处理。
+
+stdio server 的子进程不继承 PaiCLI 的全部环境变量，只带过去运行必需的变量（`PATH`、`HOME`、`LANG`、`LC_*`、`TMPDIR`、代理 `HTTP(S)_PROXY`/`NO_PROXY`（大小写都认）、证书 `NODE_EXTRA_CA_CERTS`、`npm_config_registry`、Windows 的 `SystemRoot`/`APPDATA`/`USERPROFILE` 等，完整名单见 `McpChildEnvironment`），再加上配置里 `env` 写的变量。server 需要 API Key 时要在配置里显式写，例如 `"env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}"}`。
+
+stdio server 的进程管理：
+
+- 子进程意外退出时（`Process.onExit()`），正在等回复的请求立即失败，之后的新请求也直接失败；server 标成 ERROR、工具移除，然后按 1s、2s、4s 退避自动重启。重启后稳定运行超过 60 秒再出问题，计数从头算；连续 3 次没救回来就停下，提示用户 `/mcp logs` 和 `/mcp restart`。用户手动 restart / enable / disable / trust 会取消排期中的自动重启
+- 每 30 秒 ping 一次本地 stdio server（`PAICLI_MCP_PING_INTERVAL_SECONDS`，设成 0 关闭），超时 10 秒；连续 2 次不回判定卡死，按上面的流程结束并重启。server 正在处理请求时跳过这一轮，免得把忙着跑长工具调用的单线程 server 误杀；回 `-32601` 也算活着。HTTP server 不 ping，避免给远程服务增加负担
+- 崩溃、重启、放弃的提示放进队列，主循环在显示下一个输入框前打印，不从后台线程直接写终端
+- 关闭时先记下整棵进程树再关 stdin，等 1 秒后从深到浅给还活着的进程发 SIGTERM，2 秒后还在的强制结束。不能只结束根进程：npx 拉起的 node 进程会被留下
+- 拉起的进程（包括后来发现的子进程）记在 `~/.paicli/mcp-pids.json`，带所属 PaiCLI 的 PID 和启动时间、进程自己的启动时间和命令；正常关闭时删掉。下次启动时只清理“所属 PaiCLI 已经退出”且启动时间、命令都对得上的进程（PID 会被复用），读写这个文件要先拿 `.lock` 文件锁
+
+stdio 的 stdout 按行处理：不是 JSON 的行（server 往 stdout 打的日志）记进 `/mcp logs` 并跳过，读线程继续。server 主动发来的请求（带 `id` 和 `method`）和我们请求的回复分开处理：`ping` 回空结果，其他方法回 `-32601`（Method not found），回复原样带回 server 的 id。
+
 检测到 `STEP_API_KEY` 时，会自动内置一个 `step_search` 远程 MCP（如果显式配置了同名 server，以显式配置为准），Step 3.7 Flash 的 `web_search` / `web_fetch` 会优先转给它处理。
 
 ---
@@ -170,7 +184,7 @@ DeepSeek Flash / V4 Pro、GLM-5.3 和混元 Hy4 preview 在思考模式下调用
   - 20 秒超时、异常、无法解析、参数超过 32000 字符（不截断，截断会漏掉危险部分）都判为不放行；只缓存 allow 结论，换了用户请求就清空。
   - 放行时写 `AuditEntry.allowByAutoClassifier`（approver=`auto-classifier`），并由 `HitlHandler.onAutoApproved` 在终端打一行说明；不放行时写 `denyByAutoClassifier`，由 `onAutoDenied` 打一行说明，再把 `[AUTO] 自动审查未放行：…` 作为失败结果交给模型（提示它换只读的做法，或请用户切到 ask），不弹框。
   - 同一轮连续被拦 3 次就转人工审批，审批框的“自动审查”栏写明连续次数和原因；`RunawayGuard` 把 `[AUTO]` 当作没执行的调用，不计入重复
-- `revert_turn`、所有 `mcp__*` 和敏感页面改写在 auto 下不经过分类器，直接交回模型（计入连续被拦次数）。原因是：MCP 实际做什么由第三方 server 决定，分类器只看得到名字和参数；而且项目级 `.paicli/mcp.json` 还没有首次使用前的确认机制。转人工后，用户选“全部放行”仍然只对该工具或该 server 生效
+- `revert_turn`、所有 `mcp__*` 和敏感页面改写在 auto 下不经过分类器，直接交回模型（计入连续被拦次数）。原因是：MCP 实际做什么由第三方 server 决定，分类器只看得到名字和参数；项目级 server 虽然要 `/mcp trust` 才启动，但确认的只是“可以运行这个 server”，不代表它的每个工具调用都安全。转人工后，用户选“全部放行”仍然只对该工具或该 server 生效
 - 状态栏在有会话模式时显示 `AUTO/PLAN/ASK shift+tab to cycle`；没有模式（非交互）时退回 HITL/YOLO 文案
 - 审批选项：y(批准) / a(全部放行) / n(拒绝) / s(跳过) / m(修改参数)
 - 保护措施：连续 5 次无效输入按 REJECTED 处理
@@ -218,7 +232,12 @@ DeepSeek Flash / V4 Pro、GLM-5.3 和混元 Hy4 preview 在思考模式下调用
 
 - 支持 stdio 和 Streamable HTTP 两种传输方式
 - 工具注册为 `mcp__{server}__{tool}`
-- McpSchemaSanitizer 清洗 inputSchema
+- McpSchemaSanitizer 清洗 inputSchema（工具的参数说明）再交给模型：删掉 `$schema` / `$id` / `$ref`，超长 description 截到 1000 字符；`anyOf` / `oneOf`（“几种写法任选其一”）按真实类型收起来，不再一律写成 `type: object`
+  - 去掉 `{"type":"null"}` 后只剩一个选项（Pydantic / FastMCP 生成的可选参数，比如 `anyOf [string, null]`）：把这个选项直接合并进来，结果就是 `type: string`
+  - 剩下的都是只写了 type 的简单选项（比如 `oneOf [integer, string]`）：写成 type 数组 `["integer","string"]`
+  - 选项是形状不同的对象这类复杂情况：不写 type（任何值都接受），在 description 里列出各选项，例如 `object(path), object(url)`
+  - 节点自己已经声明了 type 时保留原 type，选项只写进 description
+  - 清洗后的版本只给模型看；执行前校验参数用的是 server 原始 schema，不受清洗影响
 - 所有 mcp__ 工具默认都走 HITL + AuditLog
 - resources 有两种用法：作为虚拟工具调用，或在输入里用 @ 引用
 - CLI 首屏默认最多等 MCP 启动 8 秒，慢的 server 在后台继续初始化，状态保持 `starting`，可以用 `/mcp`、`/mcp logs <name>` 查看
@@ -588,6 +607,15 @@ Agnes 的 provider 名为 `agnes`，默认 Base URL 是 `https://apihub.agnes-ai
 - 摘要之前还有一档可恢复的“旧工具结果清理”（`ToolResultClearer`，参考 Anthropic context editing 的 `clear_tool_uses`）：`AutoCompactionManager.compactIfNeeded` 先看是否到了清理阈值，到了就把最近 `PAICLI_TOOL_RESULT_CLEARING_KEEP`（默认 3）条以外、长度 ≥ 400 字符的 tool 消息正文换成 `[已清理的旧工具结果] 工具 X 的这次输出……已从上下文清理……需要时重新调用该工具获取最新结果[；完整输出仍保存在 <卸载文件>]`。只替换正文，`tool_call_id` 和消息条数不变，tool_call/tool_result 的配对不受影响。阈值默认 `min(100k, 摘要阈值 × 0.6)`，并且总是低于摘要阈值（200k 和 1M 窗口都是 100k，128k 窗口约 57k）；`PAICLI_TOOL_RESULT_CLEARING_TRIGGER_TOKENS` 覆盖阈值，`PAICLI_TOOL_RESULT_CLEARING_EXCLUDE_TOOLS` 用逗号分隔要排除的工具，`PAICLI_TOOL_RESULT_CLEARING_ENABLED=false` 关闭。清理后如果已经低于摘要阈值，本轮就不再做摘要。system prompt 已经告诉模型：遇到占位文本时重新调用工具，或按路径读回卸载文件。清理会改变后续请求的前缀，prompt cache 会在清理点失效一次
 - 自动压缩阈值按 Claude Code 的做法，给摘要输出和安全余量预留空间：大窗口用 `window - 20k - 13k`，例如 200k 窗口约 167k 时触发、1M 窗口约 967k 时触发；小窗口的预留空间按比例缩小。
 - ReAct、Plan 单任务和 SubAgent 默认不设固定的迭代上限；`paicli.react.hard.max.iterations` 只在显式配置成正整数时生效。显式设置的轮数/Token 预算用完或命中停滞检测后，必须关闭工具，尽力做一次收尾，返回“部分完成”的结果，不能直接丢掉已经做完的工作。
+
+### 工具参数校验
+
+- 执行前统一校验（`ToolArgumentValidator`，基于 networknt json-schema-validator 1.5.x，Jackson 版本要和它对齐）。入口在 `ToolRegistry.doExecuteTool`；`HitlToolRegistry` 在弹确认框、调审查模型之前先查一遍，参数不合格的调用不让用户确认、不计入 auto 连续被拦次数
+- 参数为空字符串当作 `{}`；不是合法 JSON 时单独返回“不是合法的 JSON”并带上原文前 200 字符；不是 JSON 对象也直接拒绝；Schema 不合格时最多列 5 条字段级错误
+- 内置工具：参数仍以 `Map<String,String>` 交给工具，由工具自己解析、解析不了用默认值，所以单值参数之间不卡类型（字符串、数字、布尔互相接受），null 原样以 "null" 交给工具；只拦缺必填参数、传了对象 / 数组、不在 enum 里。这套语义是评测独立复算还原 read_file 看到内容的依据（F1/F2 的 `STRING_VALUES`、`BMP_DIGITS`、`NULL_DEFAULTS`），改之前要先改评测
+- 数值参数不加 `maximum` / `minimum`：工具现在会把超出范围的值收回到合法范围（如 `max_results` 最多 200），改成拒绝会让弱模型反复重试。`Param.oneOf(...)` 生成 enum，目前用在 `create_project.type` 和 `save_memory.scope`
+- MCP 工具：按 server 返回的原始 Schema（`McpToolDescriptor.validationSchema`）严格校验，`typeLoose` 让 `"5"` 这种带引号的数字算整数；null 值的参数校验时当作没传，转发给 server 的参数保持原样。不能用 `McpSchemaSanitizer` 清洗后的那份校验：它为了让模型看得懂，会去掉 `null` 选项、把复杂的 `anyOf` / `oneOf` 改成不限类型，校验会因此变松或变严。Schema 里有外部 `$ref` 时跳过校验（不联网加载），不认识的 `$schema` 地址去掉后按 2020-12 处理，编译失败也只记日志、跳过校验
+- 编译好的 Schema 按工具名缓存，按 Schema 对象引用判断是否需要重新编译（MCP `tools/list_changed` 后会换新 Schema）
 
 ### 工具结果处理细节
 

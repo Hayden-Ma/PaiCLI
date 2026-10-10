@@ -11,6 +11,13 @@ public interface McpTransport extends AutoCloseable {
 
     void onReceive(Consumer<JsonNode> listener);
 
+    /**
+     * transport 意外断开（例如 stdio 子进程自己退出了）时回调一次，参数是原因；主动 close 不触发。
+     * 注册时如果已经断开，立即回调。
+     */
+    default void onUnexpectedClose(Consumer<String> listener) {
+    }
+
     default List<String> stderrLines() {
         return List.of();
     }

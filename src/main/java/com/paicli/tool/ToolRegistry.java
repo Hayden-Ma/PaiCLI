@@ -59,6 +59,7 @@ import java.util.regex.PatternSyntaxException;
  */
 public class ToolRegistry {
     private static final ObjectMapper mapper = new ObjectMapper();
+    private final ToolArgumentValidator argumentValidator = new ToolArgumentValidator(mapper);
     private static final int DEFAULT_COMMAND_TIMEOUT_SECONDS = 60;
     private static final int DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS = 90;
     private static final int MAX_PARALLEL_TOOLS = 4;
@@ -680,7 +681,7 @@ public class ToolRegistry {
                 "创建新项目结构",
                 createParameters(
                         new Param("name", "string", "项目名称", true),
-                        new Param("type", "string", "项目类型 (java/python/node)", true)
+                        new Param("type", "string", "项目类型 (java/python/node)", true).oneOf("java", "python", "node")
                 ),
                 args -> {
                     String name = args.get("name");
@@ -957,7 +958,8 @@ public class ToolRegistry {
                         + "如果结果提示与已有记忆冲突，把两条都告诉用户并等待用户选择；只有用户明确选择后才可传 replace_id 或 keep_both 重新调用。",
                 createParameters(
                         new Param("fact", "string", "要长期保存的稳定事实或用户偏好，必须精炼、可跨会话复用", true),
-                        new Param("scope", "string", "记忆作用域：project 或 global。默认 project；跨项目长期偏好才用 global", false),
+                        new Param("scope", "string", "记忆作用域：project 或 global。默认 project；跨项目长期偏好才用 global", false)
+                                .oneOf("project", "global"),
                         new Param("replace_id", "string", "仅当用户明确选择用新内容替换某条冲突记忆时，传该旧记忆 id", false),
                         new Param("keep_both", "boolean", "仅当用户明确要求冲突的新旧两条都保留时传 true", false)
                 ),
@@ -1318,6 +1320,10 @@ public class ToolRegistry {
             ObjectNode prop = properties.putObject(param.name());
             prop.put("type", param.type());
             prop.put("description", param.description());
+            if (!param.allowedValues().isEmpty()) {
+                ArrayNode values = prop.putArray("enum");
+                param.allowedValues().forEach(values::add);
+            }
             if (param.required()) {
                 required.add(param.name());
             }
@@ -1427,8 +1433,17 @@ public class ToolRegistry {
         long start = System.nanoTime();
         BrowserAuditMetadata auditMetadata = null;
 
+        McpRegisteredTool mcpTool = mcpTools.get(name);
+        ToolArgumentValidator.Outcome checked = argumentValidator.check(name, validationSchema(tool, mcpTool), argumentsJson, mcpTool == null);
+        if (!checked.passed()) {
+            if (shouldAudit) {
+                auditLog.record(AuditLog.AuditEntry.error(
+                        name, argumentsJson, "参数校验失败", elapsedMillis(start), auditMetadata));
+            }
+            return ToolOutput.failure(checked.error());
+        }
+
         try {
-            McpRegisteredTool mcpTool = mcpTools.get(name);
             if (mcpTool != null) {
                 BrowserCheckResult browserCheck = checkBrowserTool(name, argumentsJson, false);
                 auditMetadata = browserCheck.metadata();
@@ -1460,9 +1475,8 @@ public class ToolRegistry {
                 return output;
             }
 
-            JsonNode args = mapper.readTree(argumentsJson);
             Map<String, String> argMap = new HashMap<>();
-            args.fields().forEachRemaining(entry ->
+            checked.arguments().fields().forEachRemaining(entry ->
                     argMap.put(entry.getKey(), entry.getValue().asText()));
             ToolOutput output;
             if ("web_search".equals(name)) {
@@ -1489,6 +1503,24 @@ public class ToolRegistry {
             }
             return ToolOutput.failure("工具执行失败: " + e.getMessage());
         }
+    }
+
+    /**
+     * 参数不合法时返回给模型的说明，合法返回 null。HITL 在弹确认框、调审查模型之前先查一遍，
+     * 免得让用户批准一个注定执行失败的调用；执行路径里还会再查一次，那次才是最终把关。
+     */
+    protected String argumentError(String name, String argumentsJson) {
+        Tool tool = tools.get(name);
+        if (tool == null) {
+            return null;
+        }
+        McpRegisteredTool mcpTool = mcpTools.get(name);
+        return argumentValidator.check(name, validationSchema(tool, mcpTool), argumentsJson, mcpTool == null).error();
+    }
+
+    /** MCP 工具按 server 返回的原始 Schema 校验：给模型看的那份清洗过，anyOf 之类会被改写，不能拿来判对错。 */
+    private static JsonNode validationSchema(Tool tool, McpRegisteredTool mcpTool) {
+        return mcpTool != null ? mcpTool.descriptor().validationSchema() : tool.parameters();
     }
 
     private static ToolOutput classifyTextOutput(String text) {
@@ -1930,7 +1962,16 @@ public class ToolRegistry {
     }
 
     // 记录定义
-    private record Param(String name, String type, String description, boolean required) {}
+    private record Param(String name, String type, String description, boolean required, List<String> allowedValues) {
+        Param(String name, String type, String description, boolean required) {
+            this(name, type, description, required, List.of());
+        }
+
+        /** 只能取这几个值；执行前按 Schema 的 enum 校验，取别的值会直接告诉模型 */
+        Param oneOf(String... values) {
+            return new Param(name, type, description, required, List.of(values));
+        }
+    }
 
     public record Tool(String name, String description, JsonNode parameters, ToolExecutor executor) {}
 

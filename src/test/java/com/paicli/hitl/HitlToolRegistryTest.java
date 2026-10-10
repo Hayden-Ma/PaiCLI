@@ -76,6 +76,18 @@ class HitlToolRegistryTest {
     }
 
     @Test
+    void invalidArgumentsAreRejectedBeforeAskingForApproval(@TempDir Path tempDir) {
+        StubHandler stub = new StubHandler(req -> ApprovalResult.approve());
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
+
+        String result = registry.executeTool("write_file", "{\"path\":\"a.txt\"}");
+
+        assertTrue(result.contains("缺少必填参数 content"), result);
+        assertEquals(0, stub.requestCount(), "注定失败的调用不该让用户确认");
+    }
+
+    @Test
     void skippedDecisionBlocksExecution(@TempDir Path tempDir) {
         Path target = tempDir.resolve("skipped.txt");
         StubHandler stub = new StubHandler(req -> ApprovalResult.skip());

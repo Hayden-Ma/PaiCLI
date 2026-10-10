@@ -13,7 +13,7 @@ AI 编码助手进入 PaiCLI 仓库时先读这个文件：Codex 直接读取，
 - 面向商业使用的 Java Agent 命令行工具，对标 Claude Code。已交付 23 期：ReAct → Plan+DAG → Memory → RAG → Multi-Agent → HITL → 并行工具 → 多模型 → 联网 → MCP → 长上下文 → Chrome DevTools → CDP 复用 → Skill → TUI → LSP 诊断 → Side-Git 快照 → Prompt 分层 → Runtime API → 图片输入 → 微信 iLink 文本消息（最小可用版）
 - 启动画面显示的版本是 `v16.1.0`，Maven 打出的 jar 是 `paicli-1.0-SNAPSHOT.jar`，两者不一致是正常的
 - `PAI.md` 是项目级记忆，启动时放进 system prompt，写团队共享、长期不变的规则；个人的、会变化的事实用 `/save` 存成长期记忆
-- 下一步：MCP 的 OAuth 登录、sampling、server 断线恢复
+- 下一步：MCP 的 OAuth 登录、sampling；面试题对齐升级的剩余项见 `docs/interview-upgrade-plan.md`
 - 配套教程和面试文章以 `docs/articles/` 为准，改完用 `tools/sync-articles-to-javabetter.sh` 同步到 javabetter.cn 的副本
 
 ### 评测（Native AgentBench）
@@ -60,7 +60,8 @@ src/main/java/com/paicli/
 - 内置工具 18 个：`read_file`、`write_file`、`edit_file`、`list_dir`、`glob_files`、`grep_code`、`execute_command`、`create_project`、`search_code`、`web_search`、`web_fetch`、`browser_connect`、`browser_disconnect`、`browser_status`、`save_memory`、`load_skill`、`save_skill_reference`、`revert_turn`。MCP 工具运行时注册，名字是 `mcp__{server}__{tool}`
 - `edit_file` 默认只替换唯一一处匹配的 `old_text`，`replace_all=true` 时全部替换。精确匹配失败后，逐行统一写法再匹配（NFKC、行尾空白、引号、横线、特殊空格）；还失败、并且片段每行都带着 read_file 输出的行号前缀时，去掉行号前缀再试一次。CRLF 文件保留原来的换行符。新建文件用 `write_file`
 - 读代码默认顺序：`glob_files` → `grep_code` → `read_file`；`search_code`（RAG）只用来做模糊的语义查找
-- MCP 配置合并 `~/.paicli/mcp.json` 和项目里的 `.paicli/mcp.json`；检测到 `STEP_API_KEY` 时自动加上 `step_search`
+- MCP 配置合并 `~/.paicli/mcp.json` 和项目里的 `.paicli/mcp.json`；检测到 `STEP_API_KEY` 时自动加上 `step_search`。项目级 server（包括覆盖用户级的同名 server）要 `/mcp trust` 确认后才启动，确认绑定配置内容指纹；stdio 子进程只继承 `McpChildEnvironment` 白名单里的环境变量，不要改回继承全部
+- stdio server 意外退出或连续 2 次 ping 不回（判定卡死）时，移除工具、结束整棵进程树，按 1s/2s/4s 自动重启，连续 3 次没救回来就停下等用户 `/mcp restart`；提示攒在 `McpServerManager.drainNotices()`，等下一个输入框前打印，不在后台线程直接输出。ping 只发给本地 stdio server，server 正在处理请求时跳过
 - 思考模型（DeepSeek Flash / V4 Pro、GLM-5.3、混元 Hy4、Kimi thinking）返回的思考内容 `reasoning_content` 必须在下一轮请求里带回去；各家接口差异和重试策略见 `docs/agents-reference.md`
 - 手动管理模型：`/model list [provider]`、`/model refresh <provider>`、`/model add <provider> <id> [--like <同供应商模型>]`；模型支持什么能力保存在 `providers.<provider>.models`。刷新只新增不删除，添加后不自动切换，不知道能力的模型按 128k 纯文本处理；用户主动切换后才生效，保存失败时保留原来的选择；不靠实际调用模型来探测它支持什么
 - DeepSeek 是默认供应商（`PaiCliConfig.defaultProvider`，多个 Key 都有时优先用 DeepSeek），默认模型 DeepSeek V4.1 Flash（模型 ID `deepseek-flash`），支持图片。官方旧名 `deepseek-v4-flash`、`deepseek-v4-flash-vision-exp` 现在也由 V4.1 Flash 提供服务，同样支持图片；它们只写成兼容说明，不作为单独的内置模型，刷新时也不新增，用户已有的选择和手动配置保留并注明对应关系。`deepseek-v4-pro` 仍然只支持文本。以前评测记录里写的模型标识不跟着改
@@ -85,6 +86,7 @@ src/main/java/com/paicli/
 
 - 三种执行方式都通过 `executeTools()` 执行工具，不要自己写循环挨个调用
 - 只有 `ToolRegistry.PARALLEL_SAFE_TOOLS` 里的只读工具可以并行（最多同时 4 个）；写文件、执行命令、MCP、`save_memory`、`revert_turn` 和不认识的工具都按原顺序一个一个执行。新增只读工具要加进这个名单。一批调用里只要有浏览器工具，整批都一个一个执行。结果按原来的顺序返回
+- 工具执行前按 JSON Schema 校验参数（`ToolArgumentValidator`），不合格就把字段级错误还给模型。内置工具只拦结构问题（缺参数、传了对象 / 数组、不在 enum 里），单值参数的类型和 null 仍由工具自己解析，评测复算依赖这套语义；MCP 工具按 server 的原始 Schema 严格校验，不能用清洗后给模型看的那份
 - 工具结果放进对话前，统一用 `ToolResultBoundary.wrap()` 包一层 `trust="untrusted-data"` 标记，表示这是外部数据，不代表允许做任何事；太大的结果由 `ToolResultOffloader` 写进 `.paicli/tool-outputs/`
 
 ### HITL（人工确认）与安全策略
@@ -169,7 +171,7 @@ src/main/java/com/paicli/
 
 ## 还没做到的
 
-- 还没有：通用的容器或虚拟机沙箱；MCP 的 OAuth 登录、sampling 和 server 自动重启。评测用的 `DOCKER_RELAY` 只是让评测彼此隔离，不改变交互式 PaiCLI 的安全措施
+- 还没有：通用的容器或虚拟机沙箱；MCP 的 OAuth 登录和 sampling；HTTP 类型 MCP server 的断线重连（自动重启只管 stdio 子进程）。评测用的 `DOCKER_RELAY` 只是让评测彼此隔离，不改变交互式 PaiCLI 的安全措施
 - 命令沙箱默认 off：沙箱里没有网络，也看不到 `~/.m2`、`~/.gitconfig`，所以 `mvn`、`npm install`、`git push` 会失败；在 Seatbelt 沙箱里 `java -version` 仍会以 139 退出
 - 不要把 `ROADMAP.md` 里“将来要做”的内容当成“现在已经有”
 
