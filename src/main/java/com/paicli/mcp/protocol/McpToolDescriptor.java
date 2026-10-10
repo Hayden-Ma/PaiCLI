@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 /**
  * @param inputSchema      清洗后给模型看的参数 Schema
- * @param validationSchema server 返回的原始 Schema，执行前按它校验参数（清洗会改写 anyOf 等，不能拿来判对错）
+ * @param validationSchema server 返回的原始 Schema，执行前按它校验参数（清洗会去掉 null 选项、把复杂的 anyOf / oneOf 放宽，不能拿来判对错）
  */
 public record McpToolDescriptor(
         String serverName,

@@ -856,7 +856,7 @@ I
 - `/export` - 导出当前 ReAct 会话对话记录为 Markdown（包含完整 system prompt），写入 `~/.paicli/exports/session-*.md`
 - `/resume` - 列出当前项目可以恢复的历史会话（最近 10 个，按最后使用时间排序）；`/resume <序号>` 恢复其中一个，接着那次对话继续提问。恢复的是普通对话（ReAct）的内容，会替换当前对话；最后一轮没跑完的部分不恢复，system prompt 按当前项目重新生成。只支持默认的 inline 命令行界面，只能恢复支持该命令的版本之后开始的会话
 - `/better-harness [quick|normal] [--inline]` - 审查当前项目的 AI 编码工作流；默认在 `.paicli/better-harness/` 生成 Markdown、HTML 和 findings JSON
-- `/index [路径]` - 索引代码库（默认当前目录）
+- `/index [路径]` - 索引代码库（默认当前目录）；增量进行，只重新处理内容变了的文件，删掉的文件自动清出索引
 - `/search <查询>` - 语义检索代码（RAG 辅助路径）
 - `/graph <类名>` - 查看代码关系图谱
 - `/clear` - 清空当前 ReAct 对话历史（含已注入的 Skill 正文）、Session Memory 预计算状态和上一轮检索记忆注入；长期记忆保留

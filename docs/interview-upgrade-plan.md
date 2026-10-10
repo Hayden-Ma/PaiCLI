@@ -19,7 +19,7 @@
 - [x] **执行前按 JSON Schema 统一校验参数**（文章 01 题）
   - 现状：`tool/ToolRegistry.java:1463-1466` 用 `readTree` 解析后把所有值 `asText()` 成字符串，没有通用的必填、类型、枚举校验，各工具自己临时检查；`Param` 记录（`:1933`）只有 name/type/description/required，生成的 Schema 没有 enum、范围；JSON 解析失败只返回 `"工具执行失败: " + 异常信息`；MCP 工具参数不做校验，原样发给 server（`mcp/McpClient.java:101-108`）
   - 目标：引入 networknt json-schema-validator，内置工具和 MCP 工具都在执行前按注册时的 Schema 校验；校验失败返回字段级错误（“参数 path 缺失”“max_results 必须是整数”）；JSON 解析失败单独返回“参数不是合法 JSON”并附上原文片段；`Param` 支持 enum 和数值范围
-  - 做法：内置工具只拦结构问题（缺参数、传了对象 / 数组、不在 enum 里），单值类型和 null 仍交给工具自己解析——评测 F1/F2 的独立复算按这套语义还原 read_file 看到的内容（`"  +1 "`、阿拉伯-印度数字、null 都有用例），严格卡类型会让复算和实际对不上；MCP 按原始 Schema 严格校验（`McpSchemaSanitizer` 会把 anyOf 改写成 object，不能用清洗后的那份）；数值参数不加范围，工具现在会把超范围的值收回到合法范围，改成拒绝反而让弱模型重试；enum 用在 `create_project.type`、`save_memory.scope`；Jackson 从 2.16 升到 2.18.3 与校验库对齐，`-Pquick` 失败名单和升级前完全一致
+  - 做法：内置工具只拦结构问题（缺参数、传了对象 / 数组、不在 enum 里），单值类型和 null 仍交给工具自己解析——评测 F1/F2 的独立复算按这套语义还原 read_file 看到的内容（`"  +1 "`、阿拉伯-印度数字、null 都有用例），严格卡类型会让复算和实际对不上；MCP 按原始 Schema 严格校验（`McpSchemaSanitizer` 清洗后的那份会去掉 null 选项、放宽复杂的 anyOf / oneOf，拿来校验会变松或变严）；数值参数不加范围，工具现在会把超范围的值收回到合法范围，改成拒绝反而让弱模型重试；enum 用在 `create_project.type`、`save_memory.scope`；Jackson 从 2.16 升到 2.18.3 与校验库对齐，`-Pquick` 失败名单和升级前完全一致
   - 注意：MCP server 的 Schema 可能写得不规范或用了较新的 draft，加载失败时跳过校验并记日志，不能让工具整个不可用；内置工具现在靠 `parseInt` 能接受 `"top_k": "5"` 这种字符串数字，严格校验会让弱模型反复重试，开启 `typeLoose`
 
 ## P1：MCP 生命周期
@@ -43,21 +43,25 @@
 
 ## P2：代码索引性能
 
-- [ ] **按文件哈希做增量索引**（文章 04 题）
+- [x] **按文件哈希做增量索引**（文章 04 题）
   - 现状：`rag/CodeIndex.java:104-108` 每次 `/index` 先 `clearProject()` 再全量重建，没有 hash/mtime 判断；所有 entry 先攒在内存里再统一落库（`:71-72`）；读取文件没有大小上限
   - 目标：`code_chunks` 记录文件内容哈希，只重建哈希变化的文件，删除文件对应的 chunk 和 relation；超过 1MB 的文件跳过；按文件分批落库
-- [ ] **Embedding 批量调用**（文章 04 题）
+- [x] **Embedding 批量调用**（文章 04 题）
   - 现状：`rag/EmbeddingClient.java:46-61` 每个 chunk 发一次 HTTP 请求
   - 目标：Ollama 用 `/api/embed` 的数组输入，OpenAI 兼容接口用数组 input，每批 10 条起
-- [ ] **并行解析**（文章 04 题）
+- [x] **并行解析**（文章 04 题）
   - 现状：`CodeIndex.java:77-102` 单线程顺序解析
   - 目标：每个线程用 ThreadLocal 持有自己的 JavaParser 实例（官方说明实例不是线程安全的），默认 4 个线程，可配置
+  - 做法：指纹单独存 `indexed_files` 表（文件路径 + SHA-256 + Embedding 模型），换模型全量重建，没有指纹的旧索引第一次整体重建；Java 文件只解析一次，分块和关系分析共用语法树；Embedding 跨文件攒批（默认 32 条），一批文件一个事务，某批失败时保留这些文件的旧索引、下次重试（原来 Ollama 没开时跑 /index 会把索引清空）
+  - 实测（本地 Ollama nomic-embed-text，pmhub 1892 个文件）：改动前全量 218.9 秒；改动后第一次全量 128.7 秒（4 个超 1MB 文件跳过），没改动再跑 0.8 秒。全量只快 1.7 倍，时间主要花在 Ollama 计算向量上
 
 ## P2：内存
 
-- [ ] **请求体流式写出**（文章 05 题）
+- [x] **请求体流式写出**（文章 05 题）
   - 现状：`llm/AbstractOpenAiCompatibleClient.java:112-113` 每轮把完整对话历史 `buildRequestBody(...).toString()` 成一个字符串，再交给 OkHttp 编码成字节数组，长上下文时在 G1 里是巨型对象
   - 目标：自定义 OkHttp `RequestBody`，在 `writeTo(BufferedSink)` 里用 Jackson `JsonGenerator` 直接写出
+  - 实测：PaiCLI 自己的源码当工具结果拼出约 1M token 的对话（350 万字符代码）加 3 张 1MB 截图，请求体 7.9MB；原做法每次请求分配 90.5MB（建树 4.7 + toString 54.5 + 转字节 31.3），`JsonRequestBody` 4.7MB，请求体逐字节一致
+  - 做法：先写一遍计数流拿长度，照常带 Content-Length，不用分块传输；emoji 用 `COMBINE_UNICODE_SURROGATES_IN_UTF8` 原样写出（默认会转义成代理对，内容等价但字节不同）
   - 注意：其他几项都有实测数据，这项还没有，先量 1M 上下文时请求体字符串多大再决定做不做；改完不再带 Content-Length、改走分块传输，个别代理网关可能不接受
 
 ## 同步修改

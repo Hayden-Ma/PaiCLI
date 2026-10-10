@@ -1518,7 +1518,7 @@ public class ToolRegistry {
         return argumentValidator.check(name, validationSchema(tool, mcpTool), argumentsJson, mcpTool == null).error();
     }
 
-    /** MCP 工具按 server 返回的原始 Schema 校验：给模型看的那份清洗过，anyOf 之类会被改写，不能拿来判对错。 */
+    /** MCP 工具按 server 返回的原始 Schema 校验：给模型看的那份清洗过（去掉 null 选项、放宽复杂的 anyOf），不能拿来判对错。 */
     private static JsonNode validationSchema(Tool tool, McpRegisteredTool mcpTool) {
         return mcpTool != null ? mcpTool.descriptor().validationSchema() : tool.parameters();
     }

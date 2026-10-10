@@ -41,6 +41,27 @@ class AbstractOpenAiCompatibleClientRetryTest {
     }
 
     @Test
+    void streamedBodyKeepsContentLengthAndIsResentIdenticallyOnRetry() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            TestClient client = client(server);
+            server.enqueue(new MockResponse().setResponseCode(503).setBody("temporary"));
+            server.enqueue(success("ok"));
+
+            client.chat(List.of(LlmClient.Message.user("中文内容 + emoji 😀 + \"quotes\"")), null);
+
+            okhttp3.mockwebserver.RecordedRequest first = server.takeRequest();
+            okhttp3.mockwebserver.RecordedRequest second = server.takeRequest();
+            String firstBody = first.getBody().readUtf8();
+            assertEquals(firstBody, second.getBody().readUtf8(), "重试要发同样的请求体");
+            assertEquals(String.valueOf(first.getBodySize()), first.getHeader("Content-Length"),
+                    "照常带准确的 Content-Length");
+            assertEquals(null, first.getHeader("Transfer-Encoding"), "不改成分块传输");
+            assertEquals("application/json; charset=utf-8", first.getHeader("Content-Type"));
+            assertTrue(firstBody.contains("emoji 😀"), "emoji 原样写出，不转义成代理对: " + firstBody);
+        }
+    }
+
+    @Test
     void doesNotRetryDeterministicHttpErrors() throws Exception {
         int[] deterministicStatuses = {400, 401, 403, 404, 501};
 

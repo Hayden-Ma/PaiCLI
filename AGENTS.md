@@ -13,7 +13,7 @@ AI 编码助手进入 PaiCLI 仓库时先读这个文件：Codex 直接读取，
 - 面向商业使用的 Java Agent 命令行工具，对标 Claude Code。已交付 23 期：ReAct → Plan+DAG → Memory → RAG → Multi-Agent → HITL → 并行工具 → 多模型 → 联网 → MCP → 长上下文 → Chrome DevTools → CDP 复用 → Skill → TUI → LSP 诊断 → Side-Git 快照 → Prompt 分层 → Runtime API → 图片输入 → 微信 iLink 文本消息（最小可用版）
 - 启动画面显示的版本是 `v16.1.0`，Maven 打出的 jar 是 `paicli-1.0-SNAPSHOT.jar`，两者不一致是正常的
 - `PAI.md` 是项目级记忆，启动时放进 system prompt，写团队共享、长期不变的规则；个人的、会变化的事实用 `/save` 存成长期记忆
-- 下一步：MCP 的 OAuth 登录、sampling；面试题对齐升级的剩余项见 `docs/interview-upgrade-plan.md`
+- 下一步：MCP 的 OAuth 登录、sampling。面试题对齐升级（`docs/interview-upgrade-plan.md`）已全部完成，里面记着各项的取舍和实测数据
 - 配套教程和面试文章以 `docs/articles/` 为准，改完用 `tools/sync-articles-to-javabetter.sh` 同步到 javabetter.cn 的副本
 
 ### 评测（Native AgentBench）
