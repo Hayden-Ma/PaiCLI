@@ -72,7 +72,7 @@ Streamable HTTP 走的是网络。Host 通过 HTTP POST 发 JSON-RPC 请求，Se
 
 核心就是一个 ConcurrentHashMap，key 是自增的请求 id，value 是 CompletableFuture。
 
-发请求时用自增 id 注册一个 Future，收到响应时按 id 找到对应的 Future 把结果填进去就完成配对了。同时还有超时兜底，超过一定时间没收到响应就自动报超时异常，防止 Future 永远挂着。
+发请求时用自增 id 注册一个 Future，收到响应时按 id 找到对应的 Future 把结果填进去就完成配对了。同时还有超时保护，超过一定时间没收到响应就自动报超时异常，防止 Future 永远挂着。
 
 完整的通信生命周期长这样：
 
@@ -118,7 +118,7 @@ PaiCLI 给每个 MCP 工具注册的时候，用的是 `mcp__server名__tool名`
 
 ### 06、MCP Server 启动失败或超时怎么处理
 
-这个问题实际开发中真的经常遇到，PaiCLI 做了好几层兜底。
+这个问题实际开发中真的经常遇到，PaiCLI 做了好几层保护。
 
 首先，initialize 设了 60 秒超时，不能让一个 Server 卡住把整个 Agent 的启动流程都堵了。
 
@@ -126,7 +126,11 @@ PaiCLI 给每个 MCP 工具注册的时候，用的是 `mcp__server名__tool名`
 
 启动期间每 5 秒打印一次等待状态，告诉用户"某某 Server 还没就绪"，别让人干等着不知道发生了什么。
 
-最后还有个 `/mcp restart` 命令，某个 Server 挂了可以单独重启，不用全部重来。
+启动之后 Server 也可能挂。本地子进程自己退出，PaiCLI 会马上让正在等它回复的请求失败（不用干等 60 秒超时），把它的工具从列表里拿掉，再按 1 秒、2 秒、4 秒的间隔自动重启，连续 3 次都没起来才停下来提示用户。进程还在但不回话的“假死”也要管：每 30 秒 ping 一次，连续两次不回就当卡死处理。Server 正在跑工具调用时不 ping，免得把忙着干活的单线程 Server 误杀。
+
+关的时候不能只杀根进程。`npx` 拉起的 Server 实际是 npx 下面再挂一个 node 进程，只结束 npx，node 就成了孤儿。所以 PaiCLI 关闭前先记下整棵进程树，从最底层的子进程开始结束。PaiCLI 自己被 `kill -9` 时来不及收尾，就靠一份 PID 记录在下次启动时清理；清理前会核对进程的启动时间和命令，因为 PID 会被系统复用，对不上的绝不动。
+
+最后还有个 `/mcp restart` 命令，自动重启放弃之后，可以手动单独重启某个 Server，不用全部重来。
 
 ![](https://cdn.paicoding.com/stutymore/paicli-interview-mcp-20260525184754.png)
 
@@ -194,7 +198,7 @@ MCP 是工具提供方的协议，解决的是"工具从哪来、长什么样、
 
 ![](https://cdn.paicoding.com/stutymore/paicli-interview-mcp-20260525190446.png)
 
-一句话总结：**MCP 管"工具从哪来"，Function Calling 管"LLM 怎么选"**。两个协议各管一段，合在一起才是完整的工具调用链路。
+一句话总结：**MCP 管"工具从哪来"，Function Calling 管"LLM 怎么选"**。两个协议各管一段，合在一起才是完整的工具调用过程。
 
 ### 12、MCP 的 schema 清洗是什么，为什么需要
 
@@ -206,7 +210,13 @@ MCP Server 返回的工具参数是标准 JSON Schema，但 LLM 不是 JSON Sche
 - **`anyOf`/`oneOf` 联合类型**，参数可以是 string 也可以是 number，LLM 选错类型的概率很高。
 - **超长 `description`**，有些 MCP Server 的工具描述写了几千字，把整个 API 文档塞进去了，LLM 被信息淹没反而搞不清核心参数。
 
-所以 PaiCLI 在注册工具时会自动做一轮清洗：`$ref` 直接展开或移除，`anyOf`/`oneOf` 转成自然语言描述放到 description 里，超长描述做截断。清洗后的 schema 对 LLM 更友好，参数生成的准确率也更高。
+所以 PaiCLI 在注册工具时会自动做一轮清洗：`$ref`、`$schema`、`$id` 直接删掉，超过 1000 字符的描述做截断。`anyOf` / `oneOf` 按真实类型尽量收起来，分三种情况：
+
+- 去掉 `{"type": "null"}` 选项后只剩一个选项（最常见的 `Optional[X]`），把这个选项的字段合并到当前节点；
+- 剩下的全是 `{"type": X}` 这种简单选项，写成一个 type 或者 type 数组，保留真实类型；
+- 其他复杂情况才不写 type，把各个选项列进 description 里。
+
+清洗后的 schema 对 LLM 更友好，参数生成的准确率也更高。但它把约束放宽或收紧了（去掉了 null 选项，复杂的 anyOf 也放开了），所以只给模型看；执行前校验参数时，用的是 server 返回的原始 Schema。
 
 ![](https://cdn.paicoding.com/stutymore/paicli-interview-mcp-20260525191537.png)
 

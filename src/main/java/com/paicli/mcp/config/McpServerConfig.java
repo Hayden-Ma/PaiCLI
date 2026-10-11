@@ -2,6 +2,7 @@ package com.paicli.mcp.config;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -15,6 +16,9 @@ public class McpServerConfig {
     private String url;
     private Map<String, String> headers = new LinkedHashMap<>();
     private boolean disabled;
+    // 来源只能由 McpConfigLoader 标记；不用 getter/setter 命名，避免配置文件里写同名字段把自己伪装成用户级
+    private Path projectConfigFile;
+    private String projectFingerprint;
 
     public String getCommand() {
         return command;
@@ -70,6 +74,24 @@ public class McpServerConfig {
 
     public boolean isHttp() {
         return url != null && !url.isBlank();
+    }
+
+    public void markProjectScoped(Path configFile, String fingerprint) {
+        this.projectConfigFile = configFile;
+        this.projectFingerprint = fingerprint;
+    }
+
+    /** 来自项目目录 .paicli/mcp.json 的 server：随仓库分发，启动前要用户确认。 */
+    public boolean projectScoped() {
+        return projectConfigFile != null;
+    }
+
+    public Path projectConfigFile() {
+        return projectConfigFile;
+    }
+
+    public String projectFingerprint() {
+        return projectFingerprint;
     }
 
     public String transportName() {

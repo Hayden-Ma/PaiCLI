@@ -2,6 +2,8 @@ package com.paicli.mcp;
 
 import com.paicli.mcp.config.McpConfigLoader;
 import com.paicli.mcp.config.McpServerConfig;
+import com.paicli.mcp.config.McpTrustStore;
+import com.paicli.mcp.transport.McpPidFile;
 import com.paicli.tool.ToolRegistry;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -42,7 +44,9 @@ class McpServerManagerTest {
         registry = new ToolRegistry();
         // 用空 config loader 占位，单独把 server 直接放进 manager（避开真实文件读取）
         manager = new McpServerManager(registry, tempDir,
-                new McpConfigLoader(tempDir.resolve("user.json"), tempDir.resolve("project.json"), tempDir));
+                new McpConfigLoader(tempDir.resolve("user.json"), tempDir.resolve("project.json"), tempDir),
+                new McpTrustStore(tempDir.resolve("mcp-trust.json")),
+                new McpPidFile(tempDir.resolve("mcp-pids.json")));
     }
 
     @AfterEach
@@ -82,6 +86,66 @@ class McpServerManagerTest {
 
         enqueuePromptsList();
         assertTrue(manager.prompts("demo").contains("Review (review)"));
+    }
+
+    @Test
+    void untrustedProjectServerIsNotStartedUntilTrusted(@TempDir Path trustDir) throws Exception {
+        McpTrustStore trustStore = new McpTrustStore(trustDir.resolve("mcp-trust.json"));
+        manager = new McpServerManager(registry, trustDir,
+                new McpConfigLoader(trustDir.resolve("user.json"), trustDir.resolve("project.json"), trustDir),
+                trustStore, new McpPidFile(trustDir.resolve("mcp-pids.json")));
+        Path projectConfig = trustDir.resolve("project.json");
+        McpServerConfig config = httpConfig(webServer);
+        config.markProjectScoped(projectConfig, McpConfigLoader.fingerprint(config));
+        loadServersFromMap(Map.of("repo", config));
+
+        manager.startAll();
+
+        McpServer server = manager.server("repo");
+        assertEquals(McpServerStatus.UNTRUSTED, server.status());
+        assertEquals(0, webServer.getRequestCount(), "确认前不能连 url / 起进程");
+        assertFalse(registry.hasTool("mcp__repo__echo"));
+        assertTrue(manager.untrustedStartupNote().contains("repo"));
+        assertTrue(manager.formatStatus().contains("/mcp trust"));
+        assertTrue(manager.restart("repo").contains("/mcp trust repo"), "restart 不能绕过确认");
+        assertTrue(manager.enable("repo").contains("/mcp trust repo"), "enable 不能绕过确认");
+        assertEquals(0, webServer.getRequestCount());
+
+        enqueueInitialize();
+        enqueueToolsList(toolJson("echo", "Echo back text"));
+        String result = manager.trust("repo");
+
+        assertTrue(result.contains("已启动"), result);
+        assertEquals(McpServerStatus.READY, server.status());
+        assertTrue(registry.hasTool("mcp__repo__echo"));
+        assertTrue(trustStore.isTrusted(projectConfig, "repo", McpConfigLoader.fingerprint(config)));
+        assertEquals("", manager.untrustedStartupNote());
+    }
+
+    @Test
+    void changedProjectConfigNeedsConfirmationAgain(@TempDir Path trustDir) throws Exception {
+        McpTrustStore trustStore = new McpTrustStore(trustDir.resolve("mcp-trust.json"));
+        manager = new McpServerManager(registry, trustDir,
+                new McpConfigLoader(trustDir.resolve("user.json"), trustDir.resolve("project.json"), trustDir),
+                trustStore, new McpPidFile(trustDir.resolve("mcp-pids.json")));
+        Path projectConfig = trustDir.resolve("project.json");
+        trustStore.trust(projectConfig, "repo", "old-fingerprint");
+        McpServerConfig config = httpConfig(webServer);
+        config.markProjectScoped(projectConfig, McpConfigLoader.fingerprint(config));
+        loadServersFromMap(Map.of("repo", config));
+
+        manager.startAll();
+
+        assertEquals(McpServerStatus.UNTRUSTED, manager.server("repo").status());
+        assertEquals(0, webServer.getRequestCount());
+    }
+
+    @Test
+    void trustOnUserServerIsANoOp() {
+        loadServersFromMap(Map.of("demo", httpConfig(webServer)));
+
+        assertTrue(manager.trust("demo").contains("无需确认"));
+        assertEquals(0, webServer.getRequestCount());
     }
 
     @Test

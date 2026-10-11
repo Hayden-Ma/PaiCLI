@@ -42,6 +42,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 
 /**
@@ -53,6 +54,8 @@ public class Agent {
     static final String UNEXECUTED_TOOL_CALL_NOTICE =
             "  ⚠ 上面有一段工具调用格式的文本没有被执行（本轮没有开放对应工具，或格式无法解析）；"
                     + "如果它是你要求展示的示例，可以忽略这条提示";
+    private static final java.util.regex.Pattern RESTORED_WEB_COMMAND = java.util.regex.Pattern.compile(
+            "(?i)(?:^|[;&|\\s\"])(?:curl|wget|httpie|lynx)(?:$|[\\s\"])");
     private LlmClient llmClient;
     private final ToolRegistry toolRegistry;
     private final List<LlmClient.Message> conversationHistory;
@@ -292,15 +295,18 @@ public class Agent {
                     renderer().appendToolCalls(
                             turnToolPolicy.visibleToolCalls(response.toolCalls(), toolExposure));
 
-                    List<ToolExecutionResult> toolResults = executeToolCalls(
-                            response.toolCalls(), iteration, turnToolPolicy, toolExposure);
+                    LoadedSkillMessages.Injection skills = LoadedSkillMessages.prepare(
+                            executeToolCalls(response.toolCalls(), iteration, turnToolPolicy, toolExposure),
+                            toolRegistry.getSkillRegistry(),
+                            conversationHistory);
+                    List<ToolExecutionResult> toolResults = skills.results();
                     for (ToolExecutionResult toolResult : toolResults) {
                         appendConversationMessage(
                                 LlmClient.Message.tool(toolResult.id(), ToolResultBoundary.wrap(toolResult)),
                                 "tool_execution");
                     }
                     appendImageToolMessages(toolResults);
-                    appendLoadedSkillMessage(toolResults);
+                    appendLoadedSkillMessage(skills.message());
                     runawayGuard.observe(toolResults).ifPresent(this::appendRunawayReminder);
                     pushStatus(budget, startNanos, "running");
 
@@ -423,7 +429,7 @@ public class Agent {
         autoCompactionManager.clear(conversationHistory);
         memoryManager.getExternalContextTracker().reset();
         conversationLedger.appendEvent(
-                "history_clear",
+                ConversationLedger.HISTORY_CLEAR_EVENT,
                 "react",
                 "agent",
                 "slash_clear",
@@ -432,6 +438,69 @@ public class Agent {
         appendConversationMessage(
                 LlmClient.Message.system(buildSystemPrompt("")),
                 "history_reset");
+    }
+
+    /**
+     * /resume：用以前某个会话的对话替换当前对话。system prompt 按当前项目重新生成，
+     * 恢复后的对话会作为检查点写进本次会话记录，所以本次会话之后也能再被恢复。
+     */
+    public void resumeConversation(String fromSessionId, List<LlmClient.Message> messages) {
+        autoCompactionManager.clear(conversationHistory);
+        memoryManager.getExternalContextTracker().reset();
+        conversationHistory.clear();
+        appendConversationMessage(
+                LlmClient.Message.system(buildSystemPrompt("")),
+                "history_reset");
+        if (messages != null) {
+            conversationHistory.addAll(messages);
+        }
+        recordRestoredExternalContext(conversationHistory);
+        recordViewCheckpoint("resume", Map.of("resumedFrom", fromSessionId == null ? "" : fromSessionId));
+    }
+
+    /** 恢复的对话里读过网页、浏览器、MCP 或 curl 结果时，照样暂停自动写记忆。 */
+    private void recordRestoredExternalContext(List<LlmClient.Message> messages) {
+        com.paicli.memory.ExternalContextTracker tracker = memoryManager.getExternalContextTracker();
+        for (LlmClient.Message message : messages) {
+            if ("user".equals(message.role())
+                    && message.content() != null
+                    && message.content().contains("<resource server=\"")) {
+                tracker.record("mcp_resource_mention");
+            }
+            if (message.toolCalls() == null) {
+                continue;
+            }
+            for (LlmClient.ToolCall toolCall : message.toolCalls()) {
+                if (toolCall == null || toolCall.function() == null) {
+                    continue;
+                }
+                String name = toolCall.function().name();
+                if (!tracker.recordToolResult(name)
+                        && "execute_command".equals(name)
+                        && toolCall.function().arguments() != null
+                        && RESTORED_WEB_COMMAND.matcher(toolCall.function().arguments()).find()) {
+                    tracker.record("execute_command(curl/wget)");
+                }
+            }
+        }
+    }
+
+    /**
+     * 压缩、清理和恢复会原地改写发给模型的对话，单靠逐条追加的消息无法还原，
+     * 所以把改写后的完整对话记一份。图片在下一轮本来就会被省略，这里不保存图片数据。
+     */
+    private void recordViewCheckpoint(String source, Map<String, Object> extra) {
+        if (!conversationLedger.isEnabled()) {
+            return;
+        }
+        List<LlmClient.Message> messages = conversationHistory.stream()
+                .skip(1)
+                .map(LlmClient.Message::withoutImageContent)
+                .toList();
+        Map<String, Object> metadata = new java.util.LinkedHashMap<>(extra);
+        metadata.put("messages", messages);
+        conversationLedger.appendEvent(
+                ConversationLedger.VIEW_CHECKPOINT_EVENT, "react", "agent", source, metadata);
     }
 
     /**
@@ -445,6 +514,7 @@ public class Agent {
             if (result.compacted()) {
                 recordCompaction("manual", beforeMessages, beforeTokens,
                         result.summaryMessage(), result.retainedMessages());
+                recordViewCheckpoint("manual_compaction", Map.of());
             }
             return new CompactionResult(result.compacted(), beforeTokens, estimateCurrentContextTokens(), null);
         } catch (Exception e) {
@@ -509,6 +579,9 @@ public class Agent {
                         : "完整对话摘要";
                 renderer().stream().println("📦 上下文接近窗口上限，已通过" + strategy + "压缩后继续。");
             }
+            if (result.clearedToolResults() > 0 || result.compacted()) {
+                recordViewCheckpoint("automatic_compaction", Map.of());
+            }
         } catch (Exception e) {
             log.warn("conversationHistory compaction failed", e);
         }
@@ -570,8 +643,7 @@ public class Agent {
     }
 
     /** load_skill 成功后，同一轮下一次 LLM 请求前就把 Skill 正文追加进历史。 */
-    private void appendLoadedSkillMessage(List<ToolExecutionResult> toolResults) {
-        String skills = LoadedSkillMessages.from(toolResults, toolRegistry.getSkillRegistry());
+    private void appendLoadedSkillMessage(String skills) {
         if (!skills.isEmpty()) {
             appendConversationMessage(LlmClient.Message.user(skills), "skill_injection");
         }

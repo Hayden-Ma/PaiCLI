@@ -1,6 +1,7 @@
 package com.paicli.rag;
 
 import java.sql.SQLException;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
@@ -11,6 +12,11 @@ import java.util.Map;
  * {@link ElasticsearchStore}（远程 ES8，HNSW kNN + BM25，RAG_STORE=es 启用）。
  * 两后端共用 {@link VectorStore.SearchResult} 等数据模型；
  * 关键词腿的相似度统一归一化到 [0.3, 0.8] 伪相似度区间，保证混合融合语义一致。
+ * <p>
+ * 批量接口（{@link #indexedFiles} / {@link #replaceFiles} / {@link #removeFiles}）是
+ * /index 的主路径；单文件接口（{@link #getFileHashes} / {@link #upsertFileHash} /
+ * {@link #deleteFileData} / {@link #insertChunks} / {@link #insertRelations}）保留给
+ * CodeRetriever 新鲜度判断和细粒度操作。
  */
 public interface RetrievalStore extends AutoCloseable {
 
@@ -27,6 +33,15 @@ public interface RetrievalStore extends AutoCloseable {
 
     /** 删除单文件的全部索引痕迹：代码块、以该文件为起点的关系、hash 记录 */
     void deleteFileData(String filePath) throws SQLException;
+
+    /** 当前项目已索引的文件及其内容指纹（内容 + Embedding 模型）；没有指纹的文件增量索引时重嵌 */
+    Map<String, VectorStore.IndexedFile> indexedFiles() throws SQLException;
+
+    /** 整体替换一批文件的索引：删旧块和关系、写新的、记指纹；失败时这批文件的旧索引保持原样 */
+    void replaceFiles(List<VectorStore.FileIndex> files) throws SQLException;
+
+    /** 删除一批文件的代码块、关系和指纹（文件已被删除或不再索引） */
+    void removeFiles(Collection<String> filePaths) throws SQLException;
 
     /** 语义检索：按查询向量返回最相似的 TopK（相似度 = cosine） */
     List<VectorStore.SearchResult> search(float[] queryEmbedding, int topK) throws SQLException;

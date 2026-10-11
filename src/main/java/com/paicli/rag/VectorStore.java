@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.sql.*;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -67,13 +68,16 @@ public class VectorStore implements RetrievalStore {
                 )
                 """;
 
-        // 文件 hash 表：增量索引用（记录每个文件索引时的内容指纹）
+        // 已索引文件的内容指纹：内容和 Embedding 模型都没变的文件，增量索引时跳过。
+        // content_hash 列给旧 API（getFileHashes/upsertFileHash，CodeRetriever 新鲜度判断）用；
+        // 老库已有的 content_hash 行通过 addColumnIfMissing 补出的新列值为 NULL，新列读时过滤。
         String createIndexedFiles = """
                 CREATE TABLE IF NOT EXISTS indexed_files (
                     project_path TEXT NOT NULL,
                     file_path TEXT NOT NULL,
-                    content_hash TEXT NOT NULL,
-                    indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    content_sha256 TEXT,
+                    embedding_model TEXT,
+                    content_hash TEXT,
                     PRIMARY KEY (project_path, file_path)
                 )
                 """;
@@ -85,6 +89,7 @@ public class VectorStore implements RetrievalStore {
         String createIdxRelProject = "CREATE INDEX IF NOT EXISTS idx_rel_project ON code_relations(project_path)";
         String createIdxRelFrom = "CREATE INDEX IF NOT EXISTS idx_rel_from ON code_relations(from_name)";
         String createIdxRelTo = "CREATE INDEX IF NOT EXISTS idx_rel_to ON code_relations(to_name)";
+        String createIdxRelFile = "CREATE INDEX IF NOT EXISTS idx_rel_from_file ON code_relations(project_path, from_file)";
 
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(createChunks);
@@ -93,12 +98,19 @@ public class VectorStore implements RetrievalStore {
             // 旧库迁移：补行号列（已存在时 SQLite 报 duplicate column，忽略）
             addColumnIfMissing(stmt, "code_chunks", "start_line", "INTEGER DEFAULT 0");
             addColumnIfMissing(stmt, "code_chunks", "end_line", "INTEGER DEFAULT 0");
+            // 老版本的 indexed_files 只有 content_hash：补新列后旧行指纹为 NULL，
+            // indexedFiles() 读不到会触发整体重建，getFileHashes() 则回退读 content_hash
+            addColumnIfMissing(stmt, "indexed_files", "content_sha256", "TEXT");
+            addColumnIfMissing(stmt, "indexed_files", "embedding_model", "TEXT");
+            addColumnIfMissing(stmt, "indexed_files", "content_hash", "TEXT");
             stmt.execute(createIdxProject);
             stmt.execute(createIdxFile);
             stmt.execute(createIdxType);
             stmt.execute(createIdxRelProject);
             stmt.execute(createIdxRelFrom);
             stmt.execute(createIdxRelTo);
+            stmt.execute(createIndexedFiles);
+            stmt.execute(createIdxRelFile);
         }
     }
 
@@ -133,7 +145,11 @@ public class VectorStore implements RetrievalStore {
      * 读取当前项目已索引文件的 content hash（file_path → sha256）
      */
     public Map<String, String> getFileHashes() throws SQLException {
-        String sql = "SELECT file_path, content_hash FROM indexed_files WHERE project_path = ?";
+        // content_sha256 是新 API（replaceFiles）写的指纹；老库和旧 API（upsertFileHash）只有 content_hash
+        String sql = """
+                SELECT file_path, COALESCE(NULLIF(content_sha256, ''), content_hash) AS hash
+                FROM indexed_files WHERE project_path = ? AND COALESCE(NULLIF(content_sha256, ''), content_hash) IS NOT NULL
+                """;
         Map<String, String> hashes = new HashMap<>();
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, projectPath);
@@ -147,19 +163,23 @@ public class VectorStore implements RetrievalStore {
     }
 
     /**
-     * 记录/更新单文件的内容 hash
+     * 记录/更新单文件的内容 hash（CodeRetriever 新鲜度判断用）。
+     * 同值写入 content_sha256，embedding_model 记为 unknown：增量索引遇到该行会重新嵌入。
      */
     public void upsertFileHash(String filePath, String contentHash) throws SQLException {
         String sql = """
-                INSERT INTO indexed_files (project_path, file_path, content_hash, indexed_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO indexed_files (project_path, file_path, content_sha256, embedding_model, content_hash)
+                VALUES (?, ?, ?, 'unknown', ?)
                 ON CONFLICT(project_path, file_path)
-                DO UPDATE SET content_hash = excluded.content_hash, indexed_at = CURRENT_TIMESTAMP
+                DO UPDATE SET content_sha256 = excluded.content_sha256,
+                              embedding_model = excluded.embedding_model,
+                              content_hash = excluded.content_hash
                 """;
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, projectPath);
             ps.setString(2, filePath);
             ps.setString(3, contentHash);
+            ps.setString(4, contentHash);
             ps.executeUpdate();
         }
     }
@@ -168,21 +188,103 @@ public class VectorStore implements RetrievalStore {
      * 删除单个文件的全部索引痕迹：代码块、以该文件为起点的关系、hash 记录
      */
     public void deleteFileData(String filePath) throws SQLException {
-        String deleteChunks = "DELETE FROM code_chunks WHERE project_path = ? AND file_path = ?";
-        String deleteRelations = "DELETE FROM code_relations WHERE project_path = ? AND from_file = ?";
-        String deleteIndexedFiles = "DELETE FROM indexed_files WHERE project_path = ? AND file_path = ?";
-        try (PreparedStatement ps1 = connection.prepareStatement(deleteChunks);
-             PreparedStatement ps2 = connection.prepareStatement(deleteRelations);
-             PreparedStatement ps3 = connection.prepareStatement(deleteIndexedFiles)) {
-            ps1.setString(1, projectPath);
-            ps1.setString(2, filePath);
-            ps2.setString(1, projectPath);
-            ps2.setString(2, filePath);
-            ps3.setString(1, projectPath);
-            ps3.setString(2, filePath);
-            ps1.executeUpdate();
-            ps2.executeUpdate();
-            ps3.executeUpdate();
+        inTransaction(() -> deleteFileRows(List.of(filePath)));
+    }
+
+    /** 当前项目已索引的文件及其内容指纹（老库旧行指纹为 NULL，读不到会触发整体重建）。 */
+    public Map<String, IndexedFile> indexedFiles() throws SQLException {
+        String sql = """
+                SELECT file_path, content_sha256, embedding_model FROM indexed_files
+                WHERE project_path = ? AND content_sha256 IS NOT NULL AND embedding_model IS NOT NULL
+                """;
+        Map<String, IndexedFile> files = new HashMap<>();
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, projectPath);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    files.put(rs.getString("file_path"),
+                            new IndexedFile(rs.getString("content_sha256"), rs.getString("embedding_model")));
+                }
+            }
+        }
+        return files;
+    }
+
+    /**
+     * 整体替换一批文件的索引：删掉这些文件旧的代码块和关系，写入新的，并记下内容指纹。
+     * 一批文件放在同一个事务里，中途失败整批回滚，旧索引保持原样。
+     */
+    public void replaceFiles(List<FileIndex> files) throws SQLException {
+        inTransaction(() -> {
+            deleteFileRows(files.stream().map(FileIndex::filePath).toList());
+            List<CodeChunkEntry> entries = new ArrayList<>();
+            List<CodeRelation> relations = new ArrayList<>();
+            files.forEach(file -> {
+                entries.addAll(file.entries());
+                relations.addAll(file.relations());
+            });
+            insertChunkRows(entries);
+            insertRelationRows(relations);
+            String sql = """
+                    INSERT OR REPLACE INTO indexed_files (project_path, file_path, content_sha256, embedding_model, content_hash)
+                    VALUES (?, ?, ?, ?, ?)
+                    """;
+            try (PreparedStatement ps = connection.prepareStatement(sql)) {
+                for (FileIndex file : files) {
+                    ps.setString(1, projectPath);
+                    ps.setString(2, file.filePath());
+                    ps.setString(3, file.contentSha256());
+                    ps.setString(4, file.embeddingModel());
+                    ps.setString(5, file.contentSha256());
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+        });
+    }
+
+    /** 删除文件对应的代码块、关系和指纹（文件已被删除或不再索引）。 */
+    public void removeFiles(Collection<String> filePaths) throws SQLException {
+        if (filePaths.isEmpty()) {
+            return;
+        }
+        inTransaction(() -> deleteFileRows(filePaths));
+    }
+
+    private void deleteFileRows(Collection<String> filePaths) throws SQLException {
+        String[] sqls = {
+                "DELETE FROM code_chunks WHERE project_path = ? AND file_path = ?",
+                "DELETE FROM code_relations WHERE project_path = ? AND from_file = ?",
+                "DELETE FROM indexed_files WHERE project_path = ? AND file_path = ?"
+        };
+        for (String sql : sqls) {
+            try (PreparedStatement ps = connection.prepareStatement(sql)) {
+                for (String filePath : filePaths) {
+                    ps.setString(1, projectPath);
+                    ps.setString(2, filePath);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+        }
+    }
+
+    @FunctionalInterface
+    private interface SqlWork {
+        void run() throws SQLException;
+    }
+
+    private void inTransaction(SqlWork work) throws SQLException {
+        boolean autoCommit = connection.getAutoCommit();
+        connection.setAutoCommit(false);
+        try {
+            work.run();
+            connection.commit();
+        } catch (SQLException | RuntimeException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(autoCommit);
         }
     }
 
@@ -190,12 +292,14 @@ public class VectorStore implements RetrievalStore {
      * 批量插入代码块（事务保护）
      */
     public void insertChunks(List<CodeChunkEntry> entries) throws SQLException {
+        inTransaction(() -> insertChunkRows(entries));
+    }
+
+    private void insertChunkRows(List<CodeChunkEntry> entries) throws SQLException {
         String sql = """
                 INSERT INTO code_chunks (project_path, file_path, chunk_type, name, content, embedding_json, start_line, end_line)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """;
-        boolean autoCommit = connection.getAutoCommit();
-        connection.setAutoCommit(false);
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             for (CodeChunkEntry entry : entries) {
                 ps.setString(1, projectPath);
@@ -209,12 +313,6 @@ public class VectorStore implements RetrievalStore {
                 ps.addBatch();
             }
             ps.executeBatch();
-            connection.commit();
-        } catch (SQLException e) {
-            connection.rollback();
-            throw e;
-        } finally {
-            connection.setAutoCommit(autoCommit);
         }
     }
 
@@ -222,12 +320,14 @@ public class VectorStore implements RetrievalStore {
      * 批量插入代码关系（事务保护）
      */
     public void insertRelations(List<CodeRelation> relations) throws SQLException {
+        inTransaction(() -> insertRelationRows(relations));
+    }
+
+    private void insertRelationRows(List<CodeRelation> relations) throws SQLException {
         String sql = """
                 INSERT INTO code_relations (project_path, from_file, from_name, to_file, to_name, relation_type)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """;
-        boolean autoCommit = connection.getAutoCommit();
-        connection.setAutoCommit(false);
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             for (CodeRelation rel : relations) {
                 ps.setString(1, projectPath);
@@ -239,12 +339,6 @@ public class VectorStore implements RetrievalStore {
                 ps.addBatch();
             }
             ps.executeBatch();
-            connection.commit();
-        } catch (SQLException e) {
-            connection.rollback();
-            throw e;
-        } finally {
-            connection.setAutoCommit(autoCommit);
         }
     }
 
@@ -460,6 +554,13 @@ public class VectorStore implements RetrievalStore {
             this(filePath, chunkType, name, content, similarity, 0, 0, stale);
         }
     }
+
+    /** 已索引文件的内容指纹和当时用的 Embedding 模型。 */
+    public record IndexedFile(String contentSha256, String embeddingModel) {}
+
+    /** 一个文件的完整索引内容。 */
+    public record FileIndex(String filePath, String contentSha256, String embeddingModel,
+                            List<CodeChunkEntry> entries, List<CodeRelation> relations) {}
 
     /**
      * 索引统计

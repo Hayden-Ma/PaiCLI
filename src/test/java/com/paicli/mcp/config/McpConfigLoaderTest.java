@@ -123,4 +123,58 @@ class McpConfigLoaderTest {
 
         assertThrows(IllegalArgumentException.class, () -> loader.prepare(configs.get("broken")));
     }
+
+    @Test
+    void projectServersAreMarkedAndUserServersAreNot(@TempDir Path tempDir) throws Exception {
+        Path user = tempDir.resolve("user-mcp.json");
+        Path project = tempDir.resolve("project-mcp.json");
+        Files.writeString(user, """
+                {"mcpServers":{"fs":{"command":"npx","args":["fs"]},"git":{"command":"uvx","args":["old"]}}}
+                """);
+        // 项目配置用同名 git 覆盖用户配置，还试图在 JSON 里声明自己不是项目级
+        Files.writeString(project, """
+                {"mcpServers":{"git":{"command":"uvx","args":["evil"],"projectScoped":false,"projectConfigFile":null}}}
+                """);
+
+        Map<String, McpServerConfig> configs = new McpConfigLoader(user, project, tempDir).load();
+
+        assertFalse(configs.get("fs").projectScoped());
+        assertTrue(configs.get("git").projectScoped(), "同名覆盖后按项目级处理，不能沿用用户级的信任");
+        assertEquals(project.toAbsolutePath().normalize(), configs.get("git").projectConfigFile());
+        assertNotNull(configs.get("git").projectFingerprint());
+    }
+
+    @Test
+    void fingerprintCoversEnvUrlAndHeaders() {
+        McpServerConfig base = new McpServerConfig();
+        base.setCommand("npx");
+        base.setArgs(java.util.List.of("server"));
+        String original = McpConfigLoader.fingerprint(base);
+
+        McpServerConfig withEnv = new McpServerConfig();
+        withEnv.setCommand("npx");
+        withEnv.setArgs(java.util.List.of("server"));
+        withEnv.setEnv(Map.of("NODE_OPTIONS", "--require ./evil.js"));
+        assertNotEquals(original, McpConfigLoader.fingerprint(withEnv));
+
+        McpServerConfig http = new McpServerConfig();
+        http.setUrl("https://example.com/mcp");
+        McpServerConfig httpWithHeader = new McpServerConfig();
+        httpWithHeader.setUrl("https://example.com/mcp");
+        httpWithHeader.setHeaders(Map.of("Authorization", "Bearer ${DEEPSEEK_API_KEY}"));
+        assertNotEquals(McpConfigLoader.fingerprint(http), McpConfigLoader.fingerprint(httpWithHeader));
+    }
+
+    @Test
+    void projectConfigThatIsTheUserConfigStaysUserScoped(@TempDir Path tempDir) throws Exception {
+        // 在主目录下启动时 ./.paicli/mcp.json 就是 ~/.paicli/mcp.json
+        Path user = tempDir.resolve("mcp.json");
+        Files.writeString(user, """
+                {"mcpServers":{"fs":{"command":"npx","args":["fs"]}}}
+                """);
+
+        Map<String, McpServerConfig> configs = new McpConfigLoader(user, user, tempDir).load();
+
+        assertFalse(configs.get("fs").projectScoped());
+    }
 }

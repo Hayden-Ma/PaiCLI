@@ -229,6 +229,17 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesResumeSlashCommand() {
+        CliCommandParser.ParsedCommand list = CliCommandParser.parse("/resume");
+        CliCommandParser.ParsedCommand pick = CliCommandParser.parse("/resume  2 ");
+
+        assertEquals(CliCommandParser.CommandType.RESUME, list.type());
+        assertNull(list.payload());
+        assertEquals(CliCommandParser.CommandType.RESUME, pick.type());
+        assertEquals("2", pick.payload());
+    }
+
+    @Test
     void parsesBetterHarnessSlashCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/better-harness");
 
@@ -467,7 +478,7 @@ class CliCommandParserTest {
     @Test
     void parsesResumeCommands() {
         assertEquals(CliCommandParser.CommandType.RESUME, CliCommandParser.parse("/resume").type());
-        assertEquals("list", CliCommandParser.parse("/resume").payload());
+        assertNull(CliCommandParser.parse("/resume").payload());
         assertEquals(CliCommandParser.CommandType.RESUME, CliCommandParser.parse("/resume session-123").type());
         assertEquals("session-123", CliCommandParser.parse("/resume session-123").payload());
     }
@@ -480,6 +491,9 @@ class CliCommandParserTest {
         assertEquals(CliCommandParser.CommandType.MCP_LOGS, CliCommandParser.parse("/mcp logs filesystem").type());
         assertEquals(CliCommandParser.CommandType.MCP_DISABLE, CliCommandParser.parse("/mcp disable filesystem").type());
         assertEquals(CliCommandParser.CommandType.MCP_ENABLE, CliCommandParser.parse("/mcp enable filesystem").type());
+        assertEquals(CliCommandParser.CommandType.MCP_TRUST, CliCommandParser.parse("/mcp trust filesystem").type());
+        assertEquals("filesystem", CliCommandParser.parse("/mcp trust filesystem").payload());
+        assertEquals("", CliCommandParser.parse("/mcp trust").payload());
         assertEquals(CliCommandParser.CommandType.MCP_RESOURCES, CliCommandParser.parse("/mcp resources filesystem").type());
         assertEquals("filesystem", CliCommandParser.parse("/mcp resources filesystem").payload());
         assertEquals(CliCommandParser.CommandType.MCP_PROMPTS, CliCommandParser.parse("/mcp prompts filesystem").type());
@@ -540,6 +554,13 @@ class CliCommandParserTest {
         CliCommandParser.ParsedCommand off = CliCommandParser.parse("/skill off verbose-debug");
         assertEquals(CliCommandParser.CommandType.SKILL_OFF, off.type());
         assertEquals("verbose-debug", off.payload());
+    }
+
+    @Test
+    void parsesSkillTrustCommand() {
+        CliCommandParser.ParsedCommand trust = CliCommandParser.parse("/skill trust deploy-checklist");
+        assertEquals(CliCommandParser.CommandType.SKILL_TRUST, trust.type());
+        assertEquals("deploy-checklist", trust.payload());
     }
 
     @Test

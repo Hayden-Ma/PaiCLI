@@ -9,6 +9,7 @@ import org.junit.jupiter.api.condition.OS;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -122,9 +123,10 @@ class StdioTransportTest {
     }
 
     @Test
-    void invalidJsonOnStdoutDoesNotCrashTransport() throws Exception {
-        // 子进程先输出一行非 JSON，再输出一行合法 JSON，验证非法行被 swallow
-        String script = "echo 'not-json'; echo '{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ok\"}'";
+    void nonJsonStdoutLineIsSkippedAndReaderKeepsWorking() throws Exception {
+        // 先等一行 stdin 再输出，保证 listener 已注册；日志行和非对象 JSON 都要跳过，后面的消息照常收到
+        String script = "read x; echo 'Server started on stdio'; echo '42'; "
+                + "echo '{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ok\"}'; sleep 1";
         StdioTransport transport = new StdioTransport(
                 "sh", List.of("-c", script), Map.of(), null);
         try {
@@ -134,11 +136,125 @@ class StdioTransportTest {
                     received.countDown();
                 }
             });
-            // 当前实现：解析失败会让 stdout reader 退出，所以可能拿不到第二条。
-            // 这里只断言 transport 仍可被 close 不抛异常即可，确认坏 JSON 不会让进程级 crash。
-            assertDoesNotThrow(() -> Thread.sleep(300));
+            transport.send(MAPPER.readTree("{}"));
+
+            assertTrue(received.await(3, TimeUnit.SECONDS), "非 JSON 行之后的消息应照常收到");
+            String logs = String.join("\n", transport.stderrLines());
+            assertTrue(logs.contains("Server started on stdio"), logs);
+            assertFalse(logs.contains("stdout reader stopped"), logs);
         } finally {
-            assertDoesNotThrow(transport::close);
+            transport.close();
         }
+    }
+
+    @Test
+    void listenerExceptionDoesNotStopReader() throws Exception {
+        String script = "read x; echo '{\"id\":1,\"method\":\"boom\"}'; echo '{\"id\":2,\"method\":\"ok\"}'; sleep 1";
+        StdioTransport transport = new StdioTransport(
+                "sh", List.of("-c", script), Map.of(), null);
+        try {
+            CountDownLatch received = new CountDownLatch(1);
+            transport.onReceive(node -> {
+                if ("boom".equals(node.path("method").asText())) {
+                    throw new IllegalStateException("handler failed");
+                }
+                received.countDown();
+            });
+            transport.send(MAPPER.readTree("{}"));
+            assertTrue(received.await(3, TimeUnit.SECONDS));
+        } finally {
+            transport.close();
+        }
+    }
+
+    @Test
+    void childGetsWhitelistedAndConfiguredEnvOnly() throws Exception {
+        String script = "read x; printf '{\"path\":\"%s\",\"token\":\"%s\"}\\n' \"$PATH\" \"$MY_TOKEN\"; sleep 1";
+        StdioTransport transport = new StdioTransport(
+                "sh", List.of("-c", script), Map.of("MY_TOKEN", "abc"), null);
+        try {
+            CountDownLatch received = new CountDownLatch(1);
+            AtomicReference<JsonNode> holder = new AtomicReference<>();
+            transport.onReceive(node -> {
+                holder.set(node);
+                received.countDown();
+            });
+            transport.send(MAPPER.readTree("{}"));
+            assertTrue(received.await(3, TimeUnit.SECONDS));
+            assertFalse(holder.get().path("path").asText().isBlank(), "PATH 应保留");
+            assertEquals("abc", holder.get().path("token").asText(), "配置里的 env 应传给子进程");
+        } finally {
+            transport.close();
+        }
+    }
+
+    @Test
+    void closeAlsoKillsChildThatOutlivesTheRootProcess() throws Exception {
+        // 模拟 npx：根进程拉起一个子进程，自己在 stdin EOF 后退出，子进程不管 EOF 继续跑
+        String script = "read x; sleep 60 & echo \"{\\\"pid\\\":$!}\"; cat";
+        StdioTransport transport = new StdioTransport("sh", List.of("-c", script), Map.of(), null);
+        CountDownLatch received = new CountDownLatch(1);
+        AtomicReference<Long> childPid = new AtomicReference<>();
+        transport.onReceive(node -> {
+            childPid.set(node.path("pid").asLong());
+            received.countDown();
+        });
+        transport.send(MAPPER.readTree("{}"));
+        assertTrue(received.await(3, TimeUnit.SECONDS));
+        ProcessHandle child = ProcessHandle.of(childPid.get()).orElseThrow();
+        assertTrue(child.isAlive());
+
+        transport.close();
+
+        child.onExit().get(3, TimeUnit.SECONDS);
+        assertFalse(child.isAlive(), "根进程退出后，它拉起的子进程也要被结束");
+    }
+
+    @Test
+    void unexpectedExitNotifiesListenersButCloseDoesNot() throws Exception {
+        StdioTransport crashing = new StdioTransport("sh", List.of("-c", "read x; exit 3"), Map.of(), null);
+        CompletableFuture<String> reason = new CompletableFuture<>();
+        crashing.onUnexpectedClose(reason::complete);
+        crashing.send(MAPPER.readTree("{}"));
+        assertTrue(reason.get(3, TimeUnit.SECONDS).contains("exit code 3"));
+        // 已经退出后再注册，立即回调
+        CompletableFuture<String> late = new CompletableFuture<>();
+        crashing.onUnexpectedClose(late::complete);
+        assertTrue(late.isDone());
+        crashing.close();
+
+        StdioTransport normal = new StdioTransport("sh", List.of("-c", "cat"), Map.of(), null);
+        CompletableFuture<String> closed = new CompletableFuture<>();
+        normal.onUnexpectedClose(closed::complete);
+        normal.close();
+        Thread.sleep(200);
+        assertFalse(closed.isDone(), "主动关闭不算意外断开");
+    }
+
+    @Test
+    void pendingRequestFailsAsSoonAsProcessExits() throws Exception {
+        StdioTransport transport = new StdioTransport("sh", List.of("-c", "read x; exit 3"), Map.of(), null);
+        com.paicli.mcp.jsonrpc.JsonRpcClient client = new com.paicli.mcp.jsonrpc.JsonRpcClient(transport);
+        long start = System.currentTimeMillis();
+
+        IOException error = assertThrows(IOException.class,
+                () -> client.request("tools/list", MAPPER.createObjectNode(), 30));
+
+        assertTrue(System.currentTimeMillis() - start < 5000, "不能等到 30 秒超时");
+        assertTrue(error.getMessage().contains("exit code 3"), error.getMessage());
+        assertThrows(IOException.class, () -> client.request("ping", MAPPER.createObjectNode(), 30),
+                "断开后的新请求直接失败");
+        client.close();
+    }
+
+    @Test
+    void processTreeIsRecordedInPidFileAndRemovedOnClose(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
+        java.nio.file.Path file = dir.resolve("mcp-pids.json");
+        StdioTransport transport = new StdioTransport("sh", List.of("-c", "cat"), Map.of(), null, new McpPidFile(file));
+        assertTrue(java.nio.file.Files.readString(file).contains(String.valueOf(transport.processId())));
+
+        transport.close();
+
+        assertFalse(java.nio.file.Files.readString(file).contains(String.valueOf(transport.processId())));
     }
 }

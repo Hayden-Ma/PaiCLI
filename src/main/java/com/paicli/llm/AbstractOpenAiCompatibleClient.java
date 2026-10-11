@@ -109,10 +109,7 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
             throw new IOException("LLM request cancelled");
         }
         StreamListener streamListener = listener == null ? StreamListener.NO_OP : listener;
-        RequestBody body = RequestBody.create(
-                buildRequestBody(messages, tools).toString(),
-                MediaType.parse("application/json")
-        );
+        RequestBody body = new JsonRequestBody(buildRequestBody(messages, tools));
 
         Request.Builder request = new Request.Builder()
                 .url(getApiUrl())

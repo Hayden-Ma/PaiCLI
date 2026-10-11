@@ -2,6 +2,7 @@ package com.paicli.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paicli.memory.InternalUserMessages;
 import com.paicli.tool.ToolRegistry.ToolExecutionResult;
 
 import java.nio.charset.StandardCharsets;
@@ -114,10 +115,12 @@ public final class RunawayGuard {
 
     private String reminder(Signal signal) {
         String guidance = switch (signal) {
-            case EXACT_ACTION_REPEAT -> "[runaway guard] 同一个工具调用（参数完全相同）已经连续出现 " + remindAfter
+            case EXACT_ACTION_REPEAT -> InternalUserMessages.RUNAWAY_REMINDER_PREFIX
+                    + " 同一个工具调用（参数完全相同）已经连续出现 " + remindAfter
                     + " 次。不要再原样重复。先看已经拿到的结果，然后换一个策略并说明预期会带来什么具体变化，"
                     + "或者说明卡在了哪里。重复本身不能说明任务已经完成，也不能说明任务无法完成。";
-            case SAME_ERROR_FAMILY -> "[runaway guard] 同一类工具错误已经连续出现 " + remindAfter
+            case SAME_ERROR_FAMILY -> InternalUserMessages.RUNAWAY_REMINDER_PREFIX
+                    + " 同一类工具错误已经连续出现 " + remindAfter
                     + " 次。不要原样重试同一条路。先分析原因，改变一个可控的变量，或者换一条路。"
                     + "不要因为这个信号就断定整个任务失败了。";
         };

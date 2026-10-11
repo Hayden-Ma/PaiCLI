@@ -793,8 +793,12 @@ public class PlanExecuteAgent {
             // 被 HITL 提示"跨过"导致 🧠 / 🤖 标题与内容错位
             streamRenderer.resetBetweenIterations();
 
-            List<ToolExecutionResult> toolResults = executeToolCalls(
-                    task.getId(), iteration, response.toolCalls(), taskToolPolicy, toolExposure, observation);
+            LoadedSkillMessages.Injection skills = LoadedSkillMessages.prepare(
+                    executeToolCalls(task.getId(), iteration, response.toolCalls(), taskToolPolicy,
+                            toolExposure, observation),
+                    toolRegistry.getSkillRegistry(),
+                    messages);
+            List<ToolExecutionResult> toolResults = skills.results();
             for (ToolExecutionResult toolResult : toolResults) {
                 allResults.append(toolResult.result()).append("\n");
                 appendTaskMessage(
@@ -804,7 +808,7 @@ public class PlanExecuteAgent {
                         LlmClient.Message.tool(toolResult.id(), ToolResultBoundary.wrap(toolResult)));
             }
             appendImageToolMessages(messages, toolResults, actor);
-            appendLoadedSkillMessage(messages, toolResults, actor);
+            appendLoadedSkillMessage(messages, skills.message(), actor);
             runawayGuard.observe(toolResults).ifPresent(reminder -> {
                 appendTaskMessage(messages, actor, "runaway_reminder", LlmClient.Message.user(reminder));
                 out.println(AnsiStyle.subtle("  ↻ [" + task.getId() + "] 检测到重复的工具调用，已提醒模型换个思路"));
@@ -813,10 +817,7 @@ public class PlanExecuteAgent {
     }
 
     /** load_skill 成功后，本任务的下一次 LLM 请求前就把 Skill 正文追加进任务消息。 */
-    private void appendLoadedSkillMessage(List<LlmClient.Message> messages,
-                                          List<ToolExecutionResult> toolResults,
-                                          String actor) {
-        String skills = LoadedSkillMessages.from(toolResults, toolRegistry.getSkillRegistry());
+    private void appendLoadedSkillMessage(List<LlmClient.Message> messages, String skills, String actor) {
         if (!skills.isEmpty()) {
             appendTaskMessage(messages, actor, "skill_injection", LlmClient.Message.user(skills));
         }

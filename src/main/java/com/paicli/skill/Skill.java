@@ -44,6 +44,11 @@ public record Skill(
         }
     }
 
+    /** Skill 根目录；SKILL.md 里的 references/、scripts/ 相对路径都以它为基准。 */
+    public Path directory() {
+        return skillMdPath == null ? null : skillMdPath.toAbsolutePath().normalize().getParent();
+    }
+
     public String displaySource() {
         return switch (source) {
             case BUILTIN -> "builtin";

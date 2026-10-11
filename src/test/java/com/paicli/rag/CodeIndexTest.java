@@ -23,7 +23,7 @@ class CodeIndexTest {
     @Test
     void testIndexCurrentProject() {
         System.setProperty("paicli.rag.dir", "/tmp/paicli-test-rag-index");
-        CodeIndex indexer = new CodeIndex();
+        CodeIndex indexer = new CodeIndex(new StubEmbeddingClient());
         // 索引测试资源目录
         CodeIndex.IndexResult result = indexer.index("src/test/resources/rag");
         assertTrue(result.chunkCount() > 0, "应该至少索引一个代码块");
@@ -33,7 +33,7 @@ class CodeIndexTest {
     @Test
     void reportsProgressThroughListener() {
         List<String> messages = new ArrayList<>();
-        CodeIndex indexer = new CodeIndex(messages::add);
+        CodeIndex indexer = new CodeIndex(new StubEmbeddingClient(), messages::add);
 
         CodeIndex.IndexResult result = indexer.index("src/test/resources/rag");
 

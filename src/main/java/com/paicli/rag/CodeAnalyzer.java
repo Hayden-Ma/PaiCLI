@@ -1,8 +1,5 @@
 package com.paicli.rag;
 
-import com.github.javaparser.JavaParser;
-import com.github.javaparser.ParserConfiguration;
-import com.github.javaparser.ParseResult;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.ImportDeclaration;
 import com.github.javaparser.ast.Node;
@@ -29,23 +26,22 @@ import java.util.Optional;
  * - contains：类包含方法
  */
 public class CodeAnalyzer {
-    private final JavaParser parser = new JavaParser(
-            new ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17));
-
     /**
      * 分析单个 Java 文件，提取所有代码关系
      */
     public List<CodeRelation> analyzeFile(Path filePath) throws IOException {
-        String content = Files.readString(filePath);
+        return analyze(filePath, JavaSourceParser.parse(Files.readString(filePath)));
+    }
+
+    /** 分析已经解析好的语法树；解析失败（empty）时没有关系可提取。 */
+    List<CodeRelation> analyze(Path filePath, Optional<CompilationUnit> javaUnit) {
         String relativePath = filePath.toString();
         List<CodeRelation> relations = new ArrayList<>();
-
-        ParseResult<CompilationUnit> result = parser.parse(content);
-        if (!result.isSuccessful() || result.getResult().isEmpty()) {
+        if (javaUnit.isEmpty()) {
             return relations;
         }
 
-        CompilationUnit cu = result.getResult().get();
+        CompilationUnit cu = javaUnit.get();
 
         // 提取导入关系
         extractImports(relativePath, cu, relations);

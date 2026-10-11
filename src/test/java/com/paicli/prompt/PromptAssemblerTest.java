@@ -40,6 +40,30 @@ class PromptAssemblerTest {
     }
 
     @Test
+    void ordersSectionsFromMostToLeastStableSoPrefixCacheSurvivesQueryChanges() {
+        PromptAssembler assembler = PromptAssembler.createDefault();
+        PromptContext.Builder shared = PromptContext.builder()
+                .projectMemoryContext("## PAI.md 项目记忆\n- 项目规则")
+                .skillIndex("## 可用 Skills\n- web-access");
+
+        String first = assembler.assemble(PromptMode.AGENT, shared.memoryContext("## 相关记忆\n第一条输入的记忆").build());
+        String second = assembler.assemble(PromptMode.AGENT, shared.memoryContext("## 相关记忆\n第二条输入的记忆").build());
+
+        assertTrue(first.indexOf("## Context Management") < first.indexOf("## Handoff"));
+        assertTrue(first.indexOf("## Handoff") < first.indexOf("## Skills"));
+        assertTrue(first.indexOf("## Skills") < first.indexOf("## Runtime Context"));
+        assertTrue(first.indexOf("## Runtime Context") < first.indexOf("## Project Context"));
+
+        int commonPrefix = 0;
+        while (commonPrefix < Math.min(first.length(), second.length())
+                && first.charAt(commonPrefix) == second.charAt(commonPrefix)) {
+            commonPrefix++;
+        }
+        assertTrue(commonPrefix > first.indexOf("## Project Context"),
+                "随查询变化的记忆之前的内容都应保持一致，前缀缓存才能命中");
+    }
+
+    @Test
     void builtinPromptRequiresClarificationAndGroundedWebUrls() {
         PromptAssembler assembler = PromptAssembler.createDefault();
 

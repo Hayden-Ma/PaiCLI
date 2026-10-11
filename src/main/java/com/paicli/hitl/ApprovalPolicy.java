@@ -10,6 +10,7 @@ import java.util.Set;
  * - 写入/执行类操作（write_file、edit_file、execute_command）需要确认，有潜在破坏性
  * - create_project 属于写入操作，默认需要确认
  * - revert_turn 会批量回写工作区文件，默认需要确认
+ * - save_skill_reference 写用户级 Skill 参考资料，与 write_file 同档，只在 /hitl on 后确认
  * - MCP 工具来自外部 server，默认都需要确认
  */
 public class ApprovalPolicy {
@@ -20,7 +21,8 @@ public class ApprovalPolicy {
             "edit_file",
             "execute_command",
             "create_project",
-            "revert_turn"
+            "revert_turn",
+            "save_skill_reference"
     );
 
     // 交互式 CLI 默认就要确认的高危操作：执行命令、批量回滚，以及全部 MCP 工具（见 requiresConfirmationByDefault）
@@ -56,6 +58,7 @@ public class ApprovalPolicy {
             case "revert_turn" -> "🔴 高危";
             case "write_file", "edit_file" -> "🟡 中危";
             case "create_project" -> "🟡 中危";
+            case "save_skill_reference" -> "🟡 中危";
             default -> isMcpTool(toolName) ? "🟡 MCP" : "🟢 安全";
         };
     }
@@ -70,6 +73,7 @@ public class ApprovalPolicy {
             case "write_file" -> "将写入或覆盖文件内容，原有内容将丢失";
             case "edit_file" -> "将替换文件中唯一匹配的原文片段";
             case "create_project" -> "将在磁盘上创建新目录和文件";
+            case "save_skill_reference" -> "将写入用户级 Skill 参考资料 ~/.paicli/skills/<name>/references/，后续会话会读到这些内容";
             default -> isMcpTool(toolName)
                     ? "将调用外部 MCP server 提供的工具，可能访问网络、文件或第三方服务"
                     : "安全的只读操作";

@@ -124,7 +124,10 @@ public class SessionMemoryCompactor {
                 return false;
             }
 
-            List<LlmClient.Message> delta = new ArrayList<>(history.subList(coveredUntil, preserveFrom));
+            // Skill 正文压缩后由模型按需重新加载，runaway 提醒只对当次任务有效，二者都不进入会话记忆
+            List<LlmClient.Message> delta = history.subList(coveredUntil, preserveFrom).stream()
+                    .filter(message -> !InternalUserMessages.isInternal(message))
+                    .toList();
             if (delta.isEmpty()) {
                 return false;
             }
@@ -256,6 +259,7 @@ public class SessionMemoryCompactor {
         int count = 0;
         for (LlmClient.Message message : messages) {
             if (("user".equals(message.role()) || "assistant".equals(message.role()))
+                    && !InternalUserMessages.isInternal(message)
                     && message.content() != null && !message.content().isBlank()) {
                 count++;
             }

@@ -17,6 +17,7 @@ import java.security.MessageDigest;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -261,18 +262,78 @@ public class ElasticsearchStore implements RetrievalStore {
 
     @Override
     public void upsertFileHash(String filePath, String contentHash) throws SQLException {
+        upsertFileHash(filePath, contentHash, "unknown");
+    }
+
+    private void upsertFileHash(String filePath, String contentHash, String embeddingModel) throws SQLException {
         ensureIndices();
         ObjectNode doc = MAPPER.createObjectNode();
         doc.put("project", projectPath);
         doc.put("doc_type", "file_hash");
         doc.put("file_path", filePath);
         doc.put("content_hash", contentHash);
+        doc.put("embedding_model", embeddingModel);
 
         // 确定性 _id：同文件重复 upsert 覆盖旧值
         String docId = md5Hex(projectPath + "|" + filePath);
         Response response = http("PUT", "/" + metaIndex + "/_doc/" + docId + "?refresh=true", doc.toString());
         if (!response.isSuccessful()) {
             throw new SQLException("ES 写入 hash 失败: " + safeBody(response));
+        }
+    }
+
+    @Override
+    public Map<String, VectorStore.IndexedFile> indexedFiles() throws SQLException {
+        ensureIndices();
+        ObjectNode body = MAPPER.createObjectNode();
+        ObjectNode hashBool = boolQuery();
+        hashBool.set("filter", filterArray(
+                termDoc("project", projectPath),
+                termDoc("doc_type", "file_hash")));
+        body.set("query", wrapBool(hashBool));
+        body.put("size", MAX_HASH_ENTRIES);
+
+        JsonNode hits = search(metaIndex, body);
+        Map<String, VectorStore.IndexedFile> files = new HashMap<>();
+        for (JsonNode hit : hits) {
+            JsonNode source = hit.path("_source");
+            files.put(source.path("file_path").asText(),
+                    new VectorStore.IndexedFile(
+                            source.path("content_hash").asText(),
+                            source.path("embedding_model").asText("unknown")));
+        }
+        return files;
+    }
+
+    @Override
+    public void replaceFiles(List<VectorStore.FileIndex> files) throws SQLException {
+        ensureIndices();
+        // ES 没有跨文档事务：先删后写，中途失败抛出后由调用方整批回退逐文件重试，
+        // 失败文件保留旧索引（deleteFileData 已删的会重新写入）
+        for (VectorStore.FileIndex file : files) {
+            deleteFileData(file.filePath());
+        }
+        List<VectorStore.CodeChunkEntry> entries = new ArrayList<>();
+        List<CodeRelation> relations = new ArrayList<>();
+        for (VectorStore.FileIndex file : files) {
+            entries.addAll(file.entries());
+            relations.addAll(file.relations());
+        }
+        if (!entries.isEmpty()) {
+            insertChunks(entries);
+        }
+        if (!relations.isEmpty()) {
+            insertRelations(relations);
+        }
+        for (VectorStore.FileIndex file : files) {
+            upsertFileHash(file.filePath(), file.contentSha256(), file.embeddingModel());
+        }
+    }
+
+    @Override
+    public void removeFiles(Collection<String> filePaths) throws SQLException {
+        for (String filePath : filePaths) {
+            deleteFileData(filePath);
         }
     }
 

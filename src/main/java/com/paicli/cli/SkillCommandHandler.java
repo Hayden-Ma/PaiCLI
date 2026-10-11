@@ -38,13 +38,14 @@ final class SkillCommandHandler {
             boolean isEnabled = enabled.contains(skill);
             String name = (isEnabled ? "● " : "○ ") + skill.name();
             rows.add(List.of(isEnabled ? AnsiStyle.section(name) : AnsiStyle.subtle(name),
-                    skill.displaySource(), skill.version() == null ? "—" : skill.version(),
+                    sourceLabel(registry, skill), skill.version() == null ? "—" : skill.version(),
                     abbreviate(skill.description(), 48)));
         }
         return AnsiStyle.emphasis("Skills · " + enabled.size() + "/" + all.size() + " 启用") + "\n\n"
                 + TerminalTable.render(List.of("Skill", "来源", "版本", "摘要"), rows, TerminalTable.columns())
-                + "\n\n" + AnsiStyle.subtle("● 启用 · ○ 停用") + "\n"
-                + TerminalTable.wrap("详情：/skill show <name>\n启停：/skill on/off <name>", TerminalTable.columns());
+                + "\n\n" + AnsiStyle.subtle("● 启用 · ○ 停用 · project（未信任）的正文只作为不可信数据交给模型") + "\n"
+                + TerminalTable.wrap("详情：/skill show <name>\n启停：/skill on/off <name>\n信任项目级：/skill trust <name>",
+                TerminalTable.columns());
     }
 
     static String show(SkillRegistry registry, String name) {
@@ -96,6 +97,36 @@ final class SkillCommandHandler {
         }
         stateStore.disable(name);
         return "⏸️ 已禁用 skill: " + name + "（已写入 ~/.paicli/skills.json，下一轮 LLM 调用生效）";
+    }
+
+    /**
+     * 项目级 Skill 随仓库分发，信任前正文只作为不可信数据交给模型。用户先用 /skill show 看过正文再信任，
+     * 信任绑定当前正文指纹，仓库更新改动正文后需要重新信任。
+     */
+    static String trust(SkillRegistry registry, String name) {
+        if (name == null || name.isBlank()) {
+            return "❌ 请提供 skill 名称，例如 /skill trust deploy-checklist";
+        }
+        Skill skill = registry.findAnySkill(name);
+        if (skill == null) {
+            return "❌ Skill 未找到: " + name + "（用 /skill list 查看可用 skill）";
+        }
+        if (skill.source() != Skill.Source.PROJECT) {
+            return "ℹ️ " + name + " 是" + skill.displaySource() + " skill，由你自己安装，无需信任";
+        }
+        if (registry.isTrusted(skill)) {
+            return "ℹ️ 项目级 skill " + name + " 的当前正文已信任";
+        }
+        registry.trust(skill);
+        return "🔓 已信任项目级 skill: " + name + "（" + skill.skillMdPath() + "）\n"
+                + "   之后加载时正文作为可信指引注入；SKILL.md 正文改动后需要重新信任";
+    }
+
+    private static String sourceLabel(SkillRegistry registry, Skill skill) {
+        if (skill.source() != Skill.Source.PROJECT) {
+            return skill.displaySource();
+        }
+        return registry.isTrusted(skill) ? "project（已信任）" : "project（未信任）";
     }
 
     private static String abbreviate(String s, int max) {

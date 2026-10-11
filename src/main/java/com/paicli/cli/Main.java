@@ -189,17 +189,21 @@ public class Main {
         }
     }
 
-    private record KeyReadResult(Integer key, boolean ignoredControlSequence) {
+    private record KeyReadResult(Integer key, boolean ignoredControlSequence, String pastedText) {
         static KeyReadResult keyPressed(int key) {
-            return new KeyReadResult(key, false);
+            return new KeyReadResult(key, false, null);
         }
 
         static KeyReadResult ignoredSequence() {
-            return new KeyReadResult(null, true);
+            return new KeyReadResult(null, true, null);
         }
 
         static KeyReadResult unavailable() {
-            return new KeyReadResult(null, false);
+            return new KeyReadResult(null, false, null);
+        }
+
+        static KeyReadResult pasted(String text) {
+            return new KeyReadResult(null, false, text);
         }
     }
 
@@ -320,6 +324,7 @@ public class Main {
                 }
                 mcpServerManager.loadConfiguredServers();
                 mcpServerManager.startAll(ui, mcpStartupWait());
+                startupNote = appendStartupNote(startupNote, mcpServerManager.untrustedStartupNote());
                 Runtime.getRuntime().addShutdownHook(new Thread(mcpServerManager::close, "paicli-mcp-shutdown"));
             } catch (Exception e) {
                 startupNote = "MCP 初始化失败: " + e.getMessage();
@@ -376,9 +381,13 @@ public class Main {
                 resuming = false;
                 try {
                     conversationLedger = ConversationLedger.openDefault(home);
+                    // metadata 同时带两套字段：cwd/createdAt 供 SessionCatalog（--continue）使用，
+                    // channel/projectPath 供 SessionResume（/resume 按项目过滤）使用。
                     conversationLedger.appendEvent(
                             SessionCatalog.START_EVENT, "react", "cli", "startup",
-                            Map.of("cwd", projectCwd,
+                            Map.of("channel", "cli",
+                                    "projectPath", projectCwd,
+                                    "cwd", projectCwd,
                                     "createdAt", System.currentTimeMillis(),
                                     "provider", llmClient.getProviderName(),
                                     "model", llmClient.getModelName()));
@@ -386,7 +395,7 @@ public class Main {
                     conversationLedger = ConversationLedger.disabled();
                     startupNote = appendStartupNote(
                             startupNote,
-                            "原始会话账本初始化失败: " + e.getMessage());
+                            "会话记录文件初始化失败（本次会话不会被保存，/resume 也找不回）: " + e.getMessage());
                 }
             }
 
@@ -465,6 +474,12 @@ public class Main {
 
             while (true) {
                 refreshTerminalColumns(terminal);
+                List<String> mcpNotices = mcpServerManager.drainNotices();
+                if (!mcpNotices.isEmpty()) {
+                    mcpNotices.forEach(ui::println);
+                    ui.println();
+                    renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistryRef.get(), "idle"));
+                }
                 PromptInput promptInput;
                 try {
                     promptInput = readPromptInput(terminal, lineReader, renderer,
@@ -773,10 +788,6 @@ public class Main {
                         printRestoreCommand(ui, reactAgent.getToolRegistry().getSnapshotService(), command.payload());
                         continue;
                     }
-                    case RESUME -> {
-                        printResumeCommand(ui, historyDir, command.payload());
-                        continue;
-                    }
                     case MCP_LIST -> {
                         ui.println(mcpServerManager.formatStatus());
                         ui.println();
@@ -798,6 +809,11 @@ public class Main {
                     }
                     case MCP_ENABLE -> {
                         printMcpCommandResult(ui, mcpServerManager.enable(command.payload()));
+                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        continue;
+                    }
+                    case MCP_TRUST -> {
+                        printMcpCommandResult(ui, mcpServerManager.trust(command.payload()));
                         renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
@@ -843,6 +859,10 @@ public class Main {
                     case SKILL_OFF -> {
                         ui.println(SkillCommandHandler.disable(skillRegistry, skillStateStore, command.payload()));
                         renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
+                        continue;
+                    }
+                    case SKILL_TRUST -> {
+                        ui.println(SkillCommandHandler.trust(skillRegistry, command.payload()));
                         continue;
                     }
                     case SKILL_RELOAD -> {
@@ -936,6 +956,16 @@ public class Main {
                     }
                     case EXPORT -> {
                         handleExportCommand(ui, reactAgent);
+                        continue;
+                    }
+                    case RESUME -> {
+                        ResumeCommandHandler.Result result =
+                                ResumeCommandHandler.handle(reactAgent, command.payload());
+                        ui.println(result.output());
+                        if (result.restored()) {
+                            hitlHandler.clearApprovedAll();
+                        }
+                        renderer.updateStatus(statusInfo(reactAgent, mcpServerManager, skillRegistry, "idle"));
                         continue;
                     }
                     case INDEX_CODE -> {
@@ -1822,12 +1852,20 @@ public class Main {
         out.println("   - 回车：按当前计划执行");
         out.println("   - Ctrl+O：展开完整计划");
         out.println("   - ESC：折叠或取消本次计划");
-        out.println("   - I：输入补充要求后重新规划\n");
+        out.println("   - I：输入补充要求，在当前计划上修改\n");
 
         while (true) {
             KeyReadResult keyReadResult = readSingleKeyFromTerminal(terminal);
             if (keyReadResult.ignoredControlSequence()) {
                 continue;
+            }
+
+            // 审阅时粘贴的内容按补充要求处理：预填进“补充>”，用户确认后回车再提交
+            if (keyReadResult.pastedText() != null) {
+                out.println();
+                String supplementInput = lineReader.readLine(
+                        "补充> ", null, (MaskingCallback) null, keyReadResult.pastedText()).trim();
+                return mapReviewDecision(PlanReviewInputParser.parse(supplementInput));
             }
 
             Integer key = keyReadResult.key();
@@ -1903,12 +1941,19 @@ public class Main {
                     if (escapeSequenceType == EscapeSequenceType.STANDALONE_ESC) {
                         return KeyReadResult.keyPressed(27);
                     }
-                    if (escapeSequenceType == EscapeSequenceType.CONTROL_SEQUENCE
-                            || escapeSequenceType == EscapeSequenceType.BRACKETED_PASTE) {
+                    if (escapeSequenceType == EscapeSequenceType.BRACKETED_PASTE) {
+                        return pastedOrIgnored(readBracketedPaste(terminal, escapeSequence));
+                    }
+                    if (escapeSequenceType == EscapeSequenceType.CONTROL_SEQUENCE) {
                         return KeyReadResult.ignoredSequence();
                     }
                 }
 
+                // 人手按键之间远大于 20ms；紧跟着还有输入，说明是没开 bracketed paste 时的粘贴
+                String burst = readInputBurst(terminal, 20, 25, 500);
+                if (!burst.isEmpty()) {
+                    return pastedOrIgnored(Character.toString((char) key) + burst);
+                }
                 return KeyReadResult.keyPressed(key);
             } finally {
                 terminal.setAttributes(originalAttributes);
@@ -1960,16 +2005,7 @@ public class Main {
         }
 
         if (escapeSequenceType == EscapeSequenceType.BRACKETED_PASTE) {
-            String pastedText = sequence.substring(BRACKETED_PASTE_BEGIN.length());
-            while (!pastedText.contains(BRACKETED_PASTE_END)) {
-                String burst = readInputBurst(terminal, 30, 25, 500);
-                if (burst.isEmpty()) {
-                    break;
-                }
-                pastedText += burst;
-            }
-
-            return PrefillResult.seed(prepareSeedBuffer(stripBracketedPasteEndMarker(pastedText)));
+            return PrefillResult.seed(prepareSeedBuffer(readBracketedPaste(terminal, sequence)));
         }
 
         if (escapeSequenceType == EscapeSequenceType.CONTROL_SEQUENCE) {
@@ -1977,6 +2013,26 @@ public class Main {
         }
 
         return PrefillResult.canceledInput();
+    }
+
+    /** 读完一次 bracketed paste（可能跨多个输入突发），返回去掉首尾标记的原文。 */
+    private static String readBracketedPaste(Terminal terminal, String sequence)
+            throws IOException, InterruptedException {
+        String pastedText = sequence.substring(BRACKETED_PASTE_BEGIN.length());
+        while (!pastedText.contains(BRACKETED_PASTE_END)) {
+            String burst = readInputBurst(terminal, 30, 25, 500);
+            if (burst.isEmpty()) {
+                break;
+            }
+            pastedText += burst;
+        }
+        return stripBracketedPasteEndMarker(pastedText);
+    }
+
+    /** 粘贴内容去掉末尾换行后作为补充要求预填；只粘了空白就当没按键。 */
+    private static KeyReadResult pastedOrIgnored(String rawPaste) {
+        String text = prepareSeedBuffer(rawPaste).stripTrailing();
+        return text.isBlank() ? KeyReadResult.ignoredSequence() : KeyReadResult.pasted(text);
     }
 
     private static String readInputBurst(Terminal terminal, long firstWaitMs, long idleWaitMs, long maxWaitMs)
@@ -2071,6 +2127,7 @@ public class Main {
                 new SlashCommandHint("/mcp logs ", "/mcp logs <name>", "查看 MCP server 日志"),
                 new SlashCommandHint("/mcp disable ", "/mcp disable <name>", "禁用 MCP server"),
                 new SlashCommandHint("/mcp enable ", "/mcp enable <name>", "启用 MCP server"),
+                new SlashCommandHint("/mcp trust ", "/mcp trust <name>", "确认并启动项目级 MCP server"),
                 new SlashCommandHint("/mcp resources ", "/mcp resources <name>", "查看 MCP resources"),
                 new SlashCommandHint("/mcp prompts ", "/mcp prompts <name>", "查看 MCP prompts"),
                 new SlashCommandHint("/policy", "/policy", "查看安全策略状态"),
@@ -2081,8 +2138,6 @@ public class Main {
                 new SlashCommandHint("/snapshot status", "/snapshot status", "查看 Side-Git 快照状态"),
                 new SlashCommandHint("/snapshot clean", "/snapshot clean", "清理当前项目 Side-Git 快照"),
                 new SlashCommandHint("/restore ", "/restore <N>", "恢复到最近第 N 个 pre-turn 快照"),
-                new SlashCommandHint("/resume", "/resume", "列出可恢复的历史会话"),
-                new SlashCommandHint("/resume ", "/resume <session-id>", "恢复指定会话（需重启生效）"),
                 new SlashCommandHint("/index", "/index", "增量索引当前代码库（跳过未变更文件）"),
                 new SlashCommandHint("/index ", "/index [--full] [路径]", "索引指定路径；--full 清空全量重建"),
                 new SlashCommandHint("/search ", "/search <查询>", "语义检索代码（RAG 辅助）"),
@@ -2106,6 +2161,7 @@ public class Main {
                 new SlashCommandHint("/skill show ", "/skill show <name>", "查看 SKILL.md 全文"),
                 new SlashCommandHint("/skill on ", "/skill on <name>", "启用 skill"),
                 new SlashCommandHint("/skill off ", "/skill off <name>", "禁用 skill"),
+                new SlashCommandHint("/skill trust ", "/skill trust <name>", "信任当前项目的项目级 skill"),
                 new SlashCommandHint("/skill reload", "/skill reload", "重新扫描 skill 目录"),
                 new SlashCommandHint("/better-harness", "/better-harness", "审查当前项目的 AI 编码工作流"),
                 new SlashCommandHint("/better-harness quick", "/better-harness quick", "快速生成 Better Harness 报告"),
@@ -2114,6 +2170,8 @@ public class Main {
                 new SlashCommandHint("/eval", "/eval", "运行评测 suite（默认 paicli-smoke-v0.1）"),
                 new SlashCommandHint("/eval ", "/eval [--suite <suite.json>] [--runs k]", "指定 suite / 采样次数运行评测"),
                 new SlashCommandHint("/export", "/export", "导出当前会话对话记录为 Markdown"),
+                new SlashCommandHint("/resume", "/resume", "列出当前项目可以恢复的历史会话"),
+                new SlashCommandHint("/resume ", "/resume <序号>", "恢复一次历史会话，接着之前的对话继续"),
                 new SlashCommandHint("/exit", "/exit", "退出 PaiCLI"),
                 new SlashCommandHint("/quit", "/quit", "退出 PaiCLI")
         );
@@ -2921,43 +2979,6 @@ public class Main {
                         + (metadata.targetUrl() == null ? "" : ", url=" + metadata.targetUrl()));
             }
         }
-        out.println();
-    }
-
-    /**
-     * /resume：列出可恢复的历史会话；带 id 时提示用启动参数恢复（进程内热切换尚未支持）。
-     */
-    private static void printResumeCommand(PrintStream out, Path historyDir, String payload) {
-        if (payload != null && !payload.isBlank() && !"list".equalsIgnoreCase(payload)) {
-            out.println("会话 " + payload + "：请用 `paicli --session " + payload
-                    + "` 重启恢复（当前进程内热切换尚未支持）。");
-            out.println();
-            return;
-        }
-        List<SessionCatalog.SessionSummary> sessions;
-        try {
-            sessions = SessionCatalog.discover(historyDir);
-        } catch (IOException e) {
-            out.println("读取历史会话失败: " + e.getMessage());
-            out.println();
-            return;
-        }
-        if (sessions.isEmpty()) {
-            out.println("没有可恢复的历史会话。");
-            out.println();
-            return;
-        }
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
-        out.println("可恢复的历史会话（最近活动在前）：");
-        for (SessionCatalog.SessionSummary session : sessions) {
-            String when = formatter.format(LocalDateTime.ofInstant(
-                    java.time.Instant.ofEpochMilli(session.lastActiveAt()),
-                    java.time.ZoneId.systemDefault()));
-            out.println("  " + session.sessionId() + "  " + when + "  "
-                    + session.messageCount() + " 条消息  "
-                    + (session.cwd() == null ? "?" : session.cwd()));
-        }
-        out.println("用 `paicli --continue` 恢复当前目录最近一次，或 `paicli --session <id>` 恢复指定会话。");
         out.println();
     }
 

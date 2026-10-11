@@ -10,7 +10,7 @@ Agent 能放心改代码的前提不是“永远不犯错”，而是“改坏�
 2. turn 结束后再保存一次快照，用于对比和审计。
 3. 用户可以恢复到最近某个 turn 的 pre-turn 状态。
 4. 快照仓库与用户项目 `.git` 完全隔离，不写用户提交历史。
-5. 快照与恢复链路同时覆盖 ReAct、Plan、Team、TUI。
+5. 快照与恢复流程同时覆盖 ReAct、Plan、Team、TUI。
 
 ## MVP 范围
 
@@ -174,10 +174,11 @@ revert_turn
 
 ```json
 {
-  "turn_offset": 1,
-  "reason": "刚才修改后测试失败，需要回到修改前"
+  "offset": 1
 }
 ```
+
+`offset` 可选，默认 1，表示最近一次任务开始前的快照。最初设计的参数是 `turn_offset` 和 `reason`，实现时只保留了 `offset` 一个。
 
 要求：
 

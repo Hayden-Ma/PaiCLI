@@ -179,12 +179,13 @@ final class PaiCliCompleter implements Completer {
                     option("logs ", "查看 MCP server stderr", "/mcp logs <name>"),
                     option("disable ", "禁用 MCP server", "/mcp disable <name>"),
                     option("enable ", "启用 MCP server", "/mcp enable <name>"),
+                    option("trust ", "确认并启动项目级 MCP server", "/mcp trust <name>"),
                     option("resources ", "查看 MCP resources", "/mcp resources <name>"),
                     option("prompts ", "查看 MCP prompts", "/mcp prompts <name>"));
             return true;
         }
         String sub = parts.length == 0 ? "" : parts[0].toLowerCase();
-        if (List.of("restart", "logs", "disable", "enable", "resources", "prompts").contains(sub)) {
+        if (List.of("restart", "logs", "disable", "enable", "trust", "resources", "prompts").contains(sub)) {
             String prefix = payload.endsWith(" ") ? "" : parts.length >= 2 ? parts[parts.length - 1] : "";
             addServerCandidates(candidates, prefix);
             return true;
@@ -204,11 +205,12 @@ final class PaiCliCompleter implements Completer {
                     option("show ", "查看 SKILL.md 全文"),
                     option("on ", "启用 skill"),
                     option("off ", "禁用 skill"),
+                    option("trust ", "信任项目级 skill"),
                     option("reload", "重新扫描 skill 目录"));
             return true;
         }
         String sub = parts.length == 0 ? "" : parts[0].toLowerCase();
-        if (List.of("show", "on", "off").contains(sub)) {
+        if (List.of("show", "on", "off", "trust").contains(sub)) {
             String prefix = payload.endsWith(" ") ? "" : parts.length >= 2 ? parts[parts.length - 1] : "";
             addSkillCandidates(candidates, prefix);
             return true;

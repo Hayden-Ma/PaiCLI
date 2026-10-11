@@ -39,6 +39,7 @@ final class CliCommandParser {
         MCP_LOGS,
         MCP_DISABLE,
         MCP_ENABLE,
+        MCP_TRUST,
         MCP_RESOURCES,
         MCP_PROMPTS,
         BROWSER,
@@ -49,6 +50,7 @@ final class CliCommandParser {
         SKILL_ON,
         SKILL_OFF,
         SKILL_RELOAD,
+        SKILL_TRUST,
         BETTER_HARNESS,
         EVAL_BENCH,
         CONFIG,
@@ -257,7 +259,7 @@ final class CliCommandParser {
         }
 
         if (trimmed.equalsIgnoreCase("/resume")) {
-            return new ParsedCommand(CommandType.RESUME, "list");
+            return new ParsedCommand(CommandType.RESUME, null);
         }
 
         if (trimmed.regionMatches(true, 0, "/resume ", 0, 8)) {
@@ -316,6 +318,10 @@ final class CliCommandParser {
             return new ParsedCommand(CommandType.SKILL_OFF, trimmed.substring(11).trim());
         }
 
+        if (trimmed.regionMatches(true, 0, "/skill trust ", 0, 13)) {
+            return new ParsedCommand(CommandType.SKILL_TRUST, trimmed.substring(13).trim());
+        }
+
         if (trimmed.equalsIgnoreCase("/export")) {
             return new ParsedCommand(CommandType.EXPORT, null);
         }
@@ -364,6 +370,10 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/mcp enable ", 0, 12)) {
             return new ParsedCommand(CommandType.MCP_ENABLE, trimmed.substring(12).trim());
+        }
+
+        if (trimmed.equalsIgnoreCase("/mcp trust") || trimmed.regionMatches(true, 0, "/mcp trust ", 0, 11)) {
+            return new ParsedCommand(CommandType.MCP_TRUST, trimmed.substring(10).trim());
         }
 
         if (trimmed.startsWith("/")) {

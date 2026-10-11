@@ -183,8 +183,7 @@ public class SubAgent {
     }
 
     /** load_skill 成功后，同一任务的下一次 LLM 请求前就把 Skill 正文追加进历史。 */
-    private void appendLoadedSkillMessage(List<ToolExecutionResult> toolResults) {
-        String skills = LoadedSkillMessages.from(toolResults, toolRegistry.getSkillRegistry());
+    private void appendLoadedSkillMessage(String skills) {
         if (!skills.isEmpty()) {
             appendConversationMessage(LlmClient.Message.user(skills), "skill_injection");
         }
@@ -340,8 +339,11 @@ public class SubAgent {
                     // 没有换行的 pending 内容会被 HITL 提示"跨过"导致标题错位。
                     streamRenderer.resetBetweenIterations();
 
-                    List<ToolExecutionResult> toolResults = executeToolCalls(
-                            response.toolCalls(), activeToolPolicy, toolExposure);
+                    LoadedSkillMessages.Injection skills = LoadedSkillMessages.prepare(
+                            executeToolCalls(response.toolCalls(), activeToolPolicy, toolExposure),
+                            toolRegistry.getSkillRegistry(),
+                            conversationHistory);
+                    List<ToolExecutionResult> toolResults = skills.results();
                     if (observation != null) observation.tools(budget.iteration(), toolResults);
                     for (ToolExecutionResult toolResult : toolResults) {
                         appendConversationMessage(
@@ -349,7 +351,7 @@ public class SubAgent {
                                 "tool_execution");
                     }
                     appendImageToolMessages(toolResults);
-                    appendLoadedSkillMessage(toolResults);
+                    appendLoadedSkillMessage(skills.message());
                     runawayGuard.observe(toolResults).ifPresent(reminder -> {
                         appendConversationMessage(LlmClient.Message.user(reminder), "runaway_reminder");
                         out.println(AnsiStyle.subtle("  ↻ [" + name + "] 检测到重复的工具调用，已提醒模型换个思路"));

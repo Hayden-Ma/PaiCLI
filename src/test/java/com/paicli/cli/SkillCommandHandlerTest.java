@@ -55,6 +55,26 @@ class SkillCommandHandlerTest {
     }
 
     @Test
+    void trustMarksProjectSkillAndSkipsUserInstalledOnes(@TempDir Path tempDir) throws IOException {
+        Path projectSkills = tempDir.resolve("project-skills");
+        Files.createDirectories(projectSkills.resolve("deploy"));
+        Files.writeString(projectSkills.resolve("deploy").resolve("SKILL.md"),
+                "---\nname: deploy\ndescription: 发布清单\n---\nbody\n");
+        Files.createDirectories(tempDir.resolve("user-skills").resolve("web-access"));
+        Files.writeString(tempDir.resolve("user-skills").resolve("web-access").resolve("SKILL.md"),
+                "---\nname: web-access\ndescription: 联网\n---\nbody\n");
+        SkillRegistry registry = new SkillRegistry(null, tempDir.resolve("user-skills"), projectSkills,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.reload();
+
+        assertTrue(SkillCommandHandler.list(registry).contains("project（未信任）"));
+        assertTrue(SkillCommandHandler.trust(registry, "web-access").contains("无需信任"));
+        assertTrue(SkillCommandHandler.trust(registry, "deploy").contains("已信任项目级 skill"));
+        assertTrue(SkillCommandHandler.list(registry).contains("project（已信任）"));
+        assertTrue(SkillCommandHandler.trust(registry, "deploy").contains("已信任"));
+    }
+
+    @Test
     void showReturnsErrorForMissingSkill(@TempDir Path tempDir) throws IOException {
         SkillRegistry registry = registryWith(tempDir);
         String out = SkillCommandHandler.show(registry, "nonexistent");

@@ -38,12 +38,14 @@ public class PromptAssembler {
         append(prompt, repository.loadRequired("personalities/calm.md"));
         append(prompt, applyVariables(repository.loadRequired(mode.resourcePath()), ctx));
         append(prompt, repository.loadRequired("approvals/" + approvalMode(ctx) + ".md"));
+        append(prompt, repository.loadRequired("context/context-management.md"));
+        append(prompt, repository.loadRequired("handoff.md"));
+        // 以下按稳定度从高到低排列，保证前缀缓存覆盖到尽量靠后：Skill 索引只在 /skill 启停或重载时变，
+        // 运行时日期按天变，Project Context 里的相关记忆随每条用户输入变化，必须放最后
+        append(prompt, dynamicSection("Skills", ctx.skillIndex()));
         append(prompt, runtimeContext());
         append(prompt, dynamicSection("Project Context", ctx.projectMemoryContext(), ctx.memoryContext(),
                 ctx.externalContext()));
-        append(prompt, dynamicSection("Skills", ctx.skillIndex()));
-        append(prompt, repository.loadRequired("context/context-management.md"));
-        append(prompt, repository.loadRequired("handoff.md"));
 
         String assembled = prompt.toString().trim();
         validateLanguageSection(assembled, "assembled prompt");

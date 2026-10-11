@@ -1,7 +1,7 @@
 ---
-title: 手搓一个 Java 版 Claude Code，先把 Agent 循环拆明白：工具调用、结果回传和防打转
+title: 手搓一个 Java 版 Claude Code，先把 Agent 循环拆明白：工具调用、结果回传和重复检测
 shortTitle: Agent 循环与工具注册
-description: PaiCLI 第 1 期，按最新源码拆解 Java Agent 的 ReAct 循环：工具如何注册给模型、流式工具调用如何拼接、工具结果如何安全交回模型、edit_file 如何容错，以及重复调用时如何提醒和兜底。
+description: PaiCLI 第 1 期，按最新源码拆解 Java Agent 的 ReAct 循环：工具如何注册给模型、流式工具调用如何拼接、工具结果如何安全交回模型、edit_file 如何容错，以及重复调用时如何提醒和强制收尾。
 keywords: ReAct, Tool Call, Agent 循环, 工具注册, PaiCLI
 tag:
   - Agent
@@ -354,7 +354,7 @@ static Result apply(String content, String oldText, String newText, boolean repl
 
 长上下文模型一次任务连着调用几十次工具很正常，写死 10 轮或者 50 轮，复杂一点的任务可能还没做完就被截断了。所以 PaiCLI 默认让模型自己决定什么时候停。
 
-不设上限，就得防着模型原地打转。同一个命令跑了一遍又一遍，同一个网页抓一次失败一次，PaiCLI 用两道关卡处理这种情况。
+不设上限，就得防着模型一直重复同样的操作。同一个命令跑了一遍又一遍，同一个网页抓一次失败一次，PaiCLI 用两道关卡处理这种情况。
 
 ### 先提醒
 
@@ -395,7 +395,7 @@ private boolean advance(Map<String, Integer> previous, Map<String, Integer> next
 
 ![](https://cdn.paicoding.com/stutymore/build-agent-from-scratch-20260925101157-6a0870b0.png)
 
-### 兜底收尾
+### 强制收尾
 
 模型被提醒之后，还原样重复到连续 5 轮，程序就不再给它机会了。它会关掉所有工具，再请求模型一次，让它基于已有结果收尾。
 
@@ -409,7 +409,7 @@ return "执行预算安全阀已触发：" + describeExit(reason) + "。\n"
 
 这次请求传的是空的工具列表，模型想调也调不了。返回的结果前面会加上“⚠️ 部分完成”，用户一眼就知道任务没有全部做完，也能看到卡在了哪里。
 
-兜底的窗口是 5，提醒的阈值是 3，窗口必须比阈值大，否则提醒还没发出去循环就停了。测试里有一个用例专门守着这个大小关系。
+强制收尾的窗口是 5，提醒的阈值是 3，窗口必须比阈值大，否则提醒还没发出去循环就停了。测试里有一个用例专门守着这个大小关系。
 
 除了重复检测，Token 预算和轮数上限也能触发同样的收尾。它们默认都不限制，CI 或者微信这类无人值守的场景，可以用 `-Dpaicli.react.token.budget` 和 `-Dpaicli.react.hard.max.iterations` 显式打开。
 

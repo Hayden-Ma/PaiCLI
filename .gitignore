@@ -28,3 +28,6 @@ temp_articles.json
 
 # 评测产物
 benchmarks/results/
+
+# 教程离线存档（HTML + _files 资源，体积大，仅本地保留）
+docs/study/

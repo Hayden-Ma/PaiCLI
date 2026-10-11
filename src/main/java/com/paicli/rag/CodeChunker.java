@@ -1,8 +1,5 @@
 package com.paicli.rag;
 
-import com.github.javaparser.JavaParser;
-import com.github.javaparser.ParserConfiguration;
-import com.github.javaparser.ParseResult;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
@@ -12,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * 代码分块器：将代码文件切分为适合 Embedding 的粒度
@@ -21,10 +19,6 @@ import java.util.List;
  * - Java 文件：类级别 + 方法级别分块（大方法单独成块）
  */
 public class CodeChunker {
-    // 设置 Java 17 语言级别，支持 text block（"""）、record、sealed class 等语法
-    private final JavaParser parser = new JavaParser(
-            new ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17));
-
     // 单个 chunk 最大字符数（中文约 1 字符 = 2~3 token，2000 字符 ≈ 4000~6000 token，安全适配 8192 上下文）
     private static final int MAX_CHUNK_CHARS = 2000;
 
@@ -41,7 +35,18 @@ public class CodeChunker {
         }
 
         // Java 文件：AST 解析分块
-        return chunkJavaFile(filePath, content);
+        return chunkJavaFile(filePath, content, JavaSourceParser.parse(content));
+    }
+
+    /**
+     * 对已读入内存的文件分块；Java 文件传入已经解析好的语法树（解析失败传 empty），
+     * 索引时和 {@link CodeAnalyzer} 共用同一次解析。
+     */
+    List<CodeChunk> chunk(Path filePath, String content, Optional<CompilationUnit> javaUnit) {
+        if (!filePath.toString().endsWith(".java")) {
+            return chunkLargeText(filePath.toString(), content);
+        }
+        return chunkJavaFile(filePath, content, javaUnit);
     }
 
     /**
@@ -77,16 +82,14 @@ public class CodeChunker {
         return chunks;
     }
 
-    private List<CodeChunk> chunkJavaFile(Path filePath, String content) {
+    private List<CodeChunk> chunkJavaFile(Path filePath, String content, Optional<CompilationUnit> javaUnit) {
         List<CodeChunk> chunks = new ArrayList<>();
-        ParseResult<CompilationUnit> result = parser.parse(content);
-
-        if (!result.isSuccessful() || result.getResult().isEmpty()) {
+        if (javaUnit.isEmpty()) {
             // 解析失败则回退到按大小分段
             return chunkLargeText(filePath.toString(), content);
         }
 
-        CompilationUnit cu = result.getResult().get();
+        CompilationUnit cu = javaUnit.get();
 
         // 遍历所有类/接口声明
         cu.findAll(ClassOrInterfaceDeclaration.class).forEach(clazz -> {

@@ -26,7 +26,14 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
-            <version>2.16.0</version>
+            <version>2.18.3</version>
+        </dependency>
+
+        <!-- 工具参数按 JSON Schema 校验；1.5.x 基于 Jackson 2.18，上面的 Jackson 版本要和它对齐 -->
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>json-schema-validator</artifactId>
+            <version>1.5.9</version>
         </dependency>
 
         <!-- Jackson JDK8 类型支持（Optional 字段反序列化） -->
